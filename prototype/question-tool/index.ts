@@ -163,7 +163,7 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 	}
 
 	function updatePendingIndicator(ctx: ExtensionContext): void {
-		if (!active) {
+		if (!active || dialogOpen) {
 			ctx.ui.setStatus(INDICATOR_KEY, undefined);
 			ctx.ui.setWidget(INDICATOR_KEY, undefined);
 			return;
@@ -222,6 +222,7 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 
 		const request = active.request;
 		dialogOpen = true;
+		updatePendingIndicator(ctx);
 		try {
 			const responses = await ctx.ui.custom<QuestionResponse[] | null>((tui, theme, _keybindings, done) => {
 				const initialState = active?.request.id === request.id ? active : undefined;
@@ -579,6 +580,7 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 			}
 		} finally {
 			dialogOpen = false;
+			updatePendingIndicator(ctx);
 		}
 	}
 
@@ -689,31 +691,35 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 		},
 
 		renderResult(result, _options, theme, context) {
-			const state = stateByToolCallId.get(context.toolCallId);
-			if (state?.status === "responded") {
-				const summary =
-					state.responses.length === 1
-						? `✓ Answered: ${state.responses[0].answer}`
-						: `✓ ${state.responses.length} Responses submitted`;
-				return new Text(
-					theme.fg("success", summary) + `  ${theme.fg("dim", keyHint("app.tools.expand", "for full details"))}`,
-					0,
-					0,
-				);
+			function currentText(): string {
+				const state = stateByToolCallId.get(context.toolCallId);
+				if (state?.status === "responded") {
+					const summary =
+						state.responses.length === 1
+							? `✓ Answered: ${state.responses[0].answer}`
+							: `✓ ${state.responses.length} Responses submitted`;
+					return (
+						theme.fg("success", summary) +
+						`  ${theme.fg("dim", keyHint("app.tools.expand", "for full details"))}`
+					);
+				}
+				if (state?.status === "interrupted") {
+					return theme.fg("warning", "↪ Left unanswered") + theme.fg("muted", " — continued normally");
+				}
+				const details = result.details as QuestionToolDetails | undefined;
+				if (state?.status === "pending" || details?.status === "pending") {
+					return theme.fg("warning", "⏸ Waiting for your response") + theme.fg("dim", "  Alt+Q or /q reopens");
+				}
+				const text = result.content.find((part) => part.type === "text");
+				return theme.fg("error", text?.text ?? "Question Tool error");
 			}
-			if (state?.status === "interrupted") {
-				return new Text(theme.fg("warning", "↪ Left unanswered") + theme.fg("muted", " — continued normally"), 0, 0);
-			}
-			const details = result.details as QuestionToolDetails | undefined;
-			if (state?.status === "pending" || details?.status === "pending") {
-				return new Text(
-					theme.fg("warning", "⏸ Waiting for your response") + theme.fg("dim", "  Alt+Q or /q reopens"),
-					0,
-					0,
-				);
-			}
-			const text = result.content.find((part) => part.type === "text");
-			return new Text(theme.fg("error", text?.text ?? "Question Tool error"), 0, 0);
+
+			return {
+				render(width: number) {
+					return new Text(currentText(), 0, 0).render(width);
+				},
+				invalidate() {},
+			};
 		},
 	});
 
