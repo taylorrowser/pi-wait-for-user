@@ -6,17 +6,8 @@
  * Pi's proposed durable deferred-tool-call primitive.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-	Container,
-	Editor,
-	type EditorTheme,
-	Key,
-	matchesKey,
-	Text,
-	visibleWidth,
-	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+import { keyHint, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Input, Key, matchesKey, Text, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const STATE_ENTRY = "question-tool-prototype-state";
@@ -28,36 +19,58 @@ interface QuestionOption {
 	description?: string;
 }
 
+interface QuestionDefinition {
+	id: string;
+	label: string;
+	question: string;
+	options: QuestionOption[];
+}
+
 interface InteractionRequest {
 	id: string;
 	toolCallId: string;
-	question: string;
-	options: QuestionOption[];
+	questions: QuestionDefinition[];
 	createdAt: string;
 }
 
-type StateRecord =
-	| { version: 1; status: "pending"; request: InteractionRequest }
-	| {
-			version: 1;
-			status: "responded";
-			request: InteractionRequest;
-			answer: string;
-			wasCustom: boolean;
-			selectedIndex?: number;
-	  }
-	| { version: 1; status: "interrupted"; request: InteractionRequest };
+interface QuestionDraft {
+	selectedChoice?: number;
+	customText: string;
+}
+
+interface QuestionResponse {
+	questionId: string;
+	answer: string;
+	wasCustom: boolean;
+	selectedIndex?: number;
+}
+
+interface PendingState {
+	version: 1;
+	status: "pending";
+	request: InteractionRequest;
+	drafts: Record<string, QuestionDraft>;
+}
+
+interface RespondedState {
+	version: 1;
+	status: "responded";
+	request: InteractionRequest;
+	responses: QuestionResponse[];
+}
+
+interface InterruptedState {
+	version: 1;
+	status: "interrupted";
+	request: InteractionRequest;
+}
+
+type StateRecord = PendingState | RespondedState | InterruptedState;
 
 interface QuestionToolDetails {
 	status: "error" | "pending";
 	request?: InteractionRequest;
 	message?: string;
-}
-
-interface DialogResult {
-	answer: string;
-	wasCustom: boolean;
-	selectedIndex?: number;
 }
 
 const OptionSchema = Type.Object({
@@ -66,27 +79,87 @@ const OptionSchema = Type.Object({
 });
 
 const QuestionSchema = Type.Object({
-	question: Type.String({ description: "The question to ask the human" }),
+	id: Type.String({ description: "Stable identifier unique within this question set" }),
+	label: Type.Optional(Type.String({ description: "Short progress label, such as Scope or Priority" })),
+	question: Type.String({ description: "The full question shown to the human" }),
 	options: Type.Array(OptionSchema, { minItems: 1, description: "Supplied choices" }),
 });
 
+const QuestionSetSchema = Type.Object({
+	questions: Type.Array(QuestionSchema, {
+		minItems: 1,
+		description: "One or more required questions submitted together as one Interaction Request",
+	}),
+});
+
+function cloneDrafts(drafts: Record<string, QuestionDraft>): Record<string, QuestionDraft> {
+	return Object.fromEntries(Object.entries(drafts).map(([id, draft]) => [id, { ...draft }]));
+}
+
+function responseFor(
+	question: QuestionDefinition,
+	draft: QuestionDraft | undefined,
+): QuestionResponse | undefined {
+	if (!draft || draft.selectedChoice === undefined) return undefined;
+	if (draft.selectedChoice === question.options.length) {
+		const answer = draft.customText.trim();
+		if (!answer) return undefined;
+		return { questionId: question.id, answer, wasCustom: true };
+	}
+	const option = question.options[draft.selectedChoice];
+	if (!option) return undefined;
+	return {
+		questionId: question.id,
+		answer: option.label,
+		wasCustom: false,
+		selectedIndex: draft.selectedChoice + 1,
+	};
+}
+
+function allResponses(state: PendingState): QuestionResponse[] | undefined {
+	const responses: QuestionResponse[] = [];
+	for (const question of state.request.questions) {
+		const response = responseFor(question, state.drafts[question.id]);
+		if (!response) return undefined;
+		responses.push(response);
+	}
+	return responses;
+}
+
+function isPrintableInput(data: string): boolean {
+	if (data.startsWith("\u001b")) return false;
+	return [...data].some((character) => character >= " ");
+}
+
 export default function questionToolPrototype(pi: ExtensionAPI) {
-	let active: InteractionRequest | undefined;
+	let active: PendingState | undefined;
 	let dialogOpen = false;
 	let interruptionForNextTurn: InteractionRequest | undefined;
+	const stateByToolCallId = new Map<string, StateRecord>();
 
 	function appendState(record: StateRecord): void {
+		stateByToolCallId.set(record.request.toolCallId, record);
 		pi.appendEntry(STATE_ENTRY, record);
 	}
 
 	function restoreState(ctx: ExtensionContext): void {
 		active = undefined;
+		stateByToolCallId.clear();
 		for (const entry of ctx.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== STATE_ENTRY) continue;
 			const record = entry.data as StateRecord | undefined;
 			if (record?.version !== 1) continue;
-			active = record.status === "pending" ? record.request : undefined;
+			stateByToolCallId.set(record.request.toolCallId, record);
 		}
+		for (const record of stateByToolCallId.values()) {
+			if (record.status === "pending") active = record;
+		}
+	}
+
+	function requestSummary(request: InteractionRequest): string {
+		return request.questions.length === 1
+			? request.questions[0].question
+			: `${request.questions.length} questions need Responses`;
 	}
 
 	function updatePendingIndicator(ctx: ExtensionContext): void {
@@ -97,42 +170,43 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 		}
 
 		ctx.ui.setStatus(INDICATOR_KEY, ctx.ui.theme.fg("warning", "⏸ waiting for your response"));
-		const request = active;
+		const request = active.request;
 		ctx.ui.setWidget(INDICATOR_KEY, (_tui, theme) => {
 			const text = [
-				theme.fg("warning", theme.bold("⏸ Waiting for you")) + theme.fg("muted", `  ${request.question}`),
+				theme.fg("warning", theme.bold("⏸ Waiting for you")) +
+					theme.fg("muted", `  ${requestSummary(request)}`),
 				theme.fg(
 					"dim",
-					"  /question reopens • Esc only dismisses • sending a normal message leaves it unanswered",
+					"  Alt+Q or /q reopens • Esc only dismisses • a normal message leaves it unanswered",
 				),
 			].join("\n");
 			return new Text(text, 0, 0);
 		});
 	}
 
-	function finishWithResponse(ctx: ExtensionContext, request: InteractionRequest, result: DialogResult): void {
-		if (active?.id !== request.id) return;
+	function finishWithResponse(
+		ctx: ExtensionContext,
+		request: InteractionRequest,
+		responses: QuestionResponse[],
+	): void {
+		if (active?.request.id !== request.id) return;
 
-		appendState({
-			version: 1,
-			status: "responded",
-			request,
-			answer: result.answer,
-			wasCustom: result.wasCustom,
-			selectedIndex: result.selectedIndex,
-		});
+		const settled: RespondedState = { version: 1, status: "responded", request, responses };
+		appendState(settled);
 		active = undefined;
 		updatePendingIndicator(ctx);
 
-		const answerDescription = result.wasCustom
-			? `The human wrote: ${result.answer}`
-			: `The human selected choice ${result.selectedIndex}: ${result.answer}`;
+		const responseLines = responses.map((response) => {
+			const question = request.questions.find((candidate) => candidate.id === response.questionId);
+			const kind = response.wasCustom ? "wrote" : `selected choice ${response.selectedIndex}`;
+			return `${question?.question ?? response.questionId}\n${kind}: ${response.answer}`;
+		});
 		pi.sendMessage(
 			{
 				customType: RESPONSE_MESSAGE,
-				content: `Interaction Request ${request.id} received a Response.\nQuestion: ${request.question}\n${answerDescription}`,
-				display: true,
-				details: { requestId: request.id, ...result },
+				content: `Interaction Request ${request.id} received its complete Response set.\n\n${responseLines.join("\n\n")}`,
+				display: false,
+				details: { requestId: request.id, responses },
 			},
 			{ triggerTurn: true },
 		);
@@ -146,143 +220,361 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 		}
 		if (dialogOpen) return;
 
-		const request = active;
+		const request = active.request;
 		dialogOpen = true;
 		try {
-			const result = await ctx.ui.custom<DialogResult | null>((tui, theme, _keybindings, done) => {
-				const choices = [...request.options, { label: "Type a custom answer…", isCustom: true }];
+			const responses = await ctx.ui.custom<QuestionResponse[] | null>((tui, theme, _keybindings, done) => {
+				const initialState = active?.request.id === request.id ? active : undefined;
+				const firstUnanswered = initialState
+					? request.questions.findIndex((question) => !responseFor(question, initialState.drafts[question.id]))
+					: 0;
+				let currentQuestionIndex = Math.max(0, firstUnanswered);
+				let onReview = request.questions.length > 1 && Boolean(initialState && allResponses(initialState));
+				let editingCustom = false;
 				let choiceIndex = 0;
-				let editing = false;
 				let cachedLines: string[] | undefined;
+				const customInput = new Input();
 
-				const editorTheme: EditorTheme = {
-					borderColor: (text) => theme.fg("accent", text),
-					selectList: {
-						selectedPrefix: (text) => theme.fg("accent", text),
-						selectedText: (text) => theme.fg("accent", text),
-						description: (text) => theme.fg("muted", text),
-						scrollInfo: (text) => theme.fg("dim", text),
-						noMatch: (text) => theme.fg("warning", text),
-					},
-				};
-				const editor = new Editor(tui, editorTheme);
+				function pending(): PendingState | undefined {
+					return active?.request.id === request.id ? active : undefined;
+				}
+
+				function currentQuestion(): QuestionDefinition {
+					return request.questions[currentQuestionIndex];
+				}
+
+				function currentDraft(): QuestionDraft {
+					const state = pending();
+					if (!state) return { customText: "" };
+					return state.drafts[currentQuestion().id] ?? { customText: "" };
+				}
 
 				function refresh(): void {
 					cachedLines = undefined;
 					tui.requestRender();
 				}
 
-				editor.onSubmit = (value) => {
+				function persistDraft(patch: Partial<QuestionDraft>): void {
+					const state = pending();
+					if (!state) return;
+					const question = currentQuestion();
+					const next: PendingState = {
+						...state,
+						drafts: cloneDrafts(state.drafts),
+					};
+					next.drafts[question.id] = { ...currentDraft(), ...patch };
+					active = next;
+					appendState(next);
+					updatePendingIndicator(ctx);
+				}
+
+				function syncQuestion(): void {
+					const draft = currentDraft();
+					choiceIndex = draft.selectedChoice ?? 0;
+					customInput.setValue(draft.customText);
+					editingCustom = false;
+					refresh();
+				}
+
+				function moveToQuestion(index: number): void {
+					currentQuestionIndex = Math.max(0, Math.min(request.questions.length - 1, index));
+					onReview = false;
+					syncQuestion();
+				}
+
+				function showReview(): void {
+					onReview = true;
+					editingCustom = false;
+					refresh();
+				}
+
+				function advance(): void {
+					const state = pending();
+					if (!state) return;
+					const complete = allResponses(state);
+					if (request.questions.length === 1 && complete) {
+						done(complete);
+						return;
+					}
+					if (currentQuestionIndex < request.questions.length - 1) {
+						moveToQuestion(currentQuestionIndex + 1);
+					} else {
+						showReview();
+					}
+				}
+
+				function enterCustomEditing(initialInput?: string): void {
+					const question = currentQuestion();
+					choiceIndex = question.options.length;
+					editingCustom = true;
+					persistDraft({ selectedChoice: choiceIndex });
+					customInput.setValue(currentDraft().customText);
+					if (initialInput) {
+						customInput.handleInput(initialInput);
+						persistDraft({ customText: customInput.getValue(), selectedChoice: choiceIndex });
+					}
+					refresh();
+				}
+
+				customInput.onSubmit = (value) => {
 					const answer = value.trim();
 					if (!answer) return;
-					done({ answer, wasCustom: true });
+					customInput.setValue(answer);
+					persistDraft({ customText: answer, selectedChoice: currentQuestion().options.length });
+					advance();
 				};
 
+				function handleReviewInput(data: string): void {
+					if (matchesKey(data, Key.left) || matchesKey(data, Key.shift("tab"))) {
+						moveToQuestion(request.questions.length - 1);
+						return;
+					}
+					if (matchesKey(data, Key.tab)) {
+						moveToQuestion(0);
+						return;
+					}
+					if (matchesKey(data, Key.enter)) {
+						const state = pending();
+						const complete = state ? allResponses(state) : undefined;
+						if (complete) done(complete);
+						return;
+					}
+					if (matchesKey(data, Key.escape)) done(null);
+				}
+
 				function handleInput(data: string): void {
-					if (editing) {
+					if (onReview) {
+						handleReviewInput(data);
+						return;
+					}
+
+					if (editingCustom) {
 						if (matchesKey(data, Key.escape)) {
-							editing = false;
-							editor.setText("");
+							editingCustom = false;
 							refresh();
 							return;
 						}
-						editor.handleInput(data);
+						if (matchesKey(data, Key.tab)) {
+							if (currentQuestionIndex === request.questions.length - 1) showReview();
+							else moveToQuestion(currentQuestionIndex + 1);
+							return;
+						}
+						if (matchesKey(data, Key.shift("tab"))) {
+							moveToQuestion(currentQuestionIndex - 1);
+							return;
+						}
+						const before = customInput.getValue();
+						customInput.handleInput(data);
+						const after = customInput.getValue();
+						if (after !== before) persistDraft({ customText: after, selectedChoice: currentQuestion().options.length });
 						refresh();
 						return;
 					}
 
+					if (matchesKey(data, Key.left)) {
+						if (currentQuestionIndex > 0) moveToQuestion(currentQuestionIndex - 1);
+						return;
+					}
+					if (matchesKey(data, Key.right)) {
+						if (currentQuestionIndex < request.questions.length - 1) {
+							moveToQuestion(currentQuestionIndex + 1);
+						} else if (request.questions.length > 1) {
+							showReview();
+						}
+						return;
+					}
+					if (matchesKey(data, Key.tab)) {
+						if (currentQuestionIndex < request.questions.length - 1) moveToQuestion(currentQuestionIndex + 1);
+						else if (request.questions.length > 1) showReview();
+						return;
+					}
+					if (matchesKey(data, Key.shift("tab"))) {
+						if (currentQuestionIndex > 0) moveToQuestion(currentQuestionIndex - 1);
+						return;
+					}
+
+					const question = currentQuestion();
+					const customIndex = question.options.length;
 					if (matchesKey(data, Key.up)) {
 						choiceIndex = Math.max(0, choiceIndex - 1);
 						refresh();
 						return;
 					}
 					if (matchesKey(data, Key.down)) {
-						choiceIndex = Math.min(choices.length - 1, choiceIndex + 1);
-						refresh();
+						const previous = choiceIndex;
+						choiceIndex = Math.min(customIndex, choiceIndex + 1);
+						if (choiceIndex === customIndex && previous !== customIndex) enterCustomEditing();
+						else refresh();
 						return;
 					}
 					if (matchesKey(data, Key.enter)) {
-						const choice = choices[choiceIndex];
-						if ("isCustom" in choice) {
-							editing = true;
-							refresh();
-							return;
+						if (choiceIndex === customIndex) {
+							const draft = currentDraft();
+							if (!draft.customText.trim()) {
+								enterCustomEditing();
+								return;
+							}
+							persistDraft({ selectedChoice: customIndex });
+						} else {
+							persistDraft({ selectedChoice: choiceIndex });
 						}
-						done({ answer: choice.label, wasCustom: false, selectedIndex: choiceIndex + 1 });
+						advance();
 						return;
 					}
-					if (matchesKey(data, Key.escape)) done(null);
+					if (matchesKey(data, Key.escape)) {
+						done(null);
+						return;
+					}
+					if (choiceIndex === customIndex && isPrintableInput(data)) enterCustomEditing(data);
+				}
+
+				function renderProgress(lines: string[], renderWidth: number): void {
+					if (request.questions.length === 1) return;
+					const state = pending();
+					const segments = request.questions.map((question, index) => {
+						const answered = state ? Boolean(responseFor(question, state.drafts[question.id])) : false;
+						const activeQuestion = !onReview && index === currentQuestionIndex;
+						const text = ` ${answered ? "●" : "○"} ${question.label} `;
+						return activeQuestion
+							? theme.bg("selectedBg", theme.fg("text", text))
+							: theme.fg(answered ? "success" : "muted", text);
+					});
+					const review = onReview
+						? theme.bg("selectedBg", theme.fg("text", " Review & Submit "))
+						: theme.fg("muted", " Review & Submit ");
+					lines.push(...wrapTextWithAnsi(` ${segments.join(" ")} ${review}`, renderWidth));
+					lines.push("");
+				}
+
+				function renderQuestion(lines: string[], renderWidth: number): void {
+					const question = currentQuestion();
+					const draft = currentDraft();
+					const customIndex = question.options.length;
+					lines.push(...wrapTextWithAnsi(` ${theme.fg("text", question.question)}`, renderWidth));
+					lines.push("");
+
+					for (let index = 0; index < question.options.length; index++) {
+						const option = question.options[index];
+						const cursor = index === choiceIndex;
+						const selected = draft.selectedChoice === index;
+						const prefix = `${cursor ? ">" : " "} ${selected ? "●" : "○"} ${index + 1}. `;
+						const prefixWidth = visibleWidth(prefix);
+						const label = theme.fg(cursor ? "accent" : "text", option.label);
+						const wrapped = wrapTextWithAnsi(label, Math.max(1, renderWidth - prefixWidth));
+						for (let line = 0; line < wrapped.length; line++) {
+							lines.push(`${line === 0 ? prefix : " ".repeat(prefixWidth)}${wrapped[line]}`);
+						}
+						if (option.description) {
+							lines.push(
+								...wrapTextWithAnsi(
+									`${" ".repeat(prefixWidth)}${theme.fg("muted", option.description)}`,
+									renderWidth,
+								),
+							);
+						}
+					}
+
+					const customCursor = choiceIndex === customIndex;
+					const customSelected = draft.selectedChoice === customIndex;
+					const customPrefix = `${customCursor ? ">" : " "} ${customSelected ? "●" : "○"} ${customIndex + 1}. `;
+					if (editingCustom) {
+						const label = theme.fg("accent", "Other: ");
+						const inputWidth = Math.max(1, renderWidth - visibleWidth(customPrefix) - visibleWidth("Other: "));
+						const inputLines = customInput.render(inputWidth);
+						lines.push(`${customPrefix}${label}${inputLines[0] ?? ""}`);
+					} else {
+						const customLabel = draft.customText
+							? `Other: ${draft.customText}`
+							: "Type a custom answer…";
+						lines.push(
+							...wrapTextWithAnsi(
+								`${customPrefix}${theme.fg(customCursor ? "accent" : "text", customLabel)}`,
+								renderWidth,
+							),
+						);
+					}
+				}
+
+				function renderReview(lines: string[], renderWidth: number): void {
+					const state = pending();
+					lines.push(` ${theme.fg("accent", theme.bold("Review Responses"))}`);
+					lines.push("");
+					for (let index = 0; index < request.questions.length; index++) {
+						const question = request.questions[index];
+						const draft = state?.drafts[question.id];
+						const response = responseFor(question, draft);
+						lines.push(
+							...wrapTextWithAnsi(
+								` ${theme.fg("muted", `${index + 1}. ${question.question}`)}\n   ${
+									response
+										? theme.fg("text", response.answer)
+										: theme.fg("warning", "Response required")
+								}`,
+								renderWidth,
+							),
+						);
+						if (draft?.customText && !response?.wasCustom) {
+							lines.push(
+								...wrapTextWithAnsi(
+									`   ${theme.fg("dim", `Retained custom draft: ${draft.customText}`)}`,
+									renderWidth,
+								),
+							);
+						}
+					}
+					lines.push("");
+					const complete = state ? allResponses(state) : undefined;
+					lines.push(
+						` ${
+							complete
+								? theme.fg("success", "Enter submits the complete Response set")
+								: theme.fg("warning", "Every question needs a Response before submission")
+						}`,
+					);
 				}
 
 				function render(width: number): string[] {
 					if (cachedLines) return cachedLines;
 					const lines: string[] = [];
 					const renderWidth = Math.max(1, width);
-
-					function addWrappedWithPrefix(prefix: string, text: string): void {
-						const prefixWidth = visibleWidth(prefix);
-						if (prefixWidth >= renderWidth) {
-							lines.push(...wrapTextWithAnsi(prefix + text, renderWidth));
-							return;
-						}
-						const wrapped = wrapTextWithAnsi(text, renderWidth - prefixWidth);
-						const continuationPrefix = " ".repeat(prefixWidth);
-						for (let index = 0; index < wrapped.length; index++) {
-							lines.push(`${index === 0 ? prefix : continuationPrefix}${wrapped[index]}`);
-						}
-					}
-
 					lines.push(theme.fg("accent", "─".repeat(renderWidth)));
-					addWrappedWithPrefix(" ", theme.fg("warning", "RESPONSE NEEDED"));
-					addWrappedWithPrefix(" ", theme.fg("text", request.question));
+					renderProgress(lines, renderWidth);
+					if (onReview) renderReview(lines, renderWidth);
+					else renderQuestion(lines, renderWidth);
 					lines.push("");
-
-					for (let index = 0; index < choices.length; index++) {
-						const choice = choices[index];
-						const selected = index === choiceIndex;
-						const prefix = selected ? theme.fg("accent", "> ") : "  ";
-						const label = `${index + 1}. ${choice.label}`;
-						addWrappedWithPrefix(prefix, theme.fg(selected ? "accent" : "text", label));
-						if ("description" in choice && choice.description) {
-							addWrappedWithPrefix("     ", theme.fg("muted", choice.description));
-						}
-					}
-
-					if (editing) {
-						lines.push("");
-						addWrappedWithPrefix(" ", theme.fg("muted", "Your answer:"));
-						for (const line of editor.render(Math.max(1, renderWidth - 2))) lines.push(` ${line}`);
-					}
-
-					lines.push("");
-					addWrappedWithPrefix(
-						" ",
-						theme.fg(
-							"dim",
-							editing
-								? "Enter submits • Esc returns to choices"
-								: "↑↓ navigate • Enter responds • Esc dismisses without answering",
-						),
-					);
+					const help = onReview
+						? "Enter submit • ←/Shift+Tab back • Esc dismiss"
+						: editingCustom
+							? "Type to edit • Enter save & next • Esc keep draft & leave editing • Tab next"
+							: "↑↓ choices • ←→ questions • Enter save & next • Esc dismiss";
+					lines.push(...wrapTextWithAnsi(` ${theme.fg("dim", help)}`, renderWidth));
 					lines.push(theme.fg("accent", "─".repeat(renderWidth)));
 					cachedLines = lines;
 					return lines;
 				}
 
+				syncQuestion();
 				return {
+					get focused() {
+						return customInput.focused;
+					},
+					set focused(value: boolean) {
+						customInput.focused = value;
+					},
 					render,
 					invalidate: () => {
 						cachedLines = undefined;
+						customInput.invalidate();
 					},
 					handleInput,
 				};
 			});
 
-			if (active?.id !== request.id) return;
-			if (result) {
-				finishWithResponse(ctx, request, result);
+			if (active?.request.id !== request.id) return;
+			if (responses) {
+				finishWithResponse(ctx, request, responses);
 			} else {
-				ctx.ui.notify("Dismissed. The Interaction Request is still waiting; use /question to reopen it.", "info");
+				ctx.ui.notify("Dismissed. The Interaction Request is still waiting; use Alt+Q or /q to reopen it.", "info");
 				updatePendingIndicator(ctx);
 			}
 		} finally {
@@ -294,13 +586,14 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 		name: "question",
 		label: "Question (prototype)",
 		description:
-			"Ask the human one blocking question with supplied choices and a custom-answer option. Call this tool alone. The Agent Thread must not continue until the later Response or Interruption.",
-		promptSnippet: "Ask the human a blocking multiple-choice question",
+			"Ask the human one blocking set of required multiple-choice questions with inline custom Responses. Call this tool alone. The Agent Thread must not continue until the later Response or Interruption.",
+		promptSnippet: "Ask the human one or more blocking multiple-choice questions",
 		promptGuidelines: [
 			"Call question alone in an assistant turn; do not issue sibling tool calls.",
+			"Group related questions into one question call and give each a unique id and short label.",
 			"After question reports Waiting State, stop autonomous work until its outcome arrives.",
 		],
-		parameters: QuestionSchema,
+		parameters: QuestionSetSchema,
 		executionMode: "sequential",
 
 		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
@@ -316,30 +609,46 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text" as const,
-							text: `Agent Thread is already in Waiting State for Interaction Request ${active.id}.`,
+							text: `Agent Thread is already in Waiting State for Interaction Request ${active.request.id}.`,
 						},
 					],
-					details: { status: "pending", request: active } satisfies QuestionToolDetails,
+					details: { status: "pending", request: active.request } satisfies QuestionToolDetails,
 					terminate: true,
 				};
 			}
 
+			const ids = new Set<string>();
+			for (const question of params.questions) {
+				if (ids.has(question.id)) {
+					return {
+						content: [{ type: "text" as const, text: `Question id must be unique: ${question.id}` }],
+						details: { status: "error", message: "Duplicate question id" } satisfies QuestionToolDetails,
+						terminate: true,
+					};
+				}
+				ids.add(question.id);
+			}
+
+			const questions: QuestionDefinition[] = params.questions.map((question, index) => ({
+				...question,
+				label: question.label?.trim() || `Q${index + 1}`,
+			}));
 			const request: InteractionRequest = {
 				id: `question:${ctx.sessionManager.getSessionId()}:${toolCallId}`,
 				toolCallId,
-				question: params.question,
-				options: params.options,
+				questions,
 				createdAt: new Date().toISOString(),
 			};
-			active = request;
-			appendState({ version: 1, status: "pending", request });
+			const drafts = Object.fromEntries(questions.map((question) => [question.id, { customText: "" }]));
+			active = { version: 1, status: "pending", request, drafts };
+			appendState(active);
 			updatePendingIndicator(ctx);
 
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: `WAITING_FOR_HUMAN ${request.id}. Stop now. A later message will carry its Response or Interruption.`,
+						text: `WAITING_FOR_HUMAN ${request.id}. Stop now. A later message will carry its complete Response set or Interruption.`,
 					},
 				],
 				details: { status: "pending", request } satisfies QuestionToolDetails,
@@ -347,20 +656,58 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 			};
 		},
 
-		renderCall(args, theme) {
-			return new Text(
-				theme.fg("toolTitle", theme.bold("question ")) + theme.fg("muted", args.question),
-				0,
-				0,
-			);
+		renderCall(args, theme, context) {
+			const questions = Array.isArray(args.questions) ? (args.questions as QuestionDefinition[]) : [];
+			const state = stateByToolCallId.get(context.toolCallId);
+			const title =
+				questions.length === 1
+					? questions[0]?.question || "Question"
+					: `${questions.length} questions`;
+			let text = theme.fg("toolTitle", theme.bold("question ")) + theme.fg("muted", title);
+			if (!context.expanded || questions.length === 0) return new Text(text, 0, 0);
+
+			for (let questionIndex = 0; questionIndex < questions.length; questionIndex++) {
+				const question = questions[questionIndex];
+				const settledResponse =
+					state?.status === "responded"
+						? state.responses.find((response) => response.questionId === question.id)
+						: undefined;
+				const pendingResponse =
+					state?.status === "pending" ? responseFor(question, state.drafts[question.id]) : undefined;
+				const response = settledResponse ?? pendingResponse;
+				text += `\n\n${theme.fg("text", `${questionIndex + 1}. ${question.question}`)}`;
+				for (let optionIndex = 0; optionIndex < question.options.length; optionIndex++) {
+					const option = question.options[optionIndex];
+					const selected = !response?.wasCustom && response?.selectedIndex === optionIndex + 1;
+					text += `\n   ${theme.fg(selected ? "success" : "dim", `${selected ? "●" : "○"} ${optionIndex + 1}. ${option.label}`)}`;
+					if (option.description) text += `\n      ${theme.fg("muted", option.description)}`;
+				}
+				const custom = response?.wasCustom ? response.answer : state?.status === "pending" ? state.drafts[question.id]?.customText : "";
+				text += `\n   ${theme.fg(response?.wasCustom ? "success" : "dim", `${response?.wasCustom ? "●" : "○"} ${question.options.length + 1}. Other${custom ? `: ${custom}` : ""}`)}`;
+			}
+			return new Text(text, 0, 0);
 		},
 
-		renderResult(result, _options, theme) {
-			const details = result.details as QuestionToolDetails | undefined;
-			if (details?.status === "pending") {
+		renderResult(result, _options, theme, context) {
+			const state = stateByToolCallId.get(context.toolCallId);
+			if (state?.status === "responded") {
+				const summary =
+					state.responses.length === 1
+						? `✓ Answered: ${state.responses[0].answer}`
+						: `✓ ${state.responses.length} Responses submitted`;
 				return new Text(
-					theme.fg("warning", "⏸ Waiting for your response") +
-						theme.fg("dim", "  Esc dismisses; /question reopens"),
+					theme.fg("success", summary) + `  ${theme.fg("dim", keyHint("app.tools.expand", "for full details"))}`,
+					0,
+					0,
+				);
+			}
+			if (state?.status === "interrupted") {
+				return new Text(theme.fg("warning", "↪ Left unanswered") + theme.fg("muted", " — continued normally"), 0, 0);
+			}
+			const details = result.details as QuestionToolDetails | undefined;
+			if (state?.status === "pending" || details?.status === "pending") {
+				return new Text(
+					theme.fg("warning", "⏸ Waiting for your response") + theme.fg("dim", "  Alt+Q or /q reopens"),
 					0,
 					0,
 				);
@@ -370,41 +717,18 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("question", {
+	pi.registerCommand("q", {
 		description: "Reopen this Agent Thread's active Interaction Request",
 		handler: async (_args, ctx) => {
 			await openQuestion(ctx);
 		},
 	});
 
-	pi.registerEntryRenderer(STATE_ENTRY, (entry, _options, theme) => {
-		const record = entry.data as StateRecord | undefined;
-		if (!record || record.status === "pending") return new Container();
-		if (record.status === "responded") {
-			const kind = record.wasCustom ? "wrote" : `selected ${record.selectedIndex}`;
-			return new Text(
-				theme.fg("success", "✓ Response submitted") + theme.fg("muted", ` (${kind}): ${record.answer}`),
-				0,
-				0,
-			);
-		}
-		return new Text(
-			theme.fg("warning", "↪ Left unanswered") +
-				theme.fg("muted", " — the human continued with a normal message"),
-			0,
-			0,
-		);
-	});
-
-	pi.registerMessageRenderer(RESPONSE_MESSAGE, (message, _options, theme) => {
-		const details = message.details as DialogResult | undefined;
-		if (!details) return new Text(String(message.content), 0, 0);
-		const prefix = details.wasCustom ? "wrote" : `selected ${details.selectedIndex}`;
-		return new Text(
-			theme.fg("success", "✓ Response") + theme.fg("muted", ` (${prefix}): `) + theme.fg("text", details.answer),
-			0,
-			0,
-		);
+	pi.registerShortcut("alt+q", {
+		description: "Reopen the active Interaction Request",
+		handler: async (ctx) => {
+			await openQuestion(ctx);
+		},
 	});
 
 	pi.on("session_start", (_event, ctx) => {
@@ -420,7 +744,7 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 	pi.on("input", (event, ctx) => {
 		if (!active || event.source === "extension") return { action: "continue" as const };
 
-		const request = active;
+		const request = active.request;
 		appendState({ version: 1, status: "interrupted", request });
 		active = undefined;
 		interruptionForNextTurn = request;
@@ -435,7 +759,7 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 		return {
 			message: {
 				customType: "question-tool-prototype-interruption",
-				content: `Interaction Request ${request.id} ended with an Interruption: the human continued the Agent Thread without providing a Response. Do not treat the new user message as an answer to this request.`,
+				content: `Interaction Request ${request.id} ended with an Interruption: the human continued the Agent Thread without providing its complete Response set. Do not treat the new user message as an answer to this request.`,
 				display: false,
 				details: { requestId: request.id },
 			},

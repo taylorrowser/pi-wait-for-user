@@ -12,21 +12,27 @@ This extension approximates waiting with `terminate: true`, a later custom messa
 
 Then ask Pi:
 
-> Use the question tool, by itself, to ask which deployment environment I prefer. Offer Development, Staging, and Production, with short descriptions.
+> Use the question tool, by itself, to ask two questions together: which deployment environment I prefer (Development, Staging, or Production, with short descriptions), and which rollout speed I prefer (Careful, Balanced, or Fast). Give each question a short label.
 
 ## Evaluation script
 
-1. **Supplied choice:** select one of the choices. It should submit immediately, clear the pending indicator, and let Pi continue.
-2. **Custom Response:** ask again, choose **Type a custom answer…**, type a value, and press Enter.
-3. **Dismiss/reopen:** ask again and press Esc. The Interaction Request must remain pending; the widget and footer indicator remain. Run `/question` to reopen it.
-4. **Interruption:** dismiss again, then send an ordinary message. The pending Interaction Request should become **Left unanswered** before Pi handles that message.
-5. **Reload approximation:** dismiss, exit Pi, run the command again with `--continue`, and confirm that the originating Agent Thread reopens its pending Interaction Request.
+1. **Question navigation:** use Left/Right or Tab/Shift+Tab to move through questions. Enter saves a supplied choice and advances.
+2. **Inline custom Response:** move down onto **Type a custom answer…** and type directly in that row. Esc leaves editing without clearing the draft; Enter saves and advances.
+3. **Draft retention:** return to a question, select a supplied choice, then revisit its custom row. The custom draft should still be present until explicitly deleted or the set is submitted.
+4. **Review and submit:** answer every question, review the complete set, go back to revise one, then explicitly submit it.
+5. **Dismiss/reopen:** press Esc outside custom editing. The Interaction Request must remain pending; the widget and footer indicator remain. Press Alt+Q or run `/q` to reopen it.
+6. **Settled history:** after submission, the tool row must no longer say it is waiting. Press Ctrl+O to reveal every question, supplied choice, description, and Response.
+7. **Interruption:** dismiss a new request, then send an ordinary message. The pending Interaction Request should become **Left unanswered** before Pi handles that message.
+8. **Reload approximation:** dismiss, exit Pi, run the command again with `--continue`, and confirm that the originating Agent Thread reopens its pending Interaction Request and retained drafts.
 
 ## Proposed behavior embodied here
 
 - The interaction opens automatically only after the agent settles.
-- Supplied choices submit on Enter; a final custom-answer row opens an inline editor.
-- Esc in the editor returns to choices. Esc on the choices dismisses only the UI; it has no lifecycle effect.
-- A compact widget and footer status make Waiting State visible after dismissal and advertise `/question` for reopening.
+- One Interaction Request can contain one or several required questions; a multi-question set has an explicit Review & Submit step.
+- Supplied choices save on Enter. The custom-answer row supports direct inline typing and retains its draft across navigation and choice changes.
+- Navigation mode uses arrows between choices/questions. Custom-editing mode gives arrows to the text cursor; Esc preserves the draft and returns to navigation mode.
+- Esc in navigation mode dismisses only the UI; it has no lifecycle effect. Alt+Q and `/q` reopen it.
+- A compact widget and footer status keep Waiting State visible after dismissal.
 - A normal user message atomically records an Interruption before the next turn. It is not interpreted as a Response.
+- Settled tool history shows Answered or Left unanswered rather than stale Waiting State; Ctrl+O expands full details.
 - The current Agent Thread has at most one active blocking Interaction Request.
