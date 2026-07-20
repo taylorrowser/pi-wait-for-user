@@ -29,7 +29,7 @@ Then ask Pi:
 
 - The interaction opens automatically only after the agent settles.
 - One Interaction Request can contain one or several required questions; a multi-question set has an explicit Review & Submit step.
-- Supplied choices save on Enter. The custom-answer row supports direct inline typing and retains its draft across navigation and choice changes.
+- Supplied choices save on Enter. Exactly one built-in custom-answer row supports direct inline typing and retains its draft across navigation and choice changes; model-supplied custom placeholders are folded into it.
 - Navigation mode uses arrows between choices/questions. Custom-editing mode gives arrows to the text cursor; Esc preserves the draft and returns to navigation mode.
 - Esc in navigation mode dismisses only the UI; it has no lifecycle effect. Alt+Q and `/q` reopen it.
 - A compact widget and footer status keep Waiting State visible after dismissal.

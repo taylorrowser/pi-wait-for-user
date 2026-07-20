@@ -74,7 +74,9 @@ interface QuestionToolDetails {
 }
 
 const OptionSchema = Type.Object({
-	label: Type.String({ description: "Display label for this supplied choice" }),
+	label: Type.String({
+		description: "Display label for one concrete supplied choice; never add Other, Custom, or a text-entry placeholder",
+	}),
 	description: Type.Optional(Type.String({ description: "Optional detail shown beneath the choice" })),
 });
 
@@ -82,7 +84,10 @@ const QuestionSchema = Type.Object({
 	id: Type.String({ description: "Stable identifier unique within this question set" }),
 	label: Type.Optional(Type.String({ description: "Short progress label, such as Scope or Priority" })),
 	question: Type.String({ description: "The full question shown to the human" }),
-	options: Type.Array(OptionSchema, { minItems: 1, description: "Supplied choices" }),
+	options: Type.Array(OptionSchema, {
+		minItems: 1,
+		description: "Concrete supplied choices only; the UI always adds its own inline custom-answer row",
+	}),
 });
 
 const QuestionSetSchema = Type.Object({
@@ -129,6 +134,15 @@ function allResponses(state: PendingState): QuestionResponse[] | undefined {
 function isPrintableInput(data: string): boolean {
 	if (data.startsWith("\u001b")) return false;
 	return [...data].some((character) => character >= " ");
+}
+
+function isCustomAnswerPlaceholder(option: QuestionOption): boolean {
+	const label = option.label.trim().toLowerCase().replace(/[.…:]+$/u, "");
+	return (
+		/^(other|custom|custom answer|something else)$/u.test(label) ||
+		/\bplease specify\b/u.test(label) ||
+		/^(type|write|enter)\b.*\b(answer|response|something)\b/u.test(label)
+	);
 }
 
 export default function questionToolPrototype(pi: ExtensionAPI) {
@@ -572,12 +586,7 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 			});
 
 			if (active?.request.id !== request.id) return;
-			if (responses) {
-				finishWithResponse(ctx, request, responses);
-			} else {
-				ctx.ui.notify("Dismissed. The Interaction Request is still waiting; use Alt+Q or /q to reopen it.", "info");
-				updatePendingIndicator(ctx);
-			}
+			if (responses) finishWithResponse(ctx, request, responses);
 		} finally {
 			dialogOpen = false;
 			updatePendingIndicator(ctx);
@@ -593,6 +602,7 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Call question alone in an assistant turn; do not issue sibling tool calls.",
 			"Group related questions into one question call and give each a unique id and short label.",
+			"Give question only concrete supplied choices; never add Other, Custom, free-text, or please-specify choices because question always provides one inline custom-answer row.",
 			"After question reports Waiting State, stop autonomous work until its outcome arrives.",
 		],
 		parameters: QuestionSetSchema,
@@ -620,7 +630,9 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 			}
 
 			const ids = new Set<string>();
-			for (const question of params.questions) {
+			const questions: QuestionDefinition[] = [];
+			for (let index = 0; index < params.questions.length; index++) {
+				const question = params.questions[index];
 				if (ids.has(question.id)) {
 					return {
 						content: [{ type: "text" as const, text: `Question id must be unique: ${question.id}` }],
@@ -629,12 +641,26 @@ export default function questionToolPrototype(pi: ExtensionAPI) {
 					};
 				}
 				ids.add(question.id);
-			}
 
-			const questions: QuestionDefinition[] = params.questions.map((question, index) => ({
-				...question,
-				label: question.label?.trim() || `Q${index + 1}`,
-			}));
+				const options = question.options.filter((option) => !isCustomAnswerPlaceholder(option));
+				if (options.length === 0) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Question ${question.id} must provide at least one concrete supplied choice; the custom-answer row is added automatically.`,
+							},
+						],
+						details: { status: "error", message: "No concrete supplied choices" } satisfies QuestionToolDetails,
+						terminate: true,
+					};
+				}
+				questions.push({
+					...question,
+					label: question.label?.trim() || `Q${index + 1}`,
+					options,
+				});
+			}
 			const request: InteractionRequest = {
 				id: `question:${ctx.sessionManager.getSessionId()}:${toolCallId}`,
 				toolCallId,
