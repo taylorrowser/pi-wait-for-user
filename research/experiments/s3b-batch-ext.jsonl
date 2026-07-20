@@ -1,0 +1,28 @@
+{"t":"2026-07-20T17:38:40.293Z","pid":17274,"ev":"evt:session_start","reason":"startup"}
+{"t":"2026-07-20T17:38:42.925Z","pid":17274,"ev":"evt:input","text":"In one single assistant message, make TWO parallel tool calls: yield_wait with question 'Pick a fruit' AND echo_note with note 'sibling'. Both calls must be in the same message.","source":"rpc"}
+{"t":"2026-07-20T17:38:42.926Z","pid":17274,"ev":"evt:agent_start"}
+{"t":"2026-07-20T17:38:42.926Z","pid":17274,"ev":"evt:turn_start"}
+{"t":"2026-07-20T17:38:42.926Z","pid":17274,"ev":"evt:message_start","role":"user"}
+{"t":"2026-07-20T17:38:42.927Z","pid":17274,"ev":"evt:message_end","role":"user"}
+{"t":"2026-07-20T17:38:43.748Z","pid":17274,"ev":"evt:message_start","role":"assistant"}
+{"t":"2026-07-20T17:38:47.142Z","pid":17274,"ev":"evt:message_end","role":"assistant"}
+{"t":"2026-07-20T17:38:47.143Z","pid":17274,"ev":"evt:tool_execution_start","toolName":"yield_wait","toolCallId":"call_SmzlciE6hR085tLcQKLkvFo0|fc_05a5ed2cb1e9ce38016a5e5d26872481948e5c97e0a532eb08"}
+{"t":"2026-07-20T17:38:47.144Z","pid":17274,"ev":"evt:tool_call"}
+{"t":"2026-07-20T17:38:47.144Z","pid":17274,"ev":"evt:tool_execution_start","toolName":"echo_note","toolCallId":"call_dppKOMALOQBAXciJaNkDBPcU|fc_05a5ed2cb1e9ce38016a5e5d268740819482d5f7b0c5a4bcd8"}
+{"t":"2026-07-20T17:38:47.144Z","pid":17274,"ev":"evt:tool_call"}
+{"t":"2026-07-20T17:38:47.144Z","pid":17274,"ev":"yield_wait:execute","toolCallId":"call_SmzlciE6hR085tLcQKLkvFo0|fc_05a5ed2cb1e9ce38016a5e5d26872481948e5c97e0a532eb08","params":{"question":"Pick a fruit"}}
+{"t":"2026-07-20T17:38:47.145Z","pid":17274,"ev":"echo_note:execute","toolCallId":"call_dppKOMALOQBAXciJaNkDBPcU|fc_05a5ed2cb1e9ce38016a5e5d268740819482d5f7b0c5a4bcd8","params":{"note":"sibling"}}
+{"t":"2026-07-20T17:38:47.145Z","pid":17274,"ev":"evt:tool_execution_end","toolName":"yield_wait","toolCallId":"call_SmzlciE6hR085tLcQKLkvFo0|fc_05a5ed2cb1e9ce38016a5e5d26872481948e5c97e0a532eb08"}
+{"t":"2026-07-20T17:38:47.145Z","pid":17274,"ev":"evt:tool_execution_end","toolName":"echo_note","toolCallId":"call_dppKOMALOQBAXciJaNkDBPcU|fc_05a5ed2cb1e9ce38016a5e5d268740819482d5f7b0c5a4bcd8"}
+{"t":"2026-07-20T17:38:47.145Z","pid":17274,"ev":"evt:message_start","role":"toolResult"}
+{"t":"2026-07-20T17:38:47.145Z","pid":17274,"ev":"evt:message_end","role":"toolResult"}
+{"t":"2026-07-20T17:38:47.146Z","pid":17274,"ev":"evt:message_start","role":"toolResult"}
+{"t":"2026-07-20T17:38:47.146Z","pid":17274,"ev":"evt:message_end","role":"toolResult"}
+{"t":"2026-07-20T17:38:47.146Z","pid":17274,"ev":"evt:turn_end","toolResultCount":2}
+{"t":"2026-07-20T17:38:47.146Z","pid":17274,"ev":"evt:turn_start"}
+{"t":"2026-07-20T17:38:47.414Z","pid":17274,"ev":"evt:message_start","role":"assistant"}
+{"t":"2026-07-20T17:38:49.778Z","pid":17274,"ev":"evt:message_end","role":"assistant"}
+{"t":"2026-07-20T17:38:49.778Z","pid":17274,"ev":"evt:turn_end","toolResultCount":0}
+{"t":"2026-07-20T17:38:49.778Z","pid":17274,"ev":"evt:agent_end"}
+{"t":"2026-07-20T17:38:49.779Z","pid":17274,"ev":"evt:agent_settled"}
+{"t":"2026-07-20T17:38:50.827Z","pid":17274,"ev":"evt:session_shutdown","reason":"quit"}

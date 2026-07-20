@@ -1,0 +1,12 @@
+{"t":"2026-07-20T17:32:56.595Z","pid":17131,"ev":"evt:session_start","reason":"startup"}
+{"t":"2026-07-20T17:32:59.188Z","pid":17131,"ev":"evt:input","text":"Call the ask_user tool now with the question 'What is your favorite color?'. Do not answer yourself; just call the tool.","source":"rpc"}
+{"t":"2026-07-20T17:32:59.188Z","pid":17131,"ev":"evt:agent_start"}
+{"t":"2026-07-20T17:32:59.189Z","pid":17131,"ev":"evt:turn_start"}
+{"t":"2026-07-20T17:32:59.189Z","pid":17131,"ev":"evt:message_start","role":"user"}
+{"t":"2026-07-20T17:32:59.189Z","pid":17131,"ev":"evt:message_end","role":"user"}
+{"t":"2026-07-20T17:32:59.939Z","pid":17131,"ev":"evt:message_start","role":"assistant"}
+{"t":"2026-07-20T17:33:01.339Z","pid":17131,"ev":"evt:message_end","role":"assistant"}
+{"t":"2026-07-20T17:33:01.340Z","pid":17131,"ev":"evt:tool_execution_start","toolName":"ask_user","toolCallId":"call_gBHwkaDHjKlWo2heN3xPdsXG|fc_0ef53a5065635337016a5e5bcd200c8195b5e00b0de3ee40bd"}
+{"t":"2026-07-20T17:33:01.340Z","pid":17131,"ev":"evt:tool_call"}
+{"t":"2026-07-20T17:33:01.340Z","pid":17131,"ev":"ask_user:execute:start","toolCallId":"call_gBHwkaDHjKlWo2heN3xPdsXG|fc_0ef53a5065635337016a5e5bcd200c8195b5e00b0de3ee40bd","params":{"question":"What is your favorite color?"}}
+{"t":"2026-07-20T17:33:03.525Z","pid":17131,"ev":"evt:input","text":"hello, just an ordinary user message","source":"rpc","streamingBehavior":"steer"}

@@ -1,0 +1,13 @@
+{"t":"2026-07-20T17:33:29.209Z","pid":17150,"ev":"evt:session_start","reason":"startup"}
+{"t":"2026-07-20T17:33:31.899Z","pid":17150,"ev":"evt:input","text":"What were you doing before the restart? Please continue.","source":"rpc"}
+{"t":"2026-07-20T17:33:31.899Z","pid":17150,"ev":"evt:agent_start"}
+{"t":"2026-07-20T17:33:31.899Z","pid":17150,"ev":"evt:turn_start"}
+{"t":"2026-07-20T17:33:31.900Z","pid":17150,"ev":"evt:message_start","role":"user"}
+{"t":"2026-07-20T17:33:31.900Z","pid":17150,"ev":"evt:message_end","role":"user"}
+{"t":"2026-07-20T17:33:32.560Z","pid":17150,"ev":"evt:message_start","role":"assistant"}
+{"t":"2026-07-20T17:33:34.830Z","pid":17150,"ev":"evt:message_end","role":"assistant"}
+{"t":"2026-07-20T17:33:34.830Z","pid":17150,"ev":"evt:tool_execution_start","toolName":"ask_user","toolCallId":"call_UXaPHaOgNK953bqZLPmcvSRr|fc_0ef53a5065635337016a5e5beec87081958c7ea48c4dc7f6c9"}
+{"t":"2026-07-20T17:33:34.831Z","pid":17150,"ev":"evt:tool_call"}
+{"t":"2026-07-20T17:33:34.831Z","pid":17150,"ev":"ask_user:execute:start","toolCallId":"call_UXaPHaOgNK953bqZLPmcvSRr|fc_0ef53a5065635337016a5e5beec87081958c7ea48c4dc7f6c9","params":{"question":"What is your favorite color?"}}
+{"t":"2026-07-20T17:36:35.911Z","pid":17150,"ev":"evt:session_shutdown","reason":"quit"}
+{"t":"2026-07-20T17:36:35.912Z","pid":17150,"ev":"ask_user:signal-aborted","toolCallId":"call_UXaPHaOgNK953bqZLPmcvSRr|fc_0ef53a5065635337016a5e5beec87081958c7ea48c4dc7f6c9"}

@@ -1,0 +1,12 @@
+{"t":"2026-07-20T17:38:14.520Z","pid":17262,"ev":"evt:session_start","reason":"startup"}
+{"t":"2026-07-20T17:38:17.138Z","pid":17262,"ev":"evt:input","text":"Interaction request REQ-7F3A has been resolved. The user's response: 'mango'. Continue accordingly.","source":"rpc"}
+{"t":"2026-07-20T17:38:17.139Z","pid":17262,"ev":"evt:agent_start"}
+{"t":"2026-07-20T17:38:17.140Z","pid":17262,"ev":"evt:turn_start"}
+{"t":"2026-07-20T17:38:17.140Z","pid":17262,"ev":"evt:message_start","role":"user"}
+{"t":"2026-07-20T17:38:17.141Z","pid":17262,"ev":"evt:message_end","role":"user"}
+{"t":"2026-07-20T17:38:17.919Z","pid":17262,"ev":"evt:message_start","role":"assistant"}
+{"t":"2026-07-20T17:38:19.206Z","pid":17262,"ev":"evt:message_end","role":"assistant"}
+{"t":"2026-07-20T17:38:19.206Z","pid":17262,"ev":"evt:turn_end","toolResultCount":0}
+{"t":"2026-07-20T17:38:19.206Z","pid":17262,"ev":"evt:agent_end"}
+{"t":"2026-07-20T17:38:19.207Z","pid":17262,"ev":"evt:agent_settled"}
+{"t":"2026-07-20T17:38:22.776Z","pid":17262,"ev":"evt:session_shutdown","reason":"quit"}
