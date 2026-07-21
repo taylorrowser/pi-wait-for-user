@@ -1,0 +1,8 @@
+{
+  "name": "pi-wait-for-user-patch-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -1,6 +1,6 @@
 # Session-journal spike findings
 
-Observed with the same 22/22 probe result against `@earendil-works/pi-coding-agent` and bundled `pi-agent-core` releases 0.79.10, 0.80.9, and 0.80.10. See the machine-readable reports under [`reports/`](./reports/).
+Observed with the same 22/22 probe result against `@earendil-works/pi-coding-agent` and bundled `pi-agent-core` releases 0.79.10, 0.80.9, 0.80.10, and the pinned active target 0.81.1. See the machine-readable reports under [`reports/`](./reports/).
 
 ## Verdict
 
