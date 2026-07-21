@@ -5,7 +5,7 @@ This context describes human interactions that temporarily stop an agent thread 
 ## Language
 
 **Agent Thread**:
-The durable conversation lineage in which autonomous work and its Waiting State occur. Reopening the originating Agent Thread restores its active Interaction Request; unrelated threads do not display or interrupt it automatically.
+The durable conversation lineage in which autonomous work and its Waiting State occur. Interaction Request lifecycle is interpreted along one lineage; outcomes on alternate lineages do not affect it.
 _Avoid_: Process, runtime instance
 
 **Access Scope**:
@@ -13,8 +13,12 @@ The authorization and discovery boundary for Interaction Requests, such as a loc
 _Avoid_: Conversation, display scope
 
 **Interaction Request**:
-A durable request for human input with a stable identity, lifecycle, provenance, and typed outcome that exists independently of any process waiting on it.
+A durable request for human input with a stable, session-scoped identity, provenance, and typed outcome that exists independently of any process waiting on it. Its lifecycle is interpreted along an Agent Thread, so alternate lineages may contain alternate outcomes without affecting one another.
 _Avoid_: Prompt, dialog, question
+
+**Deferred Tool Batch**:
+An assistant-issued set of tool calls held intact before any call executes because exactly one call owns durable deferral.
+_Avoid_: Pending tools, suspended execution
 
 **Waiter**:
 The active operation whose progress depends on the outcome of an Interaction Request.
