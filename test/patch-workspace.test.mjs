@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { after } from "node:test";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const temporaryRoots = [];
+
+after(() => {
+  for (const root of temporaryRoots) rmSync(root, { recursive: true, force: true });
+});
+
+function createTemporaryRoot() {
+  const root = mkdtempSync(join(tmpdir(), "pi-patch-test-"));
+  temporaryRoots.push(root);
+  return root;
+}
 
 function git(cwd, ...args) {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -68,7 +79,7 @@ function run(project, ...args) {
 }
 
 test("apply rejects a package-version mismatch before changing source", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-patch-test-"));
+  const root = createTemporaryRoot();
   const source = createSource(root, "2.0.0");
   const project = createProject(root, source);
   writeFileSync(join(project, "patches", "active", "0001-change.patch"), patch("original", "patched"));
@@ -82,7 +93,7 @@ test("apply rejects a package-version mismatch before changing source", () => {
 });
 
 test("apply checks every patch before changing source", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-patch-test-"));
+  const root = createTemporaryRoot();
   const source = createSource(root);
   const project = createProject(root, source);
   writeFileSync(join(project, "patches", "active", "0001-valid.patch"), patch("original", "patched"));
@@ -97,7 +108,7 @@ test("apply checks every patch before changing source", () => {
 });
 
 test("apply installs the complete sorted patch set on an exact source", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-patch-test-"));
+  const root = createTemporaryRoot();
   const source = createSource(root);
   const project = createProject(root, source);
   writeFileSync(join(project, "patches", "active", "0002-second.patch"), patch("first", "second"));
@@ -110,7 +121,7 @@ test("apply installs the complete sorted patch set on an exact source", () => {
 });
 
 test("prepare clones the pinned source and applies the active patches", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-patch-test-"));
+  const root = createTemporaryRoot();
   const source = createSource(root);
   const project = createProject(root, source);
   const destination = join(root, "prepared");
@@ -124,7 +135,7 @@ test("prepare clones the pinned source and applies the active patches", () => {
 });
 
 test("baseline verification rejects a mismatch before dependency installation", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-patch-test-"));
+  const root = createTemporaryRoot();
   const source = createSource(root, "2.0.0");
   const project = createProject(root, source);
   const fakeBin = join(root, "bin");
@@ -145,7 +156,7 @@ test("baseline verification rejects a mismatch before dependency installation", 
 });
 
 test("baseline verification isolates upstream tests from user configuration", () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-patch-test-"));
+  const root = createTemporaryRoot();
   const source = createSource(root);
   const project = createProject(root, source);
   const fakeBin = join(root, "bin");

@@ -27,8 +27,8 @@ Requires Git and Node.js 22.19 or newer.
 `prepare` clones the pinned tag into a temporary sibling directory, verifies its
 identity, applies the complete ordered patch series in a disposable preflight
 clone, applies all `patches/active/*.patch` in lexicographic order, and only then
-moves the prepared workspace to the requested path. On failure, the temporary clone is removed and
-the destination remains absent.
+moves the prepared workspace to the requested path. On failure, the temporary
+clone is removed and the destination remains absent.
 
 To apply the same patch set to an existing clean checkout:
 
@@ -49,7 +49,9 @@ are present:
 ./scripts/verify-upstream.mjs .work/pi-v0.81.1
 ```
 
-Verification uses a temporary home directory so user extensions and npm configuration cannot affect the baseline. It checks identity before dependency installation, then runs:
+Verification uses a temporary home directory so user extensions and npm
+configuration cannot affect the baseline. It checks identity before dependency
+installation, then runs:
 
 1. `npm ci --ignore-scripts`
 2. `npm run check`
