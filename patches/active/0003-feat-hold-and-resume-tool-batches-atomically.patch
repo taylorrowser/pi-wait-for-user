@@ -1,0 +1,1662 @@
+From c11c10b15c8c03b9c2c6400341e0fe0e10e75e04 Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Tue, 21 Jul 2026 15:38:15 -0400
+Subject: [PATCH 3/3] feat: hold and resume deferred tool batches atomically
+
+---
+ packages/agent/src/agent-loop.ts              | 274 ++++++++---
+ packages/agent/src/agent.ts                   |  38 +-
+ packages/agent/src/types.ts                   |   1 +
+ packages/agent/test/agent-loop.test.ts        | 447 +++++++++++++++++-
+ .../coding-agent/src/core/agent-session.ts    |   1 +
+ .../test/suite/agent-session-deferred.test.ts | 189 ++------
+ .../test/suite/deferred-tool-batch-fixture.ts | 154 ++++++
+ .../15-atomic-tool-batches.test.ts            | 109 +++++
+ 8 files changed, 966 insertions(+), 247 deletions(-)
+ create mode 100644 packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/15-atomic-tool-batches.test.ts
+
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index af6d4140..b2e5cd2d 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -18,10 +18,13 @@ import type {
+ 	AgentMessage,
+ 	AgentTool,
+ 	AgentToolCall,
++	AgentToolDeferral,
+ 	AgentToolResult,
+ 	DeferredToolBatchResume,
+ 	DeferredToolBatchResumeStatus,
++	EvaluateToolDeferralRequest,
+ 	StreamFn,
++	ToolDeferralResolution,
+ } from "./types.ts";
+ import { TOOL_DEFERRAL_PROTOCOL_VERSION } from "./types.ts";
+ 
+@@ -145,7 +148,7 @@ export async function runAgentLoopContinue(
+ 	return newMessages;
+ }
+ 
+-/** Rebind and advance one persisted deferred tool call from the current transcript. */
++/** Rebind and advance one persisted deferred tool batch from the current transcript. */
+ export async function runAgentLoopResume(
+ 	deferred: DeferredToolBatchResume,
+ 	context: AgentContext,
+@@ -158,6 +161,7 @@ export async function runAgentLoopResume(
+ 	const newMessages: AgentMessage[] = [];
+ 	let config = initialConfig;
+ 	let assistantMessage: AssistantMessage | undefined;
++	let assistantMessageIndex = -1;
+ 	for (let index = currentContext.messages.length - 1; index >= 0; index--) {
+ 		const message = currentContext.messages[index];
+ 		if (
+@@ -165,74 +169,101 @@ export async function runAgentLoopResume(
+ 			message.content.some((content) => content.type === "toolCall" && content.id === deferred.ownerCallId)
+ 		) {
+ 			assistantMessage = message;
++			assistantMessageIndex = index;
+ 			break;
+ 		}
+ 	}
+ 	if (!assistantMessage) throw new Error(`Deferred owner call ${deferred.ownerCallId} was not found`);
+ 	const toolCalls = assistantMessage.content.filter((content) => content.type === "toolCall");
+-	if (toolCalls.length !== 1 || toolCalls[0].id !== deferred.ownerCallId) {
+-		throw new Error("Deferred resume currently requires the original single-call batch");
++	if (
++		toolCalls.length !== deferred.heldCallIds.length ||
++		toolCalls.some((call, index) => call.id !== deferred.heldCallIds[index]) ||
++		!toolCalls.some((call) => call.id === deferred.ownerCallId)
++	) {
++		throw new Error("Deferred marker does not match the original tool-call batch");
+ 	}
+-	const toolCall = toolCalls[0];
+-	const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
+-	const capability = tool?.deferral;
++	const recordedResults = new Map<string, ToolResultMessage>();
++	for (const message of currentContext.messages.slice(assistantMessageIndex + 1)) {
++		if (message.role !== "toolResult") continue;
++		const call = toolCalls.find(
++			(candidate) => candidate.id === message.toolCallId && candidate.name === message.toolName,
++		);
++		if (call && !recordedResults.has(call.id)) recordedResults.set(call.id, message);
++	}
++	const missingToolCalls = toolCalls.filter((call) => !recordedResults.has(call.id));
++	const ownerCall = toolCalls.find((call) => call.id === deferred.ownerCallId);
++	const ownerTool = ownerCall
++		? currentContext.tools?.find((candidate) => candidate.name === ownerCall.name)
++		: undefined;
++	const capability = ownerTool?.deferral;
+ 	if (
+-		!tool ||
++		!ownerCall ||
++		!ownerTool ||
+ 		!capability ||
+ 		capability.handlerId !== deferred.handlerId ||
+ 		!capability.resumableHandlerVersions.includes(deferred.handlerVersion)
+ 	) {
+ 		throw new Error(`Deferred owner call ${deferred.ownerCallId} is unavailable`);
+ 	}
+-	const preparedToolCall = prepareToolCallArguments(tool, toolCall);
+-	const preparation: PreparedToolCall = {
+-		kind: "prepared",
+-		toolCall,
+-		tool,
+-		args: validateToolArguments(tool, preparedToolCall),
+-	};
++
++	const preparations = missingToolCalls.map((toolCall) => prevalidateToolCall(currentContext, toolCall));
++	const ownerPreparation =
++		findPreparation(preparations, ownerCall.id) ?? prevalidateToolCall(currentContext, ownerCall);
+ 
+ 	await emit({ type: "agent_start" });
+-	const resolution = await capability.resolve(
++	const resolution = await invokeToolDeferralResolver(
++		capability,
+ 		{
+ 			operation: "evaluate",
+-			toolCallId: toolCall.id,
+-			params: preparation.args,
++			toolCallId: ownerCall.id,
++			params: ownerPreparation.args,
+ 			persistedHandlerVersion: deferred.handlerVersion,
+ 		},
+ 		signal,
+ 	);
+ 	if (resolution.status === "deferred") {
+ 		if (resolution.correlationId !== deferred.correlationId) {
+-			throw new Error(`Deferred owner call ${deferred.ownerCallId} returned a conflicting correlation`);
++			throw new ToolDeferralResolverError(
++				`Deferred owner call ${deferred.ownerCallId} returned a conflicting correlation`,
++			);
+ 		}
+ 		await emit({ type: "agent_end", messages: newMessages });
+ 		return "still_deferred";
+ 	}
+ 	if (resolution.status === "unavailable") throw new Error(resolution.reason);
+ 	if (resolution.disposition !== "execute_batch") {
+-		throw new Error(`Deferred owner call ${deferred.ownerCallId} cannot complete through batch execution`);
++		throw new ToolDeferralResolverError(
++			`Deferred owner call ${deferred.ownerCallId} cannot complete through batch execution`,
++		);
+ 	}
+ 
+-	const executed = await executeToolCallsSequential(
++	const executed = await executeToolCallsWithPreparations(
+ 		currentContext,
+ 		assistantMessage,
+-		toolCalls,
++		missingToolCalls,
+ 		config,
+ 		signal,
+ 		emit,
+-		preparation,
++		preparations,
+ 	);
+-	if (executed.status !== "completed") throw new Error("Deferred tool call unexpectedly deferred again");
++	if (executed.status !== "completed") throw new Error("Deferred tool batch unexpectedly deferred again");
+ 	for (const result of executed.messages) {
+ 		currentContext.messages.push(result);
+ 		newMessages.push(result);
+ 	}
+-	await emit({ type: "turn_end", message: assistantMessage, toolResults: executed.messages });
++	for (const result of executed.messages) recordedResults.set(result.toolCallId, result);
++	const batchResults = toolCalls.flatMap((call) => {
++		const result = recordedResults.get(call.id);
++		return result ? [result] : [];
++	});
++	if (batchResults.length !== toolCalls.length) {
++		throw new Error("Deferred tool batch did not produce every required result");
++	}
++	await emit({ type: "turn_end", message: assistantMessage, toolResults: batchResults });
+ 
+ 	const nextTurnContext = {
+ 		message: assistantMessage,
+-		toolResults: executed.messages,
++		toolResults: batchResults,
+ 		context: currentContext,
+ 		newMessages,
+ 	};
+@@ -547,25 +578,36 @@ async function executeToolCalls(
+ 	emit: AgentEventSink,
+ ): Promise<ExecutedToolCallBatch> {
+ 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+-	const deferral = await resolveSingleToolDeferral(currentContext, toolCalls, config, signal, emit);
++	const deferral = await resolveToolBatchDeferral(currentContext, toolCalls, config, signal, emit);
+ 	if (deferral?.status === "deferred" || deferral?.status === "completed") return deferral;
+-	const prevalidated = deferral?.preparation;
++	return executeToolCallsWithPreparations(
++		currentContext,
++		assistantMessage,
++		toolCalls,
++		config,
++		signal,
++		emit,
++		deferral?.preparations,
++	);
++}
+ 
++function executeToolCallsWithPreparations(
++	currentContext: AgentContext,
++	assistantMessage: AssistantMessage,
++	toolCalls: AgentToolCall[],
++	config: AgentLoopConfig,
++	signal: AbortSignal | undefined,
++	emit: AgentEventSink,
++	preparations: readonly PreparedToolCall[] = [],
++): Promise<ExecutedToolCallBatch> {
+ 	const hasSequentialToolCall = toolCalls.some(
+-		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
++		(call) =>
++			findPreparation(preparations, call.id)?.tool.executionMode === "sequential" ||
++			currentContext.tools?.find((tool) => tool.name === call.name)?.executionMode === "sequential",
+ 	);
+-	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+-		return executeToolCallsSequential(
+-			currentContext,
+-			assistantMessage,
+-			toolCalls,
+-			config,
+-			signal,
+-			emit,
+-			prevalidated,
+-		);
+-	}
+-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit, prevalidated);
++	return config.toolExecution === "sequential" || hasSequentialToolCall
++		? executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit, preparations)
++		: executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit, preparations);
+ }
+ 
+ type ExecutedToolCallBatch =
+@@ -583,7 +625,7 @@ type ExecutedToolCallBatch =
+ 			handlerVersion: number;
+ 	  };
+ 
+-async function resolveSingleToolDeferral(
++async function resolveToolBatchDeferral(
+ 	currentContext: AgentContext,
+ 	toolCalls: AgentToolCall[],
+ 	config: AgentLoopConfig,
+@@ -591,71 +633,146 @@ async function resolveSingleToolDeferral(
+ 	emit: AgentEventSink,
+ ): Promise<
+ 	| Extract<ExecutedToolCallBatch, { status: "deferred" | "completed" }>
+-	| { status: "ready"; preparation: PreparedToolCall }
++	| { status: "ready"; preparations: PreparedToolCall[] }
+ 	| undefined
+ > {
+ 	const owners = toolCalls.flatMap((toolCall) => {
+ 		const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
+-		return tool?.deferral ? [{ toolCall, tool, deferral: tool.deferral }] : [];
++		return tool?.deferral ? [{ toolCall, deferral: tool.deferral }] : [];
+ 	});
+ 	if (owners.length === 0) return undefined;
+-	if (toolCalls.length !== 1 || owners.length !== 1) {
++	const duplicateCallIds = toolCalls.filter(
++		(call, index) => toolCalls.findIndex((candidate) => candidate.id === call.id) !== index,
++	);
++	if (duplicateCallIds.length > 0) {
++		return failToolBatchBeforeDeferral(
++			toolCalls,
++			`Tool calls were not executed: duplicate call ID "${duplicateCallIds[0].id}" in deferred batch.`,
++			emit,
++			new Set(owners.map((owner) => owner.toolCall.id)),
++		);
++	}
++	if (owners.length !== 1) {
+ 		return failToolBatchBeforeDeferral(
+ 			toolCalls,
+-			"Tool call was not executed: durable tool deferral currently requires a single-call batch.",
++			"Tool calls were not executed: durable tool deferral requires exactly one capable owner per batch.",
+ 			emit,
++			new Set(owners.map((owner) => owner.toolCall.id)),
+ 		);
+ 	}
+-	const { toolCall, tool, deferral } = owners[0];
++	const { toolCall: ownerCall, deferral } = owners[0];
+ 	if (!config.toolDeferralEnabled) {
+ 		return failToolBatchBeforeDeferral(
+ 			toolCalls,
+-			"Tool call was not executed: durable tool deferral requires a persistent host session.",
++			"Tool calls were not executed: durable tool deferral requires a persistent host session.",
+ 			emit,
++			new Set([ownerCall.id]),
+ 		);
+ 	}
+ 
+-	let preparation: PreparedToolCall;
+-	try {
+-		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
+-		preparation = {
+-			kind: "prepared",
+-			toolCall,
+-			tool,
+-			args: validateToolArguments(tool, preparedToolCall),
+-		};
+-	} catch (error) {
+-		return failToolBatchBeforeDeferral(toolCalls, error instanceof Error ? error.message : String(error), emit);
++	const preparations: PreparedToolCall[] = [];
++	for (const toolCall of toolCalls) {
++		try {
++			preparations.push(prevalidateToolCall(currentContext, toolCall));
++		} catch (error) {
++			const message = error instanceof Error ? error.message : String(error);
++			return failToolBatchBeforeDeferral(
++				toolCalls,
++				`Deferred batch preflight failed for call "${toolCall.id}" (${toolCall.name}): ${message}`,
++				emit,
++				new Set([ownerCall.id]),
++			);
++		}
+ 	}
+-	const resolution = await deferral.resolve(
++	const ownerPreparation = findPreparation(preparations, ownerCall.id);
++	if (!ownerPreparation) throw new Error(`Deferred owner call ${ownerCall.id} was not prepared`);
++	const resolution = await invokeToolDeferralResolver(
++		deferral,
+ 		{
+ 			operation: "evaluate",
+-			toolCallId: toolCall.id,
+-			params: preparation.args,
++			toolCallId: ownerCall.id,
++			params: ownerPreparation.args,
+ 			persistedHandlerVersion: undefined,
+ 		},
+ 		signal,
+ 	);
+ 	if (resolution.status === "ready") {
+-		return { status: "ready", preparation };
++		if (resolution.disposition !== "execute_batch") {
++			throw new ToolDeferralResolverError(
++				`Deferred owner call ${ownerCall.id} cannot complete before durable deferral`,
++			);
++		}
++		return { status: "ready", preparations };
+ 	}
+ 	if (resolution.status === "unavailable") {
+ 		throw new Error(resolution.reason);
+ 	}
+ 	return {
+ 		status: "deferred",
+-		ownerCallId: toolCall.id,
+-		heldCallIds: [toolCall.id],
++		ownerCallId: ownerCall.id,
++		heldCallIds: toolCalls.map((call) => call.id),
+ 		correlationId: resolution.correlationId,
+ 		handlerId: deferral.handlerId,
+ 		handlerVersion: deferral.handlerVersion,
+ 	};
+ }
+ 
++export class ToolDeferralResolverError extends Error {
++	readonly code = "resolver_error";
++}
++
++async function invokeToolDeferralResolver<TParams>(
++	capability: AgentToolDeferral<TParams>,
++	request: EvaluateToolDeferralRequest<TParams>,
++	signal: AbortSignal | undefined,
++): Promise<ToolDeferralResolution> {
++	if (signal?.aborted) throw new ToolDeferralResolverError("Tool deferral resolver aborted");
++	let onAbort: (() => void) | undefined;
++	const aborted = new Promise<never>((_resolve, reject) => {
++		onAbort = () => reject(new ToolDeferralResolverError("Tool deferral resolver aborted"));
++		signal?.addEventListener("abort", onAbort, { once: true });
++	});
++	let resolution: unknown;
++	try {
++		resolution = await Promise.race([capability.resolve(request, signal), aborted]);
++	} catch (error) {
++		if (error instanceof ToolDeferralResolverError) throw error;
++		throw new ToolDeferralResolverError(
++			`Tool deferral resolver failed: ${error instanceof Error ? error.message : String(error)}`,
++		);
++	} finally {
++		if (onAbort) signal?.removeEventListener("abort", onAbort);
++	}
++	if (signal?.aborted) throw new ToolDeferralResolverError("Tool deferral resolver aborted");
++	if (!resolution || typeof resolution !== "object" || !("status" in resolution)) {
++		throw new ToolDeferralResolverError("Tool deferral resolver returned a malformed result");
++	}
++	if (
++		resolution.status === "ready" &&
++		"disposition" in resolution &&
++		(resolution.disposition === "execute_batch" || resolution.disposition === "complete_owner")
++	) {
++		return { status: "ready", disposition: resolution.disposition };
++	}
++	if (
++		resolution.status === "deferred" &&
++		"correlationId" in resolution &&
++		typeof resolution.correlationId === "string" &&
++		resolution.correlationId.length > 0
++	) {
++		return { status: "deferred", correlationId: resolution.correlationId };
++	}
++	if (resolution.status === "unavailable" && "reason" in resolution && typeof resolution.reason === "string") {
++		return { status: "unavailable", reason: resolution.reason };
++	}
++	throw new ToolDeferralResolverError("Tool deferral resolver returned a malformed result");
++}
++
+ async function failToolBatchBeforeDeferral(
+ 	toolCalls: AgentToolCall[],
+ 	reason: string,
+ 	emit: AgentEventSink,
++	detailedReasonCallIds: ReadonlySet<string>,
+ ): Promise<Extract<ExecutedToolCallBatch, { status: "completed" }>> {
+ 	const messages: ToolResultMessage[] = [];
+ 	for (const toolCall of toolCalls) {
+@@ -665,9 +782,12 @@ async function failToolBatchBeforeDeferral(
+ 			toolName: toolCall.name,
+ 			args: toolCall.arguments,
+ 		});
++		const resultMessage = detailedReasonCallIds.has(toolCall.id)
++			? reason
++			: `Tool call "${toolCall.name}" was not executed because deferred batch preflight failed.`;
+ 		const finalized: FinalizedToolCallOutcome = {
+ 			toolCall,
+-			result: createErrorToolResult(reason),
++			result: createErrorToolResult(resultMessage),
+ 			isError: true,
+ 		};
+ 		await emitToolExecutionEnd(finalized, emit);
+@@ -685,7 +805,7 @@ async function executeToolCallsSequential(
+ 	config: AgentLoopConfig,
+ 	signal: AbortSignal | undefined,
+ 	emit: AgentEventSink,
+-	prevalidated?: PreparedToolCall,
++	preparations: readonly PreparedToolCall[] = [],
+ ): Promise<ExecutedToolCallBatch> {
+ 	const finalizedCalls: FinalizedToolCallOutcome[] = [];
+ 	const messages: ToolResultMessage[] = [];
+@@ -704,7 +824,7 @@ async function executeToolCallsSequential(
+ 			toolCall,
+ 			config,
+ 			signal,
+-			prevalidated?.toolCall.id === toolCall.id ? prevalidated : undefined,
++			findPreparation(preparations, toolCall.id),
+ 		);
+ 		let finalized: FinalizedToolCallOutcome;
+ 		if (preparation.kind === "immediate") {
+@@ -750,7 +870,7 @@ async function executeToolCallsParallel(
+ 	config: AgentLoopConfig,
+ 	signal: AbortSignal | undefined,
+ 	emit: AgentEventSink,
+-	prevalidated?: PreparedToolCall,
++	preparations: readonly PreparedToolCall[] = [],
+ ): Promise<ExecutedToolCallBatch> {
+ 	const finalizedCalls: FinalizedToolCallEntry[] = [];
+ 
+@@ -768,7 +888,7 @@ async function executeToolCallsParallel(
+ 			toolCall,
+ 			config,
+ 			signal,
+-			prevalidated?.toolCall.id === toolCall.id ? prevalidated : undefined,
++			findPreparation(preparations, toolCall.id),
+ 		);
+ 		if (preparation.kind === "immediate") {
+ 			const finalized = {
+@@ -826,6 +946,22 @@ type PreparedToolCall = {
+ 	args: unknown;
+ };
+ 
++function findPreparation(preparations: readonly PreparedToolCall[], toolCallId: string): PreparedToolCall | undefined {
++	return preparations.find((prepared) => prepared.toolCall.id === toolCallId);
++}
++
++function prevalidateToolCall(currentContext: AgentContext, toolCall: AgentToolCall): PreparedToolCall {
++	const tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
++	if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
++	const preparedToolCall = prepareToolCallArguments(tool, toolCall);
++	return {
++		kind: "prepared",
++		toolCall,
++		tool,
++		args: validateToolArguments(tool, preparedToolCall),
++	};
++}
++
+ type ImmediateToolCallOutcome = {
+ 	kind: "immediate";
+ 	result: AgentToolResult<any>;
+diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
+index 70fb6c5a..f3cd110e 100644
+--- a/packages/agent/src/agent.ts
++++ b/packages/agent/src/agent.ts
+@@ -7,7 +7,7 @@ import type {
+ 	ThinkingBudgets,
+ 	Transport,
+ } from "@earendil-works/pi-ai";
+-import { runAgentLoop, runAgentLoopContinue, runAgentLoopResume } from "./agent-loop.ts";
++import { runAgentLoop, runAgentLoopContinue, runAgentLoopResume, ToolDeferralResolverError } from "./agent-loop.ts";
+ import { getDefaultStreamFn } from "./stream-fn.ts";
+ import type {
+ 	AfterToolCallContext,
+@@ -358,15 +358,17 @@ export class Agent {
+ 		if (this.activeRun) {
+ 			throw new Error("Agent is already processing. Wait for completion before resuming deferred work.");
+ 		}
+-		const result = await this.runWithLifecycle((signal) =>
+-			runAgentLoopResume(
+-				deferred,
+-				this.createContextSnapshot(),
+-				this.createLoopConfig(),
+-				(event) => this.processEvents(event),
+-				signal,
+-				this.streamFunction,
+-			),
++		const result = await this.runWithLifecycle(
++			(signal) =>
++				runAgentLoopResume(
++					deferred,
++					this.createContextSnapshot(),
++					this.createLoopConfig(),
++					(event) => this.processEvents(event),
++					signal,
++					this.streamFunction,
++				),
++			{ failClosed: true },
+ 		);
+ 		if (result === undefined) throw new Error("Deferred tool-batch resume failed");
+ 		return result;
+@@ -495,7 +497,10 @@ export class Agent {
+ 		};
+ 	}
+ 
+-	private async runWithLifecycle<T>(executor: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> {
++	private async runWithLifecycle<T>(
++		executor: (signal: AbortSignal) => Promise<T>,
++		options: { failClosed?: boolean } = {},
++	): Promise<T | undefined> {
+ 		if (this.activeRun) {
+ 			throw new Error("Agent is already processing.");
+ 		}
+@@ -514,14 +519,21 @@ export class Agent {
+ 		try {
+ 			return await executor(abortController.signal);
+ 		} catch (error) {
+-			await this.handleRunFailure(error, abortController.signal.aborted);
++			const failClosed = options.failClosed === true || error instanceof ToolDeferralResolverError;
++			await this.handleRunFailure(error, abortController.signal.aborted, failClosed);
++			if (failClosed) throw error;
+ 			return undefined;
+ 		} finally {
+ 			this.finishRun();
+ 		}
+ 	}
+ 
+-	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
++	private async handleRunFailure(error: unknown, aborted: boolean, failClosed: boolean): Promise<void> {
++		if (failClosed) {
++			this._state.errorMessage = error instanceof Error ? error.message : String(error);
++			await this.processEvents({ type: "agent_end", messages: [] });
++			return;
++		}
+ 		const failureMessage = {
+ 			role: "assistant",
+ 			content: [{ type: "text", text: "" }],
+diff --git a/packages/agent/src/types.ts b/packages/agent/src/types.ts
+index 1a51537a..2a92b2c6 100644
+--- a/packages/agent/src/types.ts
++++ b/packages/agent/src/types.ts
+@@ -109,6 +109,7 @@ export type ToolDeferralResolution =
+ /** Persisted identities required to rebind one deferred tool batch. */
+ export interface DeferredToolBatchResume {
+ 	ownerCallId: string;
++	heldCallIds: readonly string[];
+ 	correlationId: string;
+ 	handlerId: string;
+ 	handlerVersion: number;
+diff --git a/packages/agent/test/agent-loop.test.ts b/packages/agent/test/agent-loop.test.ts
+index 24693da7..b720b135 100644
+--- a/packages/agent/test/agent-loop.test.ts
++++ b/packages/agent/test/agent-loop.test.ts
+@@ -10,7 +10,14 @@ import { Type } from "typebox";
+ import { describe, expect, it } from "vitest";
+ import { agentLoop, agentLoopContinue, runAgentLoop, runAgentLoopResume } from "../src/agent-loop.ts";
+ import { setDefaultStreamFn } from "../src/index.ts";
+-import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
++import type {
++	AgentContext,
++	AgentEvent,
++	AgentLoopConfig,
++	AgentMessage,
++	AgentTool,
++	AgentToolCall,
++} from "../src/types.ts";
+ 
+ // Mock stream for testing - mimics MockAssistantStream
+ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
+@@ -368,11 +375,11 @@ describe("agentLoop with AgentMessage", () => {
+ 		expect(toolResult?.role === "toolResult" ? toolResult.usage : undefined).toEqual(patchedToolUsage);
+ 	});
+ 
+-	it("resumes the original deferred call through normal execution before one model continuation", async () => {
++	it("resumes every held call through current gates before one model continuation", async () => {
+ 		const toolSchema = Type.Object({ question: Type.String() });
+ 		const resolverCalls: unknown[] = [];
+ 		const gateCalls: string[] = [];
+-		const executions: Array<{ id: string; question: string }> = [];
++		const executions: Array<{ id: string; value: string }> = [];
+ 		const tool: AgentTool<typeof toolSchema, never> = {
+ 			name: "question",
+ 			label: "Question",
+@@ -388,18 +395,31 @@ describe("agentLoop with AgentMessage", () => {
+ 				},
+ 			},
+ 			async execute(toolCallId, params) {
+-				executions.push({ id: toolCallId, question: params.question });
++				executions.push({ id: toolCallId, value: params.question });
+ 				return { content: [{ type: "text", text: "Answered: yes" }], details: undefined as never };
+ 			},
+ 		};
++		const ordinaryTool: AgentTool<typeof toolSchema, never> = {
++			name: "ordinary",
++			label: "Ordinary",
++			description: "Run after the Response",
++			parameters: toolSchema,
++			async execute(toolCallId, params) {
++				executions.push({ id: toolCallId, value: params.question });
++				return { content: [{ type: "text", text: "Ordinary complete" }], details: undefined as never };
++			},
++		};
+ 		const assistant = createAssistantMessage(
+-			[{ type: "toolCall", id: "call-1", name: "question", arguments: { question: "Ship?" } }],
++			[
++				{ type: "toolCall", id: "call-1", name: "question", arguments: { question: "Ship?" } },
++				{ type: "toolCall", id: "call-2", name: "ordinary", arguments: { question: "Deploy?" } },
++			],
+ 			"toolUse",
+ 		);
+ 		const context: AgentContext = {
+ 			systemPrompt: "",
+ 			messages: [createUserMessage("ask"), assistant],
+-			tools: [tool],
++			tools: [tool, ordinaryTool],
+ 		};
+ 		const config: AgentLoopConfig = {
+ 			model: createModel(),
+@@ -428,6 +448,7 @@ describe("agentLoop with AgentMessage", () => {
+ 		const status = await runAgentLoopResume(
+ 			{
+ 				ownerCallId: "call-1",
++				heldCallIds: ["call-1", "call-2"],
+ 				correlationId: "request-1",
+ 				handlerId: "dev.example.question",
+ 				handlerVersion: 1,
+@@ -450,13 +471,20 @@ describe("agentLoop with AgentMessage", () => {
+ 				persistedHandlerVersion: 1,
+ 			},
+ 		]);
+-		expect(gateCalls).toEqual(["call-1"]);
+-		expect(executions).toEqual([{ id: "call-1", question: "Ship?" }]);
++		expect(gateCalls).toEqual(["call-1", "call-2"]);
++		expect(executions).toEqual([
++			{ id: "call-1", value: "Ship?" },
++			{ id: "call-2", value: "Deploy?" },
++		]);
+ 		expect(providerCalls).toBe(1);
+ 		expect(events.map((event) => event.type)).toEqual([
+ 			"agent_start",
+ 			"tool_execution_start",
++			"tool_execution_start",
+ 			"tool_execution_end",
++			"tool_execution_end",
++			"message_start",
++			"message_end",
+ 			"message_start",
+ 			"message_end",
+ 			"turn_end",
+@@ -466,10 +494,227 @@ describe("agentLoop with AgentMessage", () => {
+ 			"turn_end",
+ 			"agent_end",
+ 		]);
+-		const result = events.find((event) => event.type === "message_end" && event.message.role === "toolResult");
+ 		expect(
+-			result?.type === "message_end" && result.message.role === "toolResult" ? result.message.toolCallId : undefined,
+-		).toBe("call-1");
++			events.flatMap((event) =>
++				event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
++			),
++		).toEqual(["call-1", "call-2"]);
++	});
++
++	it("executes only missing held calls in parallel while reporting batch results in source order", async () => {
++		const schema = Type.Object({ value: Type.String() });
++		let releaseOwner: (() => void) | undefined;
++		const ownerReleased = new Promise<void>((resolve) => {
++			releaseOwner = resolve;
++		});
++		const executions: string[] = [];
++		const owner: AgentTool<typeof schema, never> = {
++			name: "question",
++			label: "Question",
++			description: "Wait",
++			parameters: schema,
++			deferral: {
++				handlerId: "dev.example.question",
++				handlerVersion: 1,
++				resumableHandlerVersions: [1],
++				resolve: async () => ({ status: "ready", disposition: "execute_batch" }),
++			},
++			async execute(_id, params) {
++				await ownerReleased;
++				executions.push(params.value);
++				return { content: [{ type: "text", text: params.value }], details: undefined as never };
++			},
++		};
++		const ordinary: AgentTool<typeof schema, never> = {
++			name: "ordinary",
++			label: "Ordinary",
++			description: "Run work",
++			parameters: schema,
++			async execute(_id, params) {
++				executions.push(params.value);
++				releaseOwner?.();
++				return { content: [{ type: "text", text: params.value }], details: undefined as never };
++			},
++		};
++		const assistant = createAssistantMessage(
++			[
++				{ type: "toolCall", id: "call-0", name: "removed", arguments: { value: "recorded" } },
++				{ type: "toolCall", id: "call-1", name: "question", arguments: { value: "owner" } },
++				{ type: "toolCall", id: "call-2", name: "ordinary", arguments: { value: "sibling" } },
++			],
++			"toolUse",
++		);
++		const recorded: AgentMessage = {
++			role: "toolResult",
++			toolCallId: "call-0",
++			toolName: "removed",
++			content: [{ type: "text", text: "already done" }],
++			details: {},
++			isError: false,
++			timestamp: Date.now(),
++		};
++		const gateCalls: string[] = [];
++		const events: AgentEvent[] = [];
++		const status = await runAgentLoopResume(
++			{
++				ownerCallId: "call-1",
++				heldCallIds: ["call-0", "call-1", "call-2"],
++				correlationId: "request-1",
++				handlerId: "dev.example.question",
++				handlerVersion: 1,
++			},
++			{
++				systemPrompt: "",
++				messages: [createUserMessage("ask"), assistant, recorded],
++				tools: [owner, ordinary],
++			},
++			{
++				model: createModel(),
++				convertToLlm: identityConverter,
++				toolDeferralEnabled: true,
++				toolExecution: "parallel",
++				beforeToolCall: async ({ toolCall }) => {
++					gateCalls.push(toolCall.id);
++					return undefined;
++				},
++				shouldStopAfterTurn: async () => true,
++			},
++			(event) => {
++				events.push(event);
++			},
++			undefined,
++			() => {
++				throw new Error("provider must not be called");
++			},
++		);
++
++		expect(status).toBe("advanced");
++		expect(gateCalls).toEqual(["call-1", "call-2"]);
++		expect(executions).toEqual(["sibling", "owner"]);
++		expect(
++			events.flatMap((event) =>
++				event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
++			),
++		).toEqual(["call-1", "call-2"]);
++		const turnEnd = events.find((event) => event.type === "turn_end");
++		expect(turnEnd?.type === "turn_end" ? turnEnd.toolResults.map((result) => result.toolCallId) : []).toEqual([
++			"call-0",
++			"call-1",
++			"call-2",
++		]);
++	});
++
++	it("fails closed when a deferral resolver returns a malformed result", async () => {
++		const schema = Type.Object({});
++		let executions = 0;
++		const tool: AgentTool<typeof schema, never> = {
++			name: "question",
++			label: "Question",
++			description: "Wait",
++			parameters: schema,
++			deferral: {
++				handlerId: "dev.example.question",
++				handlerVersion: 1,
++				resumableHandlerVersions: [1],
++				resolve: async () => ({ status: "invalid" }) as never,
++			},
++			async execute() {
++				executions++;
++				return { content: [], details: undefined as never };
++			},
++		};
++		const events: AgentEvent[] = [];
++		let providerCalls = 0;
++		const run = runAgentLoop(
++			[createUserMessage("ask")],
++			{ systemPrompt: "", messages: [], tools: [tool] },
++			{ model: createModel(), convertToLlm: identityConverter, toolDeferralEnabled: true },
++			(event) => {
++				events.push(event);
++			},
++			undefined,
++			() => {
++				providerCalls++;
++				const response = new MockAssistantStream();
++				queueMicrotask(() => {
++					response.push({
++						type: "done",
++						reason: "toolUse",
++						message: createAssistantMessage(
++							[{ type: "toolCall", id: "call-1", name: "question", arguments: {} }],
++							"toolUse",
++						),
++					});
++				});
++				return response;
++			},
++		);
++
++		await expect(run).rejects.toThrow(/malformed result/);
++		expect(providerCalls).toBe(1);
++		expect(executions).toBe(0);
++		expect(events.some((event) => event.type === "tool_batch_deferred")).toBe(false);
++		expect(events.some((event) => event.type === "tool_execution_start")).toBe(false);
++		expect(events.some((event) => event.type === "turn_end")).toBe(false);
++	});
++
++	it.each(["throws", "aborts"] as const)("fails closed when a deferral resolver %s", async (behavior) => {
++		const schema = Type.Object({});
++		const controller = new AbortController();
++		let executions = 0;
++		const tool: AgentTool<typeof schema, never> = {
++			name: "question",
++			label: "Question",
++			description: "Wait",
++			parameters: schema,
++			deferral: {
++				handlerId: "dev.example.question",
++				handlerVersion: 1,
++				resumableHandlerVersions: [1],
++				resolve: async () => {
++					if (behavior === "throws") throw new Error("package failed");
++					controller.abort();
++					return await new Promise<never>(() => {});
++				},
++			},
++			async execute() {
++				executions++;
++				return { content: [], details: undefined as never };
++			},
++		};
++		const events: AgentEvent[] = [];
++		let providerCalls = 0;
++		const run = runAgentLoop(
++			[createUserMessage("ask")],
++			{ systemPrompt: "", messages: [], tools: [tool] },
++			{ model: createModel(), convertToLlm: identityConverter, toolDeferralEnabled: true },
++			(event) => {
++				events.push(event);
++			},
++			controller.signal,
++			() => {
++				providerCalls++;
++				const response = new MockAssistantStream();
++				queueMicrotask(() => {
++					response.push({
++						type: "done",
++						reason: "toolUse",
++						message: createAssistantMessage(
++							[{ type: "toolCall", id: "call-1", name: "question", arguments: {} }],
++							"toolUse",
++						),
++					});
++				});
++				return response;
++			},
++		);
++
++		await expect(run).rejects.toThrow(/resolver (failed|aborted)/);
++		expect(providerCalls).toBe(1);
++		expect(executions).toBe(0);
++		expect(events.some((event) => event.type === "tool_batch_deferred")).toBe(false);
++		expect(events.some((event) => event.type === "tool_execution_start")).toBe(false);
++		expect(events.some((event) => event.type === "turn_end")).toBe(false);
+ 	});
+ 
+ 	it("settles a deferred tool call without executing it or ending the turn", async () => {
+@@ -553,7 +798,7 @@ describe("agentLoop with AgentMessage", () => {
+ 		});
+ 	});
+ 
+-	it("fails a mixed batch closed before resolving or executing its deferral-capable call", async () => {
++	it("holds every call in a mixed batch when exactly one call owns deferral", async () => {
+ 		const toolSchema = Type.Object({});
+ 		let resolverCalls = 0;
+ 		const executions: string[] = [];
+@@ -617,14 +862,188 @@ describe("agentLoop with AgentMessage", () => {
+ 		const events: AgentEvent[] = [];
+ 		for await (const event of stream) events.push(event);
+ 
++		expect(resolverCalls).toBe(1);
++		expect(executions).toEqual([]);
++		expect(providerCalls).toBe(1);
++		expect(events.find((event) => event.type === "tool_batch_deferred")).toEqual({
++			type: "tool_batch_deferred",
++			ownerCallId: "call-1",
++			heldCallIds: ["call-1", "call-2"],
++			correlationId: "request-1",
++			protocolVersion: 1,
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++		});
++		expect(events.some((event) => event.type === "tool_execution_start")).toBe(false);
++	});
++
++	it.each(["multiple owners", "missing sibling"] as const)(
++		"rejects %s before resolver or batch execution",
++		async (scenario) => {
++			const schema = Type.Object({});
++			let resolverCalls = 0;
++			const executions: string[] = [];
++			const deferredTool = (name: string): AgentTool<typeof schema, never> => ({
++				name,
++				label: name,
++				description: "Wait",
++				parameters: schema,
++				deferral: {
++					handlerId: `dev.example.${name}`,
++					handlerVersion: 1,
++					resumableHandlerVersions: [1],
++					resolve: async () => {
++						resolverCalls++;
++						return { status: "deferred", correlationId: name };
++					},
++				},
++				async execute() {
++					executions.push(name);
++					return { content: [], details: undefined as never };
++				},
++			});
++			const ordinary: AgentTool<typeof schema, never> = {
++				name: "ordinary",
++				label: "Ordinary",
++				description: "Run work",
++				parameters: schema,
++				async execute() {
++					executions.push("ordinary");
++					return { content: [], details: undefined as never };
++				},
++			};
++			const tools =
++				scenario === "multiple owners"
++					? [deferredTool("question_one"), deferredTool("question_two"), ordinary]
++					: [deferredTool("question_one"), ordinary];
++			const calls: AgentToolCall[] =
++				scenario === "multiple owners"
++					? [
++							{ type: "toolCall", id: "call-1", name: "question_one", arguments: {} },
++							{ type: "toolCall", id: "call-2", name: "question_two", arguments: {} },
++							{ type: "toolCall", id: "call-3", name: "ordinary", arguments: {} },
++						]
++					: [
++							{ type: "toolCall", id: "call-1", name: "question_one", arguments: {} },
++							{ type: "toolCall", id: "call-2", name: "missing", arguments: {} },
++							{ type: "toolCall", id: "call-3", name: "ordinary", arguments: {} },
++						];
++			let providerCalls = 0;
++			const events: AgentEvent[] = [];
++			const stream = agentLoop(
++				[createUserMessage("run")],
++				{ systemPrompt: "", messages: [], tools },
++				{ model: createModel(), convertToLlm: identityConverter, toolDeferralEnabled: true },
++				undefined,
++				() => {
++					providerCalls++;
++					const response = new MockAssistantStream();
++					queueMicrotask(() => {
++						response.push({
++							type: "done",
++							reason: providerCalls === 1 ? "toolUse" : "stop",
++							message:
++								providerCalls === 1
++									? createAssistantMessage(calls, "toolUse")
++									: createAssistantMessage([{ type: "text", text: "corrected" }]),
++						});
++					});
++					return response;
++				},
++			);
++			for await (const event of stream) events.push(event);
++
++			expect(resolverCalls).toBe(0);
++			expect(executions).toEqual([]);
++			expect(providerCalls).toBe(2);
++			expect(
++				events.flatMap((event) =>
++					event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
++				),
++			).toEqual(["call-1", "call-2", "call-3"]);
++		},
++	);
++
++	it("rejects a malformed sibling before resolver or batch execution", async () => {
++		const schema = Type.Object({ value: Type.String() });
++		let resolverCalls = 0;
++		const executions: string[] = [];
++		const owner: AgentTool<typeof schema, never> = {
++			name: "question",
++			label: "Question",
++			description: "Wait",
++			parameters: schema,
++			deferral: {
++				handlerId: "dev.example.question",
++				handlerVersion: 1,
++				resumableHandlerVersions: [1],
++				resolve: async () => {
++					resolverCalls++;
++					return { status: "deferred", correlationId: "request-1" };
++				},
++			},
++			async execute() {
++				executions.push("question");
++				return { content: [], details: undefined as never };
++			},
++		};
++		const ordinary: AgentTool<typeof schema, never> = {
++			name: "ordinary",
++			label: "Ordinary",
++			description: "Run work",
++			parameters: schema,
++			async execute(_id, params) {
++				executions.push(params.value);
++				return { content: [], details: undefined as never };
++			},
++		};
++		const context: AgentContext = { systemPrompt: "", messages: [], tools: [owner, ordinary] };
++		const config: AgentLoopConfig = {
++			model: createModel(),
++			convertToLlm: identityConverter,
++			toolDeferralEnabled: true,
++		};
++		let providerCalls = 0;
++		const events: AgentEvent[] = [];
++		const stream = agentLoop([createUserMessage("run")], context, config, undefined, () => {
++			providerCalls++;
++			const response = new MockAssistantStream();
++			queueMicrotask(() => {
++				response.push({
++					type: "done",
++					reason: providerCalls === 1 ? "toolUse" : "stop",
++					message:
++						providerCalls === 1
++							? createAssistantMessage(
++									[
++										{ type: "toolCall", id: "call-1", name: "ordinary", arguments: { value: "first" } },
++										{ type: "toolCall", id: "call-2", name: "question", arguments: { value: "ask" } },
++										{ type: "toolCall", id: "call-3", name: "ordinary", arguments: {} },
++									],
++									"toolUse",
++								)
++							: createAssistantMessage([{ type: "text", text: "corrected" }]),
++				});
++			});
++			return response;
++		});
++		for await (const event of stream) events.push(event);
++
+ 		expect(resolverCalls).toBe(0);
+ 		expect(executions).toEqual([]);
+ 		expect(providerCalls).toBe(2);
+ 		const results = events.flatMap((event) =>
+ 			event.type === "message_end" && event.message.role === "toolResult" ? [event.message] : [],
+ 		);
+-		expect(results.map((result) => result.toolCallId)).toEqual(["call-1", "call-2"]);
+-		expect(results.every((result) => result.isError)).toBe(true);
++		expect(results.map((result) => result.toolCallId)).toEqual(["call-1", "call-2", "call-3"]);
++		expect(results[0].content).toEqual([
++			{ type: "text", text: 'Tool call "ordinary" was not executed because deferred batch preflight failed.' },
++		]);
++		expect(results[1].content[0]).toMatchObject({ type: "text" });
++		expect(results[1].content[0].type === "text" ? results[1].content[0].text : "").toMatch(/value/);
++		expect(results[2].content).toEqual([
++			{ type: "text", text: 'Tool call "ordinary" was not executed because deferred batch preflight failed.' },
++		]);
+ 	});
+ 
+ 	it("executes a ready deferral-capable call without preparing its arguments twice", async () => {
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index d6e6c431..805cf6a7 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -946,6 +946,7 @@ export class AgentSession {
+ 		try {
+ 			status = await this.agent.resumeDeferredToolBatch({
+ 				ownerCallId: marker.ownerCallId,
++				heldCallIds: marker.heldCallIds,
+ 				correlationId: marker.correlationId,
+ 				handlerId: marker.handlerId,
+ 				handlerVersion: marker.handlerVersion,
+diff --git a/packages/coding-agent/test/suite/agent-session-deferred.test.ts b/packages/coding-agent/test/suite/agent-session-deferred.test.ts
+index 190a8a09..ce617b38 100644
+--- a/packages/coding-agent/test/suite/agent-session-deferred.test.ts
++++ b/packages/coding-agent/test/suite/agent-session-deferred.test.ts
+@@ -2,132 +2,18 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+-import { Type } from "typebox";
+ import { afterEach, describe, expect, it } from "vitest";
+-import type { ExtensionFactory } from "../../src/core/extensions/index.ts";
+-import { type SessionEntry, SessionManager } from "../../src/core/session-manager.ts";
++import { SessionManager } from "../../src/core/session-manager.ts";
++import {
++	deferredToolBatchMessage,
++	type InteractionRequestTestController,
++	outcomeType,
++	questionExtension,
++	requestType,
++} from "./deferred-tool-batch-fixture.ts";
+ import { createHarness, type Harness } from "./harness.ts";
+ 
+-const requestType = "dev.example.question/request";
+-const outcomeType = "dev.example.question/outcome";
+-
+-type QuestionRequest = {
+-	version: 1;
+-	requestId: string;
+-	assistantEntryId: string;
+-	ownerCallId: string;
+-	payload: { question: string };
+-};
+-
+-type QuestionOutcome = {
+-	version: 1;
+-	requestId: string;
+-	outcome: { type: "response"; value: string };
+-};
+-
+-type RecordResponseResult =
+-	| { status: "recorded"; outcome: QuestionOutcome }
+-	| { status: "conflict"; outcome: QuestionOutcome };
+-
+-type QuestionController = {
+-	recordResponse?: (value: string) => RecordResponseResult;
+-};
+-
+-function customData<T>(entry: SessionEntry, customType: string): T | undefined {
+-	return entry.type === "custom" && entry.customType === customType ? (entry.data as T) : undefined;
+-}
+-
+-function findLastCustomData<T>(branch: SessionEntry[], customType: string): T | undefined {
+-	for (let index = branch.length - 1; index >= 0; index--) {
+-		const data = customData<T>(branch[index], customType);
+-		if (data) return data;
+-	}
+-	return undefined;
+-}
+-
+-function questionExtension(executions: string[], controller?: QuestionController): ExtensionFactory {
+-	return (pi) => {
+-		let currentBranch: (() => SessionEntry[]) | undefined;
+-		if (controller) {
+-			controller.recordResponse = (value) => {
+-				const branch = currentBranch?.();
+-				if (!branch) throw new Error("question request is not active");
+-				const request = findLastCustomData<QuestionRequest>(branch, requestType);
+-				if (!request) throw new Error("question request was not found");
+-				const existing = branch
+-					.map((entry) => customData<QuestionOutcome>(entry, outcomeType))
+-					.find((entry) => entry?.requestId === request.requestId);
+-				if (existing) return { status: "conflict", outcome: existing };
+-				const outcome: QuestionOutcome = {
+-					version: 1,
+-					requestId: request.requestId,
+-					outcome: { type: "response", value },
+-				};
+-				pi.appendEntry(outcomeType, outcome);
+-				return { status: "recorded", outcome };
+-			};
+-		}
+-
+-		pi.registerTool({
+-			name: "question",
+-			label: "Question",
+-			description: "Wait for an answer",
+-			parameters: Type.Object({ question: Type.String() }),
+-			deferral: {
+-				handlerId: "dev.example.question",
+-				handlerVersion: 1,
+-				resumableHandlerVersions: [1],
+-				resolve: async (request, _signal, ctx) => {
+-					currentBranch = () => ctx.sessionManager.getBranch();
+-					const branch = currentBranch();
+-					let assistantEntry: SessionEntry | undefined;
+-					for (let index = branch.length - 1; index >= 0; index--) {
+-						const entry = branch[index];
+-						if (
+-							entry.type === "message" &&
+-							entry.message.role === "assistant" &&
+-							entry.message.content.some(
+-								(content) => content.type === "toolCall" && content.id === request.toolCallId,
+-							)
+-						) {
+-							assistantEntry = entry;
+-							break;
+-						}
+-					}
+-					if (!assistantEntry) throw new Error("owning assistant entry not found");
+-					const existingRequest = branch
+-						.map((entry) => customData<QuestionRequest>(entry, requestType))
+-						.find((entry) => entry?.ownerCallId === request.toolCallId);
+-					const requestId = existingRequest?.requestId ?? "request-1";
+-					const outcome = branch
+-						.map((entry) => customData<QuestionOutcome>(entry, outcomeType))
+-						.find((entry) => entry?.requestId === requestId);
+-					if (outcome?.outcome.type === "response") {
+-						return { status: "ready", disposition: "execute_batch" };
+-					}
+-					if (!existingRequest) {
+-						pi.appendEntry(requestType, {
+-							version: 1,
+-							requestId,
+-							assistantEntryId: assistantEntry.id,
+-							ownerCallId: request.toolCallId,
+-							payload: { question: request.params.question },
+-						} satisfies QuestionRequest);
+-					}
+-					return { status: "deferred", correlationId: requestId };
+-				},
+-			},
+-			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+-				const outcome = findLastCustomData<QuestionOutcome>(ctx.sessionManager.getBranch(), outcomeType);
+-				if (!outcome) throw new Error("question response was not found");
+-				executions.push(params.question);
+-				return { content: [{ type: "text", text: outcome.outcome.value }], details: {} };
+-			},
+-		});
+-	};
+-}
+-
+-describe("durable single-tool deferral", () => {
++describe("durable tool-batch deferral", () => {
+ 	const harnesses: Harness[] = [];
+ 	const roots: string[] = [];
+ 
+@@ -144,11 +30,7 @@ describe("durable single-tool deferral", () => {
+ 		const extension = questionExtension(executions);
+ 		const harness = await createHarness({ sessionManager, extensionFactories: [extension] });
+ 		harnesses.push(harness);
+-		harness.setResponses([
+-			fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: "call-1" }), {
+-				stopReason: "toolUse",
+-			}),
+-		]);
++		harness.setResponses([deferredToolBatchMessage()]);
+ 
+ 		await harness.session.prompt("Ask before shipping");
+ 
+@@ -174,7 +56,7 @@ describe("durable single-tool deferral", () => {
+ 			parentId: requestEntry?.id,
+ 			assistantEntryId: assistantEntry?.id,
+ 			ownerCallId: "call-1",
+-			heldCallIds: ["call-1"],
++			heldCallIds: ["call-0", "call-1", "call-2"],
+ 			correlationId: "request-1",
+ 			protocolVersion: 1,
+ 			handlerId: "dev.example.question",
+@@ -185,7 +67,11 @@ describe("durable single-tool deferral", () => {
+ 			sessionId: sessionManager.getSessionId(),
+ 			assistantEntryId: assistantEntry?.id,
+ 			ownerCallId: "call-1",
+-			calls: [{ toolCallId: "call-1", toolName: "question", result: "missing" }],
++			calls: [
++				{ toolCallId: "call-0", toolName: "ordinary", result: "missing" },
++				{ toolCallId: "call-1", toolName: "question", result: "missing" },
++				{ toolCallId: "call-2", toolName: "ordinary", result: "missing" },
++			],
+ 			phase: "deferred",
+ 			correlationId: "request-1",
+ 			availability: { status: "available" },
+@@ -239,22 +125,18 @@ describe("durable single-tool deferral", () => {
+ 		expect(harness.events.map((event) => event.type)).toEqual(["agent_start", "agent_end", "agent_settled"]);
+ 	});
+ 
+-	it("records the first typed Response and resumes the original call after teardown", async () => {
++	it("records the first typed Response and resumes the whole original batch after teardown", async () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-deferred-response-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
+ 		const executions: string[] = [];
+-		const controller: QuestionController = {};
++		const controller: InteractionRequestTestController = {};
+ 		const initial = await createHarness({
+ 			sessionManager: manager,
+ 			extensionFactories: [questionExtension(executions, controller)],
+ 		});
+ 		harnesses.push(initial);
+-		initial.setResponses([
+-			fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: "call-1" }), {
+-				stopReason: "toolUse",
+-			}),
+-		]);
++		initial.setResponses([deferredToolBatchMessage()]);
+ 		await initial.session.prompt("Ask before shipping");
+ 
+ 		const recorded = controller.recordResponse?.("Yes");
+@@ -286,21 +168,22 @@ describe("durable single-tool deferral", () => {
+ 		const result = await reopened.session.resumeDeferred();
+ 
+ 		expect(result).toEqual({ status: "advanced", deferredBatch: undefined });
+-		expect(executions).toEqual(["Ship?"]);
++		expect(executions).toEqual(["ordinary:Prepare?", "Ship?", "ordinary:Deploy?"]);
+ 		expect(reopened.getPendingResponseCount()).toBe(0);
+ 		const branch = reopened.sessionManager.getBranch();
+ 		const outcomeIndex = branch.findIndex((entry) => entry.type === "custom" && entry.customType === outcomeType);
+-		const resultIndex = branch.findIndex((entry) => entry.type === "message" && entry.message.role === "toolResult");
++		const resultEntries = branch.flatMap((entry, index) =>
++			entry.type === "message" && entry.message.role === "toolResult" ? [{ index, message: entry.message }] : [],
++		);
+ 		const continuationIndex = branch.findIndex(
+-			(entry, index) => index > resultIndex && entry.type === "message" && entry.message.role === "assistant",
++			(entry, index) =>
++				index > resultEntries.at(-1)!.index && entry.type === "message" && entry.message.role === "assistant",
+ 		);
+ 		expect(outcomeIndex).toBeGreaterThan(-1);
+-		expect(resultIndex).toBeGreaterThan(outcomeIndex);
+-		expect(continuationIndex).toBeGreaterThan(resultIndex);
+-		const toolResult = branch[resultIndex];
+-		expect(
+-			toolResult.type === "message" && toolResult.message.role === "toolResult" ? toolResult.message : undefined,
+-		).toMatchObject({
++		expect(resultEntries[0].index).toBeGreaterThan(outcomeIndex);
++		expect(resultEntries.map((entry) => entry.message.toolCallId)).toEqual(["call-0", "call-1", "call-2"]);
++		expect(continuationIndex).toBeGreaterThan(resultEntries.at(-1)!.index);
++		expect(resultEntries[1].message).toMatchObject({
+ 			toolCallId: "call-1",
+ 			toolName: "question",
+ 			content: [{ type: "text", text: "Yes" }],
+@@ -309,9 +192,17 @@ describe("durable single-tool deferral", () => {
+ 		expect(reopened.events.map((event) => event.type).filter((type) => type !== "message_update")).toEqual([
+ 			"agent_start",
+ 			"tool_execution_start",
++			"tool_execution_start",
++			"tool_execution_start",
++			"tool_execution_end",
++			"tool_execution_end",
+ 			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"message_start",
++			"message_end",
++			"message_start",
++			"message_end",
+ 			"turn_end",
+ 			"turn_start",
+ 			"message_start",
+@@ -356,11 +247,7 @@ describe("durable single-tool deferral", () => {
+ 		const executions: string[] = [];
+ 		const harness = await createHarness({ extensionFactories: [questionExtension(executions)] });
+ 		harnesses.push(harness);
+-		harness.setResponses([
+-			fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: "call-1" }), {
+-				stopReason: "toolUse",
+-			}),
+-		]);
++		harness.setResponses([deferredToolBatchMessage(), fauxAssistantMessage("Corrected")]);
+ 
+ 		await harness.session.prompt("Ask before shipping");
+ 
+diff --git a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+new file mode 100644
+index 00000000..d3668ad2
+--- /dev/null
++++ b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+@@ -0,0 +1,154 @@
++import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
++import { Type } from "typebox";
++import type { ExtensionFactory } from "../../src/core/extensions/index.ts";
++import type { SessionEntry } from "../../src/core/session-manager.ts";
++
++export const requestType = "dev.example.question/request";
++export const outcomeType = "dev.example.question/outcome";
++
++type QuestionInteractionRequest = {
++	version: 1;
++	requestId: string;
++	assistantEntryId: string;
++	ownerCallId: string;
++	payload: { question: string };
++};
++
++type QuestionOutcome = {
++	version: 1;
++	requestId: string;
++	outcome: { type: "response"; value: string };
++};
++
++type RecordResponseResult =
++	| { status: "recorded"; outcome: QuestionOutcome }
++	| { status: "conflict"; outcome: QuestionOutcome };
++
++export type InteractionRequestTestController = {
++	recordResponse?: (value: string) => RecordResponseResult;
++	resolverFailure?: "malformed" | "throw";
++};
++
++function customData<T>(entry: SessionEntry, customType: string): T | undefined {
++	return entry.type === "custom" && entry.customType === customType ? (entry.data as T) : undefined;
++}
++
++function findLastCustomData<T>(branch: SessionEntry[], customType: string): T | undefined {
++	for (let index = branch.length - 1; index >= 0; index--) {
++		const data = customData<T>(branch[index], customType);
++		if (data) return data;
++	}
++	return undefined;
++}
++
++export function deferredToolBatchMessage() {
++	return fauxAssistantMessage(
++		[
++			fauxToolCall("ordinary", { question: "Prepare?" }, { id: "call-0" }),
++			fauxToolCall("question", { question: "Ship?" }, { id: "call-1" }),
++			fauxToolCall("ordinary", { question: "Deploy?" }, { id: "call-2" }),
++		],
++		{ stopReason: "toolUse" },
++	);
++}
++
++export function questionExtension(
++	executions: string[],
++	controller?: InteractionRequestTestController,
++	options: { includeOrdinary?: boolean } = {},
++): ExtensionFactory {
++	return (pi) => {
++		let currentBranch: (() => SessionEntry[]) | undefined;
++		if (controller) {
++			controller.recordResponse = (value) => {
++				const branch = currentBranch?.();
++				if (!branch) throw new Error("Interaction Request is not active");
++				const request = findLastCustomData<QuestionInteractionRequest>(branch, requestType);
++				if (!request) throw new Error("Interaction Request was not found");
++				const existing = branch
++					.map((entry) => customData<QuestionOutcome>(entry, outcomeType))
++					.find((entry) => entry?.requestId === request.requestId);
++				if (existing) return { status: "conflict", outcome: existing };
++				const outcome: QuestionOutcome = {
++					version: 1,
++					requestId: request.requestId,
++					outcome: { type: "response", value },
++				};
++				pi.appendEntry(outcomeType, outcome);
++				return { status: "recorded", outcome };
++			};
++		}
++
++		if (options.includeOrdinary !== false) {
++			pi.registerTool({
++				name: "ordinary",
++				label: "Ordinary",
++				description: "Run ordinary work after the Response",
++				parameters: Type.Object({ question: Type.String() }),
++				async execute(_toolCallId, params) {
++					executions.push(`ordinary:${params.question}`);
++					return { content: [{ type: "text", text: `Completed: ${params.question}` }], details: {} };
++				},
++			});
++		}
++
++		pi.registerTool({
++			name: "question",
++			label: "Question",
++			description: "Wait for a Response",
++			parameters: Type.Object({ question: Type.String() }),
++			deferral: {
++				handlerId: "dev.example.question",
++				handlerVersion: 1,
++				resumableHandlerVersions: [1],
++				resolve: async (request, _signal, ctx) => {
++					currentBranch = () => ctx.sessionManager.getBranch();
++					const branch = currentBranch();
++					let assistantEntry: SessionEntry | undefined;
++					for (let index = branch.length - 1; index >= 0; index--) {
++						const entry = branch[index];
++						if (
++							entry.type === "message" &&
++							entry.message.role === "assistant" &&
++							entry.message.content.some(
++								(content) => content.type === "toolCall" && content.id === request.toolCallId,
++							)
++						) {
++							assistantEntry = entry;
++							break;
++						}
++					}
++					if (!assistantEntry) throw new Error("owning assistant entry not found");
++					const existingInteractionRequest = branch
++						.map((entry) => customData<QuestionInteractionRequest>(entry, requestType))
++						.find((entry) => entry?.ownerCallId === request.toolCallId);
++					const requestId = existingInteractionRequest?.requestId ?? "request-1";
++					const outcome = branch
++						.map((entry) => customData<QuestionOutcome>(entry, outcomeType))
++						.find((entry) => entry?.requestId === requestId);
++					if (outcome?.outcome.type === "response") {
++						return { status: "ready", disposition: "execute_batch" };
++					}
++					if (!existingInteractionRequest) {
++						pi.appendEntry(requestType, {
++							version: 1,
++							requestId,
++							assistantEntryId: assistantEntry.id,
++							ownerCallId: request.toolCallId,
++							payload: { question: request.params.question },
++						} satisfies QuestionInteractionRequest);
++					}
++					if (controller?.resolverFailure === "throw") throw new Error("package failed");
++					if (controller?.resolverFailure === "malformed") return { status: "invalid" } as never;
++					return { status: "deferred", correlationId: requestId };
++				},
++			},
++			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
++				const outcome = findLastCustomData<QuestionOutcome>(ctx.sessionManager.getBranch(), outcomeType);
++				if (!outcome) throw new Error("Response was not found");
++				executions.push(params.question);
++				return { content: [{ type: "text", text: outcome.outcome.value }], details: {} };
++			},
++		});
++	};
++}
+diff --git a/packages/coding-agent/test/suite/regressions/15-atomic-tool-batches.test.ts b/packages/coding-agent/test/suite/regressions/15-atomic-tool-batches.test.ts
+new file mode 100644
+index 00000000..2d8d6fef
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/15-atomic-tool-batches.test.ts
+@@ -0,0 +1,109 @@
++import { mkdtempSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
++import { afterEach, describe, expect, it } from "vitest";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import {
++	deferredToolBatchMessage,
++	type InteractionRequestTestController,
++	questionExtension,
++} from "../deferred-tool-batch-fixture.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++describe("regression #15: atomic deferred tool batches", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	it("leaves the assistant batch recoverable when resolver validation fails after Interaction Request persistence", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-resolver-error-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const controller: InteractionRequestTestController = { resolverFailure: "malformed" };
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions, controller)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([
++			fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: "call-1" }), {
++				stopReason: "toolUse",
++			}),
++		]);
++
++		await expect(harness.session.prompt("Ask before shipping")).rejects.toMatchObject({ code: "resolver_error" });
++
++		expect(executions).toEqual([]);
++		expect(harness.getPendingResponseCount()).toBe(0);
++		expect(manager.getBranch().map((entry) => entry.type)).toEqual(["message", "message", "custom"]);
++		expect(manager.getBranch().flatMap((entry) => (entry.type === "message" ? [entry.message.role] : []))).toEqual([
++			"user",
++			"assistant",
++		]);
++		expect(harness.events.some((event) => event.type === "tool_execution_start")).toBe(false);
++		expect(harness.events.some((event) => event.type === "turn_end")).toBe(false);
++		expect(harness.events.map((event) => event.type).slice(-2)).toEqual(["agent_end", "agent_settled"]);
++	});
++
++	it("preserves typed resolver failures from explicit resume", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-resume-resolver-error-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const controller: InteractionRequestTestController = {};
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([], controller)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([
++			fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: "call-1" }), {
++				stopReason: "toolUse",
++			}),
++		]);
++		await harness.session.prompt("Ask before shipping");
++		const bytesBeforeResume = readFileSync(manager.getSessionFile()!, "utf8");
++		controller.resolverFailure = "malformed";
++
++		await expect(harness.session.resumeDeferred()).rejects.toMatchObject({ code: "resolver_error" });
++
++		expect(readFileSync(manager.getSessionFile()!, "utf8")).toBe(bytesBeforeResume);
++		expect(harness.session.deferredBatch?.phase).toBe("deferred");
++	});
++
++	it("does not mutate a Deferred Tool Batch after a Response when a sibling is missing", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-missing-sibling-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const controller: InteractionRequestTestController = {};
++		const initial = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([], controller)],
++		});
++		harnesses.push(initial);
++		initial.setResponses([deferredToolBatchMessage()]);
++		await initial.session.prompt("Ask before shipping");
++		controller.recordResponse?.("Yes");
++		const sessionFile = manager.getSessionFile()!;
++		const bytesBeforeResume = readFileSync(sessionFile, "utf8");
++		initial.cleanup();
++		harnesses.pop();
++
++		const reopened = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension([], undefined, { includeOrdinary: false })],
++		});
++		harnesses.push(reopened);
++
++		await expect(reopened.session.resumeDeferred()).rejects.toThrow(/Tool ordinary not found/);
++
++		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBeforeResume);
++		expect(reopened.session.deferredBatch?.phase).toBe("deferred");
++		expect(reopened.getPendingResponseCount()).toBe(0);
++	});
++});
+-- 
+2.50.1 (Apple Git-155)
+
