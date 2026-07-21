@@ -1,0 +1,1416 @@
+From 2b486444d305ddd0a6954cf1201bd64cb6282226 Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Tue, 21 Jul 2026 19:41:58 -0400
+Subject: [PATCH 5/5] feat: recover deferred batches idempotently
+
+---
+ packages/agent/src/agent-loop.ts              |  38 +-
+ packages/agent/src/agent.ts                   |   5 +-
+ packages/agent/src/types.ts                   |  33 +-
+ packages/agent/test/agent-loop.test.ts        |  14 +-
+ .../coding-agent/src/core/agent-session.ts    |  65 +-
+ .../coding-agent/src/core/deferred-batch.ts   | 250 ++++++-
+ packages/coding-agent/src/core/index.ts       |   3 +
+ packages/coding-agent/src/index.ts            |   3 +
+ .../test/suite/agent-session-deferred.test.ts |   8 +-
+ .../test/suite/deferred-tool-batch-fixture.ts |  20 +-
+ .../16-idempotent-deferred-recovery.test.ts   | 625 ++++++++++++++++++
+ .../19-interrupt-waiting-state.test.ts        |   6 +-
+ 12 files changed, 973 insertions(+), 97 deletions(-)
+ create mode 100644 packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts
+
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index 0cf3a1a5..74cd6f0c 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -196,12 +196,14 @@ export async function runAgentLoopResume(
+ 		? currentContext.tools?.find((candidate) => candidate.name === ownerCall.name)
+ 		: undefined;
+ 	const capability = ownerTool?.deferral;
++	const isPersisted = deferred.correlationId !== undefined;
+ 	if (
+ 		!ownerCall ||
+ 		!ownerTool ||
+ 		!capability ||
+-		capability.handlerId !== deferred.handlerId ||
+-		!capability.resumableHandlerVersions.includes(deferred.handlerVersion)
++		(isPersisted &&
++			(capability.handlerId !== deferred.handlerId ||
++				!capability.resumableHandlerVersions.includes(deferred.handlerVersion)))
+ 	) {
+ 		throw new Error(`Deferred owner call ${deferred.ownerCallId} is unavailable`);
+ 	}
+@@ -223,16 +225,27 @@ export async function runAgentLoopResume(
+ 					operation: "evaluate",
+ 					toolCallId: ownerCall.id,
+ 					params: ownerPreparation.args,
+-					persistedHandlerVersion: deferred.handlerVersion,
++					persistedHandlerVersion: isPersisted ? deferred.handlerVersion : undefined,
+ 				},
+ 		signal,
+ 	);
+ 	if (resolution.status === "deferred") {
+-		if (resolution.correlationId !== deferred.correlationId) {
++		if (isPersisted && resolution.correlationId !== deferred.correlationId) {
+ 			throw new ToolDeferralResolverError(
+ 				`Deferred owner call ${deferred.ownerCallId} returned a conflicting correlation`,
+ 			);
+ 		}
++		if (!isPersisted) {
++			await emit({
++				type: "tool_batch_deferred",
++				ownerCallId: deferred.ownerCallId,
++				heldCallIds: [...deferred.heldCallIds],
++				correlationId: resolution.correlationId,
++				protocolVersion: TOOL_DEFERRAL_PROTOCOL_VERSION,
++				handlerId: capability.handlerId,
++				handlerVersion: capability.handlerVersion,
++			});
++		}
+ 		await emit({ type: "agent_end", messages: newMessages });
+ 		return "still_deferred";
+ 	}
+@@ -256,7 +269,10 @@ export async function runAgentLoopResume(
+ 		);
+ 	} else {
+ 		const preparations = missingToolCalls.map((toolCall) => prevalidateToolCall(currentContext, toolCall));
+-		const batchExecution = await executeToolCallsWithPreparations(
++		// Recovery advances one durable append boundary at a time. A persisted
++		// result must settle before a later call may begin, regardless of the
++		// ordinary live-batch execution mode.
++		const batchExecution = await executeToolCallsSequential(
+ 			currentContext,
+ 			assistantMessage,
+ 			missingToolCalls,
+@@ -792,7 +808,12 @@ async function invokeToolDeferralResolver<TParams>(
+ 	try {
+ 		resolution = await Promise.race([capability.resolve(request, signal), aborted]);
+ 	} catch (error) {
+-		if (error instanceof ToolDeferralResolverError) throw error;
++		if (
++			error instanceof ToolDeferralResolverError ||
++			(error instanceof Error && "code" in error && error.code === "invalid_deferred_history")
++		) {
++			throw error;
++		}
+ 		throw new ToolDeferralResolverError(
+ 			`Tool deferral resolver failed: ${error instanceof Error ? error.message : String(error)}`,
+ 		);
+@@ -942,9 +963,10 @@ async function completeInterruptedToolBatch(
+ 				isError: true,
+ 			};
+ 		}
+-		messages.push(createToolResultMessage(finalized));
++		const message = createToolResultMessage(finalized);
++		await emitToolResultMessage(message, emit);
++		messages.push(message);
+ 	}
+-	for (const message of messages) await emitToolResultMessage(message, emit);
+ 	return { status: "completed", messages, terminate: false };
+ }
+ 
+diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
+index 389f96f2..9cab7138 100644
+--- a/packages/agent/src/agent.ts
++++ b/packages/agent/src/agent.ts
+@@ -525,7 +525,10 @@ export class Agent {
+ 		try {
+ 			return await executor(abortController.signal);
+ 		} catch (error) {
+-			const failClosed = options.failClosed === true || error instanceof ToolDeferralResolverError;
++			const failClosed =
++				options.failClosed === true ||
++				error instanceof ToolDeferralResolverError ||
++				(error instanceof Error && "code" in error && error.code === "deferred_append_error");
+ 			await this.handleRunFailure(error, abortController.signal.aborted, failClosed);
+ 			if (failClosed) throw error;
+ 			return undefined;
+diff --git a/packages/agent/src/types.ts b/packages/agent/src/types.ts
+index 1fb034da..0e38814c 100644
+--- a/packages/agent/src/types.ts
++++ b/packages/agent/src/types.ts
+@@ -119,18 +119,27 @@ export type ToolDeferralResolution =
+ 	| { status: "deferred"; correlationId: string }
+ 	| { status: "unavailable"; reason: string };
+ 
+-/** Persisted identities required to rebind one deferred tool batch. */
+-export interface DeferredToolBatchResume {
+-	ownerCallId: string;
+-	heldCallIds: readonly string[];
+-	correlationId: string;
+-	handlerId: string;
+-	handlerVersion: number;
+-	interruption?: {
+-		provenance: "new_user_prompt" | "preexisting_user_input";
+-		messages: readonly AgentMessage[];
+-	};
+-}
++/** Identities required to recover or resume one deferred tool batch. */
++export type DeferredToolBatchResume =
++	| {
++			ownerCallId: string;
++			heldCallIds: readonly string[];
++			correlationId?: undefined;
++			handlerId?: undefined;
++			handlerVersion?: undefined;
++			interruption?: undefined;
++	  }
++	| {
++			ownerCallId: string;
++			heldCallIds: readonly string[];
++			correlationId: string;
++			handlerId: string;
++			handlerVersion: number;
++			interruption?: {
++				provenance: "new_user_prompt" | "preexisting_user_input";
++				messages: readonly AgentMessage[];
++			};
++	  };
+ 
+ export type DeferredToolBatchResumeStatus = "still_deferred" | "advanced";
+ 
+diff --git a/packages/agent/test/agent-loop.test.ts b/packages/agent/test/agent-loop.test.ts
+index b720b135..0b45dad2 100644
+--- a/packages/agent/test/agent-loop.test.ts
++++ b/packages/agent/test/agent-loop.test.ts
+@@ -480,11 +480,11 @@ describe("agentLoop with AgentMessage", () => {
+ 		expect(events.map((event) => event.type)).toEqual([
+ 			"agent_start",
+ 			"tool_execution_start",
+-			"tool_execution_start",
+-			"tool_execution_end",
+ 			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"tool_execution_start",
++			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
+ 			"turn_end",
+@@ -501,12 +501,8 @@ describe("agentLoop with AgentMessage", () => {
+ 		).toEqual(["call-1", "call-2"]);
+ 	});
+ 
+-	it("executes only missing held calls in parallel while reporting batch results in source order", async () => {
++	it("executes only missing held calls one durable boundary at a time", async () => {
+ 		const schema = Type.Object({ value: Type.String() });
+-		let releaseOwner: (() => void) | undefined;
+-		const ownerReleased = new Promise<void>((resolve) => {
+-			releaseOwner = resolve;
+-		});
+ 		const executions: string[] = [];
+ 		const owner: AgentTool<typeof schema, never> = {
+ 			name: "question",
+@@ -520,7 +516,6 @@ describe("agentLoop with AgentMessage", () => {
+ 				resolve: async () => ({ status: "ready", disposition: "execute_batch" }),
+ 			},
+ 			async execute(_id, params) {
+-				await ownerReleased;
+ 				executions.push(params.value);
+ 				return { content: [{ type: "text", text: params.value }], details: undefined as never };
+ 			},
+@@ -532,7 +527,6 @@ describe("agentLoop with AgentMessage", () => {
+ 			parameters: schema,
+ 			async execute(_id, params) {
+ 				executions.push(params.value);
+-				releaseOwner?.();
+ 				return { content: [{ type: "text", text: params.value }], details: undefined as never };
+ 			},
+ 		};
+@@ -590,7 +584,7 @@ describe("agentLoop with AgentMessage", () => {
+ 
+ 		expect(status).toBe("advanced");
+ 		expect(gateCalls).toEqual(["call-1", "call-2"]);
+-		expect(executions).toEqual(["sibling", "owner"]);
++		expect(executions).toEqual(["owner", "sibling"]);
+ 		expect(
+ 			events.flatMap((event) =>
+ 				event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index ef8345bc..b7986134 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -63,7 +63,12 @@ import {
+ 	shouldCompact,
+ } from "./compaction/index.ts";
+ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+-import { type DeferredBatchSnapshot, type ResumeDeferredResult, reconstructDeferredBatch } from "./deferred-batch.ts";
++import {
++	type DeferredBatchSnapshot,
++	InvalidDeferredHistoryError,
++	type ResumeDeferredResult,
++	reconstructDeferredBatch,
++} from "./deferred-batch.ts";
+ import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
+ import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
+ import {
+@@ -628,15 +633,21 @@ export class AgentSession {
+ 		if (!assistantEntry) {
+ 			throw new Error(`Cannot persist deferred tool batch: assistant entry for ${event.ownerCallId} was not found`);
+ 		}
+-		this.sessionManager.appendToolBatchDeferred({
+-			assistantEntryId: assistantEntry.id,
+-			ownerCallId: event.ownerCallId,
+-			heldCallIds: event.heldCallIds,
+-			correlationId: event.correlationId,
+-			protocolVersion: event.protocolVersion,
+-			handlerId: event.handlerId,
+-			handlerVersion: event.handlerVersion,
+-		});
++		try {
++			this.sessionManager.appendToolBatchDeferred({
++				assistantEntryId: assistantEntry.id,
++				ownerCallId: event.ownerCallId,
++				heldCallIds: event.heldCallIds,
++				correlationId: event.correlationId,
++				protocolVersion: event.protocolVersion,
++				handlerId: event.handlerId,
++				handlerVersion: event.handlerVersion,
++			});
++		} catch (error) {
++			throw Object.assign(new Error(error instanceof Error ? error.message : String(error), { cause: error }), {
++				code: "deferred_append_error" as const,
++			});
++		}
+ 	}
+ 
+ 	/** Internal handler for agent events - shared by subscribe and reconnect */
+@@ -949,26 +960,38 @@ export class AgentSession {
+ 	async resumeDeferred(): Promise<ResumeDeferredResult> {
+ 		const snapshot = this.deferredBatch;
+ 		if (!snapshot) return { status: "none", deferredBatch: undefined };
++		if (snapshot.kind === "invalid") throw new InvalidDeferredHistoryError(snapshot);
+ 		if (!this.isIdle)
+ 			throw new Error("Agent is already processing. Wait for completion before resuming deferred work.");
+-		if (snapshot.phase === "markerless") return { status: "still_deferred", deferredBatch: snapshot };
+ 		const marker = this.sessionManager
+ 			.getBranch()
+ 			.find((entry) => entry.type === "tool_batch_deferred" && entry.assistantEntryId === snapshot.assistantEntryId);
+-		if (!marker || marker.type !== "tool_batch_deferred") {
++		if (snapshot.phase !== "markerless" && (!marker || marker.type !== "tool_batch_deferred")) {
+ 			return { status: "still_deferred", deferredBatch: snapshot };
+ 		}
+ 
+ 		this._isAgentRunActive = true;
+ 		let status: "still_deferred" | "advanced";
+ 		try {
+-			status = await this.agent.resumeDeferredToolBatch({
+-				ownerCallId: marker.ownerCallId,
+-				heldCallIds: marker.heldCallIds,
+-				correlationId: marker.correlationId,
+-				handlerId: marker.handlerId,
+-				handlerVersion: marker.handlerVersion,
+-			});
++			if (snapshot.phase === "continuation") {
++				await this.agent.continue();
++				status = "advanced";
++			} else {
++				status = await this.agent.resumeDeferredToolBatch(
++					marker && marker.type === "tool_batch_deferred"
++						? {
++								ownerCallId: marker.ownerCallId,
++								heldCallIds: marker.heldCallIds,
++								correlationId: marker.correlationId,
++								handlerId: marker.handlerId,
++								handlerVersion: marker.handlerVersion,
++							}
++						: {
++								ownerCallId: snapshot.ownerCallId,
++								heldCallIds: snapshot.calls.map((call) => call.toolCallId),
++							},
++				);
++			}
+ 			while (await this._handlePostAgentRun()) {
+ 				await this.agent.continue();
+ 			}
+@@ -1375,6 +1398,10 @@ export class AgentSession {
+ 		}
+ 
+ 		const deferred = this.deferredBatch;
++		if (deferred?.kind === "invalid") {
++			preflightResult?.(false);
++			throw new InvalidDeferredHistoryError(deferred);
++		}
+ 		if (deferred?.availability.status === "unavailable") {
+ 			preflightResult?.(false);
+ 			throw new AgentSessionError(
+diff --git a/packages/coding-agent/src/core/deferred-batch.ts b/packages/coding-agent/src/core/deferred-batch.ts
+index 44dadc18..939d32ff 100644
+--- a/packages/coding-agent/src/core/deferred-batch.ts
++++ b/packages/coding-agent/src/core/deferred-batch.ts
+@@ -1,5 +1,5 @@
+ import { type AgentTool, TOOL_DEFERRAL_PROTOCOL_VERSION } from "@earendil-works/pi-agent-core";
+-import type { AssistantMessage } from "@earendil-works/pi-ai";
++import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
+ import type { SessionEntry, SessionManager, ToolBatchDeferredEntry } from "./session-manager.ts";
+ 
+ export interface DeferredBatchCallSnapshot {
+@@ -15,17 +15,44 @@ export interface DeferredBatchUnavailableReason {
+ 	toolName?: string;
+ }
+ 
+-export interface DeferredBatchSnapshot {
++export interface DeferredBatch {
+ 	kind: "batch";
+ 	sessionId: string;
+ 	assistantEntryId: string;
+ 	ownerCallId: string;
+ 	calls: DeferredBatchCallSnapshot[];
+-	phase: "markerless" | "deferred";
++	phase: "markerless" | "deferred" | "partial" | "continuation";
+ 	correlationId?: string;
+ 	availability: { status: "available" } | { status: "unavailable"; reasons: DeferredBatchUnavailableReason[] };
+ }
+ 
++export interface InvalidDeferredBatch {
++	kind: "invalid";
++	phase?: undefined;
++	code:
++		| "duplicate_tool_result"
++		| "tool_result_mismatch"
++		| "marker_mismatch"
++		| "duplicate_deferred_marker"
++		| "conflicting_correlation"
++		| "multiple_deferred_batches"
++		| "multiple_deferral_owners";
++	message: string;
++}
++
++export type DeferredBatchSnapshot = DeferredBatch | InvalidDeferredBatch;
++
++export class InvalidDeferredHistoryError extends Error {
++	readonly code = "invalid_deferred_history";
++	readonly deferredBatch: InvalidDeferredBatch;
++
++	constructor(deferredBatch: InvalidDeferredBatch) {
++		super(deferredBatch.message);
++		this.name = "InvalidDeferredHistoryError";
++		this.deferredBatch = deferredBatch;
++	}
++}
++
+ export interface ResumeDeferredResult {
+ 	status: "none" | "still_deferred" | "unavailable" | "advanced";
+ 	deferredBatch: DeferredBatchSnapshot | undefined;
+@@ -33,50 +60,167 @@ export interface ResumeDeferredResult {
+ 
+ type AssistantBatch = {
+ 	entryId: string;
++	entryIndex: number;
+ 	calls: Extract<AssistantMessage["content"][number], { type: "toolCall" }>[];
+ };
+ 
+-function recordedResultIds(branch: SessionEntry[]): Set<string> {
+-	return new Set(
+-		branch.flatMap((entry) =>
+-			entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
+-		),
+-	);
++type RecordedResult = {
++	entryIndex: number;
++	message: ToolResultMessage;
++};
++
++type MarkedBatch = {
++	batch: AssistantBatch;
++	marker: ToolBatchDeferredEntry;
++};
++
++function invalid(code: InvalidDeferredBatch["code"], message: string): InvalidDeferredBatch {
++	return { kind: "invalid", code, message };
+ }
+ 
+-function findLatestUnmatchedBatch(branch: SessionEntry[], resultIds: ReadonlySet<string>): AssistantBatch | undefined {
+-	for (let index = branch.length - 1; index >= 0; index--) {
+-		const entry = branch[index];
++function assistantBatches(branch: SessionEntry[]): Map<string, AssistantBatch> {
++	const batches = new Map<string, AssistantBatch>();
++	for (let entryIndex = 0; entryIndex < branch.length; entryIndex++) {
++		const entry = branch[entryIndex];
+ 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+ 		const calls = entry.message.content.filter((content) => content.type === "toolCall");
+-		if (calls.some((call) => !resultIds.has(call.id))) return { entryId: entry.id, calls };
++		if (calls.length > 0) batches.set(entry.id, { entryId: entry.id, entryIndex, calls });
+ 	}
+-	return undefined;
++	return batches;
+ }
+ 
+-function findMarker(branch: SessionEntry[], assistantEntryId: string): ToolBatchDeferredEntry | undefined {
+-	for (let index = branch.length - 1; index >= 0; index--) {
+-		const entry = branch[index];
+-		if (entry.type === "tool_batch_deferred" && entry.assistantEntryId === assistantEntryId) return entry;
++function recordedResults(branch: SessionEntry[]): Map<string, RecordedResult[]> {
++	const results = new Map<string, RecordedResult[]>();
++	for (let entryIndex = 0; entryIndex < branch.length; entryIndex++) {
++		const entry = branch[entryIndex];
++		if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
++		const recorded = results.get(entry.message.toolCallId) ?? [];
++		recorded.push({ entryIndex, message: entry.message });
++		results.set(entry.message.toolCallId, recorded);
+ 	}
+-	return undefined;
++	return results;
+ }
+ 
+-export function reconstructDeferredBatch(
++function inspectMarkedBatches(
++	branch: SessionEntry[],
++	batches: ReadonlyMap<string, AssistantBatch>,
++	results: ReadonlyMap<string, RecordedResult[]>,
++): MarkedBatch[] | InvalidDeferredBatch {
++	const marked: MarkedBatch[] = [];
++	const seenAssistants = new Set<string>();
++	const provenanceByCorrelation = new Map<string, string>();
++	const provenanceByCallId = new Map<string, string>();
++
++	for (const entry of branch) {
++		if (entry.type !== "tool_batch_deferred") continue;
++		if (seenAssistants.has(entry.assistantEntryId)) {
++			return invalid(
++				"duplicate_deferred_marker",
++				`Deferred history contains multiple markers for assistant ${entry.assistantEntryId}`,
++			);
++		}
++		seenAssistants.add(entry.assistantEntryId);
++
++		const batch = batches.get(entry.assistantEntryId);
++		if (!batch) {
++			return invalid("marker_mismatch", `Deferred marker references missing assistant ${entry.assistantEntryId}`);
++		}
++		const callIds = batch.calls.map((call) => call.id);
++		if (
++			entry.heldCallIds.length !== callIds.length ||
++			entry.heldCallIds.some((callId, index) => callId !== callIds[index]) ||
++			entry.heldCallIds.filter((callId) => callId === entry.ownerCallId).length !== 1
++		) {
++			return invalid(
++				"marker_mismatch",
++				`Deferred marker for assistant ${entry.assistantEntryId} does not match its source-ordered tool calls`,
++			);
++		}
++
++		const correlation = `${entry.handlerId}\u0000${entry.correlationId}`;
++		const provenance = `${entry.assistantEntryId}\u0000${entry.ownerCallId}`;
++		const existingProvenance = provenanceByCorrelation.get(correlation);
++		if (existingProvenance !== undefined && existingProvenance !== provenance) {
++			return invalid(
++				"conflicting_correlation",
++				`Deferred correlation ${entry.correlationId} maps to conflicting owner provenance`,
++			);
++		}
++		provenanceByCorrelation.set(correlation, provenance);
++
++		for (const call of batch.calls) {
++			const existingCallProvenance = provenanceByCallId.get(call.id);
++			if (existingCallProvenance !== undefined && existingCallProvenance !== batch.entryId) {
++				return invalid("marker_mismatch", `Deferred call ${call.id} occurs in multiple assistant batches`);
++			}
++			provenanceByCallId.set(call.id, batch.entryId);
++			const recorded = results.get(call.id) ?? [];
++			if (recorded.length > 1) {
++				return invalid("duplicate_tool_result", `Deferred history contains duplicate results for call ${call.id}`);
++			}
++			const result = recorded[0];
++			if (result && (result.entryIndex <= batch.entryIndex || result.message.toolName !== call.name)) {
++				return invalid(
++					"tool_result_mismatch",
++					`Result for deferred call ${call.id} does not match its owning assistant call`,
++				);
++			}
++		}
++		marked.push({ batch, marker: entry });
++	}
++	return marked;
++}
++
++function isUnresolved(
++	branch: SessionEntry[],
++	marked: MarkedBatch,
++	results: ReadonlyMap<string, RecordedResult[]>,
++): boolean {
++	return (
++		marked.batch.calls.some((call) => !results.has(call.id)) ||
++		!branch
++			.slice(marked.batch.entryIndex + 1)
++			.some((entry) => entry.type === "message" && entry.message.role === "assistant")
++	);
++}
++
++function markerlessBatches(
++	batches: ReadonlyMap<string, AssistantBatch>,
++	markedAssistantIds: ReadonlySet<string>,
++	results: ReadonlyMap<string, RecordedResult[]>,
++	tools: readonly AgentTool[],
++): Array<{ batch: AssistantBatch; ownerCallId: string }> | InvalidDeferredBatch {
++	const candidates: Array<{ batch: AssistantBatch; ownerCallId: string }> = [];
++	for (const batch of batches.values()) {
++		if (markedAssistantIds.has(batch.entryId)) continue;
++		// A markerless recovery candidate is the completed assistant append boundary,
++		// before any result exists. Do not reinterpret an ordinary partial batch.
++		if (batch.calls.some((call) => results.has(call.id))) continue;
++		const owners = batch.calls.filter((call) => tools.some((tool) => tool.name === call.name && tool.deferral));
++		if (owners.length > 1) {
++			return invalid(
++				"multiple_deferral_owners",
++				`Markerless assistant ${batch.entryId} contains multiple deferral-capable calls`,
++			);
++		}
++		if (owners.length === 1) candidates.push({ batch, ownerCallId: owners[0].id });
++	}
++	return candidates;
++}
++
++function snapshot(
+ 	sessionManager: SessionManager,
++	batch: AssistantBatch,
++	ownerCallId: string,
++	results: ReadonlyMap<string, RecordedResult[]>,
+ 	tools: readonly AgentTool[],
+-): DeferredBatchSnapshot | undefined {
+-	const branch = sessionManager.getBranch();
+-	const resultIds = recordedResultIds(branch);
+-	const batch = findLatestUnmatchedBatch(branch, resultIds);
+-	if (!batch) return undefined;
+-	const marker = findMarker(branch, batch.entryId);
+-	let ownerCallId: string;
+-	let availability: DeferredBatchSnapshot["availability"] = { status: "available" };
++	marker?: ToolBatchDeferredEntry,
++): DeferredBatch {
++	const recordedCount = batch.calls.filter((call) => results.has(call.id)).length;
++	let availability: DeferredBatch["availability"] = { status: "available" };
+ 	if (marker) {
+ 		const ownerCall = batch.calls.find((call) => call.id === marker.ownerCallId);
+ 		const owner = ownerCall ? tools.find((tool) => tool.name === ownerCall.name) : undefined;
+-		ownerCallId = marker.ownerCallId;
+ 		if (marker.protocolVersion !== TOOL_DEFERRAL_PROTOCOL_VERSION) {
+ 			availability = {
+ 				status: "unavailable",
+@@ -110,12 +254,7 @@ export function reconstructDeferredBatch(
+ 				],
+ 			};
+ 		}
+-	} else {
+-		const owners = batch.calls.filter((call) => tools.some((tool) => tool.name === call.name && tool.deferral));
+-		if (owners.length !== 1) return undefined;
+-		ownerCallId = owners[0].id;
+ 	}
+-
+ 	return {
+ 		kind: "batch",
+ 		sessionId: sessionManager.getSessionId(),
+@@ -124,10 +263,49 @@ export function reconstructDeferredBatch(
+ 		calls: batch.calls.map((call) => ({
+ 			toolCallId: call.id,
+ 			toolName: call.name,
+-			result: resultIds.has(call.id) ? "recorded" : "missing",
++			result: results.has(call.id) ? "recorded" : "missing",
+ 		})),
+-		phase: marker ? "deferred" : "markerless",
++		phase: marker
++			? recordedCount === batch.calls.length
++				? "continuation"
++				: recordedCount > 0
++					? "partial"
++					: "deferred"
++			: "markerless",
+ 		...(marker ? { correlationId: marker.correlationId } : {}),
+ 		availability,
+ 	};
+ }
++
++export function reconstructDeferredBatch(
++	sessionManager: SessionManager,
++	tools: readonly AgentTool[],
++): DeferredBatchSnapshot | undefined {
++	const branch = sessionManager.getBranch();
++	const batches = assistantBatches(branch);
++	const results = recordedResults(branch);
++	const inspected = inspectMarkedBatches(branch, batches, results);
++	if (!Array.isArray(inspected)) return inspected;
++
++	const unresolved = inspected.filter((marked) => isUnresolved(branch, marked, results));
++	const markerless = markerlessBatches(
++		batches,
++		new Set(inspected.map((marked) => marked.batch.entryId)),
++		results,
++		tools,
++	);
++	if (!Array.isArray(markerless)) return markerless;
++	if (unresolved.length + markerless.length > 1) {
++		return invalid(
++			"multiple_deferred_batches",
++			"Deferred history contains multiple unresolved tool batches on the active branch",
++		);
++	}
++	const active = unresolved[0];
++	if (!active) {
++		const candidate = markerless[0];
++		return candidate ? snapshot(sessionManager, candidate.batch, candidate.ownerCallId, results, tools) : undefined;
++	}
++
++	return snapshot(sessionManager, active.batch, active.marker.ownerCallId, results, tools, active.marker);
++}
+diff --git a/packages/coding-agent/src/core/index.ts b/packages/coding-agent/src/core/index.ts
+index ba40b9cd..d6486606 100644
+--- a/packages/coding-agent/src/core/index.ts
++++ b/packages/coding-agent/src/core/index.ts
+@@ -29,11 +29,14 @@ export {
+ export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+ export type { CompactionResult } from "./compaction/index.ts";
+ export type {
++	DeferredBatch,
+ 	DeferredBatchCallSnapshot,
+ 	DeferredBatchSnapshot,
+ 	DeferredBatchUnavailableReason,
++	InvalidDeferredBatch,
+ 	ResumeDeferredResult,
+ } from "./deferred-batch.ts";
++export { InvalidDeferredHistoryError } from "./deferred-batch.ts";
+ export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
+ export { areExperimentalFeaturesEnabled } from "./experimental.ts";
+ // Extensions system
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index 6ddbca91..0ed94523 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -50,11 +50,14 @@ export {
+ 	shouldCompact,
+ } from "./core/compaction/index.ts";
+ export type {
++	DeferredBatch,
+ 	DeferredBatchCallSnapshot,
+ 	DeferredBatchSnapshot,
+ 	DeferredBatchUnavailableReason,
++	InvalidDeferredBatch,
+ 	ResumeDeferredResult,
+ } from "./core/deferred-batch.ts";
++export { InvalidDeferredHistoryError } from "./core/deferred-batch.ts";
+ export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
+ // Extension system
+ export type {
+diff --git a/packages/coding-agent/test/suite/agent-session-deferred.test.ts b/packages/coding-agent/test/suite/agent-session-deferred.test.ts
+index ce617b38..45e54c53 100644
+--- a/packages/coding-agent/test/suite/agent-session-deferred.test.ts
++++ b/packages/coding-agent/test/suite/agent-session-deferred.test.ts
+@@ -192,15 +192,15 @@ describe("durable tool-batch deferral", () => {
+ 		expect(reopened.events.map((event) => event.type).filter((type) => type !== "message_update")).toEqual([
+ 			"agent_start",
+ 			"tool_execution_start",
+-			"tool_execution_start",
+-			"tool_execution_start",
+-			"tool_execution_end",
+-			"tool_execution_end",
+ 			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"tool_execution_start",
++			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"tool_execution_start",
++			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
+ 			"turn_end",
+diff --git a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+index 83c7aeb0..25f7f6d2 100644
+--- a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
++++ b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+@@ -43,6 +43,10 @@ function findLastCustomData<T>(branch: SessionEntry[], customType: string): T |
+ 	return undefined;
+ }
+ 
++function invalidDeferredHistory(message: string): Error & { code: "invalid_deferred_history" } {
++	return Object.assign(new Error(message), { code: "invalid_deferred_history" as const });
++}
++
+ export function deferredToolBatchMessage() {
+ 	return fauxAssistantMessage(
+ 		[
+@@ -133,13 +137,21 @@ export function questionExtension(
+ 						}
+ 					}
+ 					if (!assistantEntry) throw new Error("owning assistant entry not found");
+-					const existingInteractionRequest = branch
++					const matchingRequests = branch
+ 						.map((entry) => customData<QuestionInteractionRequest>(entry, requestType))
+-						.find((entry) => entry?.ownerCallId === request.toolCallId);
++						.filter((entry) => entry?.ownerCallId === request.toolCallId);
++					if (matchingRequests.length > 1) {
++						throw invalidDeferredHistory(`Multiple Interaction Requests map to owner ${request.toolCallId}`);
++					}
++					const existingInteractionRequest = matchingRequests[0];
+ 					const requestId = existingInteractionRequest?.requestId ?? "request-1";
+-					const outcome = branch
++					const outcomes = branch
+ 						.map((entry) => customData<QuestionOutcome>(entry, outcomeType))
+-						.find((entry) => entry?.requestId === requestId);
++						.filter((entry) => entry?.requestId === requestId);
++					if (outcomes.length > 1) {
++						throw invalidDeferredHistory(`Multiple terminal outcomes exist for Interaction Request ${requestId}`);
++					}
++					const outcome = outcomes[0];
+ 					if (outcome?.outcome.type === "response") {
+ 						return { status: "ready", disposition: "execute_batch" };
+ 					}
+diff --git a/packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts b/packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts
+new file mode 100644
+index 00000000..bb951e26
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts
+@@ -0,0 +1,625 @@
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage, fauxToolCall, type ToolResultMessage } from "@earendil-works/pi-ai";
++import { afterEach, describe, expect, it } from "vitest";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import {
++	deferredToolBatchMessage,
++	type InteractionRequestTestController,
++	outcomeType,
++	questionExtension,
++} from "../deferred-tool-batch-fixture.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++function toolResult(toolCallId: string, toolName: string): ToolResultMessage {
++	return {
++		role: "toolResult",
++		toolCallId,
++		toolName,
++		content: [{ type: "text", text: `result:${toolCallId}` }],
++		isError: false,
++		timestamp: Date.now(),
++	};
++}
++
++describe("regression #16: idempotent deferred recovery", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	async function createPersistedBatch(
++		results: Array<string | readonly [string, string]> = [],
++		marker: { ownerCallId?: string; heldCallIds?: string[]; correlationId?: string; duplicate?: boolean } = {},
++	): Promise<{
++		assistantEntryId: string;
++		harness: Harness;
++		manager: SessionManager;
++	}> {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-boundary-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		const assistantEntryId = manager.appendMessage(deferredToolBatchMessage());
++		manager.appendCustomEntry("dev.example.question/request", {
++			version: 1,
++			requestId: "request-1",
++			assistantEntryId,
++			ownerCallId: "call-1",
++		});
++		const deferredMarker = {
++			assistantEntryId,
++			ownerCallId: marker.ownerCallId ?? "call-1",
++			heldCallIds: marker.heldCallIds ?? ["call-0", "call-1", "call-2"],
++			correlationId: marker.correlationId ?? "request-1",
++			protocolVersion: 1,
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++		};
++		manager.appendToolBatchDeferred(deferredMarker);
++		if (marker.duplicate) manager.appendToolBatchDeferred(deferredMarker);
++		for (const result of results) {
++			const [callId, toolName] =
++				typeof result === "string" ? [result, result === "call-1" ? "question" : "ordinary"] : result;
++			manager.appendMessage(toolResult(callId, toolName));
++		}
++		const harness = await createHarness({
++			sessionManager: SessionManager.open(manager.getSessionFile()!),
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		return { assistantEntryId, harness, manager };
++	}
++
++	it("reconstructs a partially recorded Deferred Tool Batch from active ancestry", async () => {
++		const { assistantEntryId, harness } = await createPersistedBatch(["call-0"]);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "batch",
++			assistantEntryId,
++			phase: "partial",
++			calls: [
++				{ toolCallId: "call-0", result: "recorded" },
++				{ toolCallId: "call-1", result: "missing" },
++				{ toolCallId: "call-2", result: "missing" },
++			],
++		});
++	});
++
++	it("stops later calls after a result append failure and retries only unrecorded work after reopen", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-result-append-failure-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const controller: InteractionRequestTestController = {};
++		const initial = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions, controller)],
++		});
++		harnesses.push(initial);
++		initial.setResponses([deferredToolBatchMessage()]);
++		await initial.session.prompt("Ask before shipping");
++		controller.recordResponse?.("Yes");
++		const appendMessage = initial.sessionManager.appendMessage.bind(initial.sessionManager);
++		initial.sessionManager.appendMessage = (message) => {
++			if (message.role === "toolResult" && message.toolCallId === "call-1") {
++				throw new Error("simulated result append failure");
++			}
++			return appendMessage(message);
++		};
++
++		await expect(initial.session.resumeDeferred()).rejects.toThrow("simulated result append failure");
++
++		expect(executions).toEqual(["ordinary:Prepare?", "Ship?"]);
++		initial.sessionManager.appendMessage = appendMessage;
++		const sessionFile = manager.getSessionFile()!;
++		initial.cleanup();
++		harnesses.pop();
++		const reopened = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(reopened);
++		reopened.setResponses([fauxAssistantMessage("Continued")]);
++
++		const result = await reopened.session.resumeDeferred();
++
++		expect(result).toEqual({ status: "advanced", deferredBatch: undefined });
++		// "Ship?" runs twice because its side effect completed before its result append failed.
++		// Recovery guarantees transcript idempotency, not exactly-once external side effects.
++		expect(executions).toEqual(["ordinary:Prepare?", "Ship?", "Ship?", "ordinary:Deploy?"]);
++		expect(
++			reopened.sessionManager
++				.getBranch()
++				.flatMap((entry) =>
++					entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
++				),
++		).toEqual(["call-0", "call-1", "call-2"]);
++	});
++
++	it("stops interrupted owner execution when an earlier sibling result append fails", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-interruption-result-append-failure-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		harness.setResponses([fauxAssistantMessage("Redirected")]);
++		const appendMessage = harness.sessionManager.appendMessage.bind(harness.sessionManager);
++		harness.sessionManager.appendMessage = (message) => {
++			if (message.role === "toolResult" && message.toolCallId === "call-0") {
++				throw new Error("simulated interrupted sibling append failure");
++			}
++			return appendMessage(message);
++		};
++
++		await expect(harness.session.prompt("Do something else")).rejects.toThrow(
++			"simulated interrupted sibling append failure",
++		);
++
++		expect(executions).toEqual([]);
++		expect(harness.getPendingResponseCount()).toBe(1);
++	});
++
++	it("retries provider continuation without replaying recorded tool results", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-continuation-append-failure-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const controller: InteractionRequestTestController = {};
++		const initial = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions, controller)],
++		});
++		harnesses.push(initial);
++		initial.setResponses([deferredToolBatchMessage()]);
++		await initial.session.prompt("Ask before shipping");
++		controller.recordResponse?.("Yes");
++		initial.setResponses([fauxAssistantMessage("First continuation")]);
++		const appendMessage = initial.sessionManager.appendMessage.bind(initial.sessionManager);
++		initial.sessionManager.appendMessage = (message) => {
++			if (message.role === "assistant") throw new Error("simulated continuation append failure");
++			return appendMessage(message);
++		};
++
++		await expect(initial.session.resumeDeferred()).rejects.toThrow("simulated continuation append failure");
++
++		expect(executions).toEqual(["ordinary:Prepare?", "Ship?", "ordinary:Deploy?"]);
++		initial.sessionManager.appendMessage = appendMessage;
++		const sessionFile = manager.getSessionFile()!;
++		initial.cleanup();
++		harnesses.pop();
++		const reopened = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(reopened);
++		expect(reopened.session.deferredBatch?.kind).toBe("batch");
++		expect(reopened.session.deferredBatch).toMatchObject({ phase: "continuation" });
++		reopened.setResponses([fauxAssistantMessage("Recovered continuation")]);
++
++		expect(await reopened.session.resumeDeferred()).toEqual({ status: "advanced", deferredBatch: undefined });
++		expect(await reopened.session.resumeDeferred()).toEqual({ status: "none", deferredBatch: undefined });
++		expect(executions).toEqual(["ordinary:Prepare?", "Ship?", "ordinary:Deploy?"]);
++		expect(
++			reopened.sessionManager
++				.getBranch()
++				.flatMap((entry) =>
++					entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
++				),
++		).toEqual(["call-0", "call-1", "call-2"]);
++	});
++
++	it("retries an interrupted provider continuation without re-resolving or replaying the owner", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-interrupted-continuation-failure-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const initial = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(initial);
++		initial.setResponses([deferredToolBatchMessage()]);
++		await initial.session.prompt("Ask before shipping");
++		initial.setResponses([fauxAssistantMessage("First redirected continuation")]);
++		const appendMessage = initial.sessionManager.appendMessage.bind(initial.sessionManager);
++		initial.sessionManager.appendMessage = (message) => {
++			if (message.role === "assistant") throw new Error("simulated interrupted continuation append failure");
++			return appendMessage(message);
++		};
++
++		await expect(initial.session.prompt("Do something else")).rejects.toThrow(
++			"simulated interrupted continuation append failure",
++		);
++
++		expect(executions).toEqual(["Ship?"]);
++		initial.sessionManager.appendMessage = appendMessage;
++		const sessionFile = manager.getSessionFile()!;
++		initial.cleanup();
++		harnesses.pop();
++		const reopened = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(reopened);
++		expect(reopened.session.deferredBatch).toMatchObject({ phase: "continuation" });
++		reopened.setResponses([fauxAssistantMessage("Recovered redirected continuation")]);
++
++		expect(await reopened.session.resumeDeferred()).toEqual({ status: "advanced", deferredBatch: undefined });
++		expect(executions).toEqual(["Ship?"]);
++		expect(reopened.getPendingResponseCount()).toBe(0);
++	});
++
++	it("preserves package detection of conflicting request mappings as invalid history", async () => {
++		const { assistantEntryId, harness } = await createPersistedBatch();
++		harness.sessionManager.appendCustomEntry("dev.example.question/request", {
++			version: 1,
++			requestId: "request-2",
++			assistantEntryId,
++			ownerCallId: "call-1",
++			payload: { question: "Different" },
++		});
++
++		await expect(harness.session.resumeDeferred()).rejects.toMatchObject({
++			code: "invalid_deferred_history",
++		});
++	});
++
++	it("preserves package detection of conflicting terminal outcomes as invalid history", async () => {
++		const { harness } = await createPersistedBatch();
++		for (const value of ["Yes", "No"]) {
++			harness.sessionManager.appendCustomEntry(outcomeType, {
++				version: 1,
++				requestId: "request-1",
++				outcome: { type: "response", value },
++			});
++		}
++
++		await expect(harness.session.resumeDeferred()).rejects.toMatchObject({
++			code: "invalid_deferred_history",
++		});
++	});
++
++	it("reports a marker whose owning assistant entry is absent", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-orphaned-marker-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		manager.appendToolBatchDeferred({
++			assistantEntryId: "missing-assistant",
++			ownerCallId: "call-1",
++			heldCallIds: ["call-1"],
++			correlationId: "request-1",
++			protocolVersion: 1,
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++		});
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "marker_mismatch",
++		});
++	});
++
++	it("reports one package correlation mapped to conflicting owner provenance", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-conflicting-correlation-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		const firstAssistantId = manager.appendMessage(
++			fauxAssistantMessage(fauxToolCall("question", { question: "First?" }, { id: "call-a" }), {
++				stopReason: "toolUse",
++			}),
++		);
++		manager.appendToolBatchDeferred({
++			assistantEntryId: firstAssistantId,
++			ownerCallId: "call-a",
++			heldCallIds: ["call-a"],
++			correlationId: "same-request",
++			protocolVersion: 1,
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++		});
++		manager.appendMessage(toolResult("call-a", "question"));
++		manager.appendMessage(fauxAssistantMessage("Continued"));
++		const secondAssistantId = manager.appendMessage(
++			fauxAssistantMessage(fauxToolCall("question", { question: "Second?" }, { id: "call-b" }), {
++				stopReason: "toolUse",
++			}),
++		);
++		manager.appendToolBatchDeferred({
++			assistantEntryId: secondAssistantId,
++			ownerCallId: "call-b",
++			heldCallIds: ["call-b"],
++			correlationId: "same-request",
++			protocolVersion: 1,
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++		});
++		const harness = await createHarness({
++			sessionManager: SessionManager.open(manager.getSessionFile()!),
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "conflicting_correlation",
++		});
++	});
++
++	it("reports multiple markerless deferral owners instead of choosing one", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-multiple-markerless-owners-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		manager.appendMessage(
++			fauxAssistantMessage(
++				[
++					fauxToolCall("question", { question: "First?" }, { id: "call-a" }),
++					fauxToolCall("question", { question: "Second?" }, { id: "call-b" }),
++				],
++				{ stopReason: "toolUse" },
++			),
++		);
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "multiple_deferral_owners",
++		});
++	});
++
++	it("reports multiple markerless recovery candidates instead of choosing the latest", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-multiple-markerless-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		for (const callId of ["call-a", "call-b"]) {
++			manager.appendMessage(
++				fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: callId }), {
++					stopReason: "toolUse",
++				}),
++			);
++		}
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "multiple_deferred_batches",
++		});
++	});
++
++	it("reports multiple unresolved batches instead of choosing the latest", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-multiple-deferred-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		for (const [callId, requestId] of [
++			["call-a", "request-a"],
++			["call-b", "request-b"],
++		] as const) {
++			const assistantEntryId = manager.appendMessage(
++				fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: callId }), {
++					stopReason: "toolUse",
++				}),
++			);
++			manager.appendToolBatchDeferred({
++				assistantEntryId,
++				ownerCallId: callId,
++				heldCallIds: [callId],
++				correlationId: requestId,
++				protocolVersion: 1,
++				handlerId: "dev.example.question",
++				handlerVersion: 1,
++			});
++		}
++		const harness = await createHarness({
++			sessionManager: SessionManager.open(manager.getSessionFile()!),
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "multiple_deferred_batches",
++		});
++	});
++
++	it("reports duplicate markers instead of choosing one", async () => {
++		const { harness } = await createPersistedBatch([], { duplicate: true });
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "duplicate_deferred_marker",
++		});
++	});
++
++	it("reports markers that do not exactly match their assistant batch", async () => {
++		const { harness } = await createPersistedBatch([], {
++			heldCallIds: ["call-1", "call-0", "call-2"],
++		});
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "marker_mismatch",
++		});
++	});
++
++	it("does not classify malformed ordinary tool history as a Deferred Tool Batch", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-ordinary-duplicate-result-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Run", timestamp: Date.now() });
++		manager.appendMessage(
++			fauxAssistantMessage(fauxToolCall("ordinary", { question: "Run?" }, { id: "ordinary-call" }), {
++				stopReason: "toolUse",
++			}),
++		);
++		manager.appendMessage(toolResult("ordinary-call", "ordinary"));
++		manager.appendMessage(toolResult("ordinary-call", "ordinary"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++
++		expect(harness.session.deferredBatch).toBeUndefined();
++	});
++
++	it("reports mismatched result names as invalid deferred history", async () => {
++		const { harness } = await createPersistedBatch([["call-0", "question"]]);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "tool_result_mismatch",
++		});
++	});
++
++	it("reports duplicate results as invalid deferred history", async () => {
++		const { harness } = await createPersistedBatch(["call-0", "call-1", "call-2", "call-0"]);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "duplicate_tool_result",
++		});
++		await expect(harness.session.resumeDeferred()).rejects.toMatchObject({
++			code: "invalid_deferred_history",
++		});
++	});
++
++	it("recovers a request-only boundary after the marker append fails", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-marker-append-failure-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const appendMarker = manager.appendToolBatchDeferred.bind(manager);
++		manager.appendToolBatchDeferred = () => {
++			throw new Error("simulated marker append failure");
++		};
++		const initial = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(initial);
++		initial.setResponses([deferredToolBatchMessage()]);
++
++		await expect(initial.session.prompt("Ask before shipping")).rejects.toThrow("simulated marker append failure");
++
++		expect(manager.getBranch().map((entry) => entry.type)).toEqual(["message", "message", "custom"]);
++		manager.appendToolBatchDeferred = appendMarker;
++		const sessionFile = manager.getSessionFile()!;
++		initial.cleanup();
++		harnesses.pop();
++		const reopened = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(reopened);
++
++		expect(await reopened.session.resumeDeferred()).toMatchObject({
++			status: "still_deferred",
++			deferredBatch: { phase: "deferred" },
++		});
++		expect(
++			reopened.sessionManager
++				.getBranch()
++				.filter((entry) => entry.type === "custom" && entry.customType === "dev.example.question/request"),
++		).toHaveLength(1);
++	});
++
++	it("reuses a request-only markerless boundary during explicit advancement", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-request-only-recovery-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		const assistantEntryId = manager.appendMessage(deferredToolBatchMessage());
++		manager.appendCustomEntry("dev.example.question/request", {
++			version: 1,
++			requestId: "request-1",
++			assistantEntryId,
++			ownerCallId: "call-1",
++			payload: { question: "Ship?" },
++		});
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		expect(harness.session.deferredBatch).toMatchObject({ phase: "markerless" });
++
++		await harness.session.resumeDeferred();
++
++		expect(
++			manager
++				.getBranch()
++				.filter((entry) => entry.type === "custom" && entry.customType === "dev.example.question/request"),
++		).toHaveLength(1);
++		expect(manager.getBranch().filter((entry) => entry.type === "tool_batch_deferred")).toHaveLength(1);
++	});
++
++	it("recovers an assistant-only markerless boundary through explicit advancement", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-markerless-recovery-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		const assistantEntryId = manager.appendMessage(deferredToolBatchMessage());
++		const harness = await createHarness({
++			sessionManager: SessionManager.open(manager.getSessionFile()!),
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++
++		const result = await harness.session.resumeDeferred();
++
++		expect(result).toMatchObject({
++			status: "still_deferred",
++			deferredBatch: { assistantEntryId, phase: "deferred", correlationId: "request-1" },
++		});
++		expect(
++			harness.sessionManager
++				.getBranch()
++				.filter((entry) => entry.type === "custom" && entry.customType === "dev.example.question/request"),
++		).toHaveLength(1);
++		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "tool_batch_deferred")).toHaveLength(
++			1,
++		);
++	});
++
++	it("reconstructs completed results awaiting provider continuation", async () => {
++		const { assistantEntryId, harness } = await createPersistedBatch(["call-0", "call-1", "call-2"]);
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "batch",
++			assistantEntryId,
++			phase: "continuation",
++			calls: [
++				{ toolCallId: "call-0", result: "recorded" },
++				{ toolCallId: "call-1", result: "recorded" },
++				{ toolCallId: "call-2", result: "recorded" },
++			],
++		});
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts b/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+index ed6aa4d8..86f6931e 100644
+--- a/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
++++ b/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+@@ -150,7 +150,7 @@ describe("regression #19: interrupt Waiting State", () => {
+ 			harness.session.prompt("Do something else", { preflightResult: (accepted) => preflight.push(accepted) }),
+ 		).rejects.toMatchObject({ code: "deferred_unavailable", deferredBatch });
+ 
+-		expect(deferredBatch?.availability.status).toBe("unavailable");
++		expect(deferredBatch).toMatchObject({ kind: "batch", availability: { status: "unavailable" } });
+ 		expect(preflight).toEqual([false]);
+ 		expect(getUserTexts(harness)).toEqual(["Ask before shipping"]);
+ 		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBefore);
+@@ -286,10 +286,10 @@ describe("regression #19: interrupt Waiting State", () => {
+ 		expect(eventTypes).toEqual([
+ 			"agent_start",
+ 			"entry_appended",
+-			"tool_execution_start",
+-			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"tool_execution_start",
++			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
+ 			"message_start",
+-- 
+2.50.1 (Apple Git-155)
+
