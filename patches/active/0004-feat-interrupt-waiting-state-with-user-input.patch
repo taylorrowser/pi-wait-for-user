@@ -1,0 +1,1155 @@
+From cbe18b3afeb46722736b9e85b9583ae860bfe587 Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Tue, 21 Jul 2026 19:39:58 -0400
+Subject: [PATCH] feat(agent): interrupt deferred batches with user input
+
+---
+ packages/agent/src/agent-loop.ts              | 234 ++++++++++---
+ packages/agent/src/agent.ts                   |  16 +-
+ packages/agent/src/types.ts                   |  22 +-
+ .../coding-agent/src/core/agent-session.ts    |  80 ++++-
+ .../coding-agent/src/core/deferred-batch.ts   |  47 ++-
+ .../coding-agent/src/core/extensions/types.ts |   4 +-
+ packages/coding-agent/src/core/index.ts       |   8 +-
+ packages/coding-agent/src/index.ts            |   2 +
+ .../test/suite/deferred-tool-batch-fixture.ts |  42 ++-
+ .../19-interrupt-waiting-state.test.ts        | 308 ++++++++++++++++++
+ 10 files changed, 698 insertions(+), 65 deletions(-)
+ create mode 100644 packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index b2e5cd2d..0cf3a1a5 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -22,8 +22,8 @@ import type {
+ 	AgentToolResult,
+ 	DeferredToolBatchResume,
+ 	DeferredToolBatchResumeStatus,
+-	EvaluateToolDeferralRequest,
+ 	StreamFn,
++	ToolDeferralRequest,
+ 	ToolDeferralResolution,
+ } from "./types.ts";
+ import { TOOL_DEFERRAL_PROTOCOL_VERSION } from "./types.ts";
+@@ -206,19 +206,25 @@ export async function runAgentLoopResume(
+ 		throw new Error(`Deferred owner call ${deferred.ownerCallId} is unavailable`);
+ 	}
+ 
+-	const preparations = missingToolCalls.map((toolCall) => prevalidateToolCall(currentContext, toolCall));
+-	const ownerPreparation =
+-		findPreparation(preparations, ownerCall.id) ?? prevalidateToolCall(currentContext, ownerCall);
++	const ownerPreparation = prevalidateToolCall(currentContext, ownerCall);
+ 
+ 	await emit({ type: "agent_start" });
+ 	const resolution = await invokeToolDeferralResolver(
+ 		capability,
+-		{
+-			operation: "evaluate",
+-			toolCallId: ownerCall.id,
+-			params: ownerPreparation.args,
+-			persistedHandlerVersion: deferred.handlerVersion,
+-		},
++		deferred.interruption
++			? {
++					operation: "interrupt",
++					provenance: deferred.interruption.provenance,
++					toolCallId: ownerCall.id,
++					params: ownerPreparation.args,
++					persistedHandlerVersion: deferred.handlerVersion,
++				}
++			: {
++					operation: "evaluate",
++					toolCallId: ownerCall.id,
++					params: ownerPreparation.args,
++					persistedHandlerVersion: deferred.handlerVersion,
++				},
+ 		signal,
+ 	);
+ 	if (resolution.status === "deferred") {
+@@ -231,22 +237,37 @@ export async function runAgentLoopResume(
+ 		return "still_deferred";
+ 	}
+ 	if (resolution.status === "unavailable") throw new Error(resolution.reason);
+-	if (resolution.disposition !== "execute_batch") {
+-		throw new ToolDeferralResolverError(
+-			`Deferred owner call ${deferred.ownerCallId} cannot complete through batch execution`,
++	let executed: Extract<ExecutedToolCallBatch, { status: "completed" }>;
++	if (resolution.disposition === "complete_owner") {
++		if (!deferred.interruption) {
++			throw new ToolDeferralResolverError(
++				`Deferred owner call ${deferred.ownerCallId} cannot complete without an Interruption`,
++			);
++		}
++		executed = await completeInterruptedToolBatch(
++			currentContext,
++			assistantMessage,
++			missingToolCalls,
++			ownerCall,
++			ownerPreparation,
++			config,
++			signal,
++			emit,
++		);
++	} else {
++		const preparations = missingToolCalls.map((toolCall) => prevalidateToolCall(currentContext, toolCall));
++		const batchExecution = await executeToolCallsWithPreparations(
++			currentContext,
++			assistantMessage,
++			missingToolCalls,
++			config,
++			signal,
++			emit,
++			preparations,
+ 		);
++		if (batchExecution.status !== "completed") throw new Error("Deferred tool batch unexpectedly deferred again");
++		executed = batchExecution;
+ 	}
+-
+-	const executed = await executeToolCallsWithPreparations(
+-		currentContext,
+-		assistantMessage,
+-		missingToolCalls,
+-		config,
+-		signal,
+-		emit,
+-		preparations,
+-	);
+-	if (executed.status !== "completed") throw new Error("Deferred tool batch unexpectedly deferred again");
+ 	for (const result of executed.messages) {
+ 		currentContext.messages.push(result);
+ 		newMessages.push(result);
+@@ -261,6 +282,15 @@ export async function runAgentLoopResume(
+ 	}
+ 	await emit({ type: "turn_end", message: assistantMessage, toolResults: batchResults });
+ 
++	if (deferred.interruption) {
++		for (const message of deferred.interruption.messages) {
++			await emit({ type: "message_start", message });
++			await emit({ type: "message_end", message });
++			currentContext.messages.push(message);
++			newMessages.push(message);
++		}
++	}
++
+ 	const nextTurnContext = {
+ 		message: assistantMessage,
+ 		toolResults: batchResults,
+@@ -281,7 +311,10 @@ export async function runAgentLoopResume(
+ 						: nextTurnSnapshot.thinkingLevel,
+ 		};
+ 	}
+-	if (executed.terminate || (await config.shouldStopAfterTurn?.({ ...nextTurnContext, context: currentContext }))) {
++	if (
++		!deferred.interruption &&
++		(executed.terminate || (await config.shouldStopAfterTurn?.({ ...nextTurnContext, context: currentContext })))
++	) {
+ 		await emit({ type: "agent_end", messages: newMessages });
+ 		return "advanced";
+ 	}
+@@ -352,6 +385,7 @@ async function runLoop(
+ 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
+ 
+ 			const toolResults: ToolResultMessage[] = [];
++			let messagesBeforeDeferral: AgentMessage[] | undefined;
+ 			hasMoreToolCalls = false;
+ 			if (toolCalls.length > 0) {
+ 				// A "length" stop means the output was cut off by the token limit, so
+@@ -362,20 +396,35 @@ async function runLoop(
+ 						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
+ 						: await executeToolCalls(currentContext, message, config, signal, emit);
+ 				if (executedToolBatch.status === "deferred") {
+-					await emit({
+-						type: "tool_batch_deferred",
+-						ownerCallId: executedToolBatch.ownerCallId,
+-						heldCallIds: executedToolBatch.heldCallIds,
+-						correlationId: executedToolBatch.correlationId,
+-						protocolVersion: TOOL_DEFERRAL_PROTOCOL_VERSION,
+-						handlerId: executedToolBatch.handlerId,
+-						handlerVersion: executedToolBatch.handlerVersion,
+-					});
+-					await emit({ type: "agent_end", messages: newMessages });
+-					return;
++					const acceptedInput = (await config.getMessagesBeforeToolDeferral?.()) ?? [];
++					if (acceptedInput.length === 0) {
++						await emit({
++							type: "tool_batch_deferred",
++							ownerCallId: executedToolBatch.ownerCallId,
++							heldCallIds: executedToolBatch.heldCallIds,
++							correlationId: executedToolBatch.correlationId,
++							protocolVersion: TOOL_DEFERRAL_PROTOCOL_VERSION,
++							handlerId: executedToolBatch.handlerId,
++							handlerVersion: executedToolBatch.handlerVersion,
++						});
++						await emit({ type: "agent_end", messages: newMessages });
++						return;
++					}
++					messagesBeforeDeferral = acceptedInput;
++					const interrupted = await interruptToolBatchBeforeMarker(
++						executedToolBatch,
++						currentContext,
++						message,
++						config,
++						signal,
++						emit,
++					);
++					toolResults.push(...interrupted.messages);
++					hasMoreToolCalls = true;
++				} else {
++					toolResults.push(...executedToolBatch.messages);
++					hasMoreToolCalls = !executedToolBatch.terminate;
+ 				}
+-				toolResults.push(...executedToolBatch.messages);
+-				hasMoreToolCalls = !executedToolBatch.terminate;
+ 
+ 				for (const result of toolResults) {
+ 					currentContext.messages.push(result);
+@@ -407,18 +456,19 @@ async function runLoop(
+ 			}
+ 
+ 			if (
+-				await config.shouldStopAfterTurn?.({
++				!messagesBeforeDeferral &&
++				(await config.shouldStopAfterTurn?.({
+ 					message,
+ 					toolResults,
+ 					context: currentContext,
+ 					newMessages,
+-				})
++				}))
+ 			) {
+ 				await emit({ type: "agent_end", messages: newMessages });
+ 				return;
+ 			}
+ 
+-			pendingMessages = (await config.getSteeringMessages?.()) || [];
++			pendingMessages = messagesBeforeDeferral ?? ((await config.getSteeringMessages?.()) || []);
+ 		}
+ 
+ 		// Agent would stop here. Check for follow-up messages.
+@@ -623,6 +673,9 @@ type ExecutedToolCallBatch =
+ 			correlationId: string;
+ 			handlerId: string;
+ 			handlerVersion: number;
++			ownerCall: AgentToolCall;
++			ownerPreparation: PreparedToolCall;
++			capability: AgentToolDeferral;
+ 	  };
+ 
+ async function resolveToolBatchDeferral(
+@@ -714,6 +767,9 @@ async function resolveToolBatchDeferral(
+ 		correlationId: resolution.correlationId,
+ 		handlerId: deferral.handlerId,
+ 		handlerVersion: deferral.handlerVersion,
++		ownerCall,
++		ownerPreparation,
++		capability: deferral,
+ 	};
+ }
+ 
+@@ -723,7 +779,7 @@ export class ToolDeferralResolverError extends Error {
+ 
+ async function invokeToolDeferralResolver<TParams>(
+ 	capability: AgentToolDeferral<TParams>,
+-	request: EvaluateToolDeferralRequest<TParams>,
++	request: ToolDeferralRequest<TParams>,
+ 	signal: AbortSignal | undefined,
+ ): Promise<ToolDeferralResolution> {
+ 	if (signal?.aborted) throw new ToolDeferralResolverError("Tool deferral resolver aborted");
+@@ -798,6 +854,100 @@ async function failToolBatchBeforeDeferral(
+ 	return { status: "completed", messages, terminate: false };
+ }
+ 
++async function interruptToolBatchBeforeMarker(
++	deferred: Extract<ExecutedToolCallBatch, { status: "deferred" }>,
++	currentContext: AgentContext,
++	assistantMessage: AssistantMessage,
++	config: AgentLoopConfig,
++	signal: AbortSignal | undefined,
++	emit: AgentEventSink,
++): Promise<Extract<ExecutedToolCallBatch, { status: "completed" }>> {
++	const resolution = await invokeToolDeferralResolver(
++		deferred.capability,
++		{
++			operation: "interrupt",
++			provenance: "preexisting_user_input",
++			toolCallId: deferred.ownerCall.id,
++			params: deferred.ownerPreparation.args,
++			persistedHandlerVersion: undefined,
++		},
++		signal,
++	);
++	if (resolution.status === "unavailable") throw new Error(resolution.reason);
++	if (resolution.status !== "ready" || resolution.disposition !== "complete_owner") {
++		throw new ToolDeferralResolverError(
++			`Deferred owner call ${deferred.ownerCallId} did not accept preexisting user input`,
++		);
++	}
++	return completeInterruptedToolBatch(
++		currentContext,
++		assistantMessage,
++		assistantMessage.content.filter((content) => content.type === "toolCall"),
++		deferred.ownerCall,
++		deferred.ownerPreparation,
++		config,
++		signal,
++		emit,
++	);
++}
++
++async function completeInterruptedToolBatch(
++	currentContext: AgentContext,
++	assistantMessage: AssistantMessage,
++	missingToolCalls: AgentToolCall[],
++	ownerCall: AgentToolCall,
++	ownerPreparation: PreparedToolCall,
++	config: AgentLoopConfig,
++	signal: AbortSignal | undefined,
++	emit: AgentEventSink,
++): Promise<Extract<ExecutedToolCallBatch, { status: "completed" }>> {
++	const messages: ToolResultMessage[] = [];
++	for (const toolCall of missingToolCalls) {
++		let finalized: FinalizedToolCallOutcome;
++		if (toolCall.id === ownerCall.id) {
++			await emit({
++				type: "tool_execution_start",
++				toolCallId: toolCall.id,
++				toolName: toolCall.name,
++				args: toolCall.arguments,
++			});
++			const preparation = await prepareToolCall(
++				currentContext,
++				assistantMessage,
++				toolCall,
++				config,
++				signal,
++				ownerPreparation,
++			);
++			if (preparation.kind === "immediate") {
++				finalized = { toolCall, result: preparation.result, isError: preparation.isError };
++			} else {
++				const executed = await executePreparedToolCall(preparation, signal, emit);
++				finalized = await finalizeExecutedToolCall(
++					currentContext,
++					assistantMessage,
++					preparation,
++					executed,
++					config,
++					signal,
++				);
++			}
++			await emitToolExecutionEnd(finalized, emit);
++		} else {
++			finalized = {
++				toolCall,
++				result: createErrorToolResult(
++					`Tool call "${toolCall.name}" was not executed because the deferred interaction was interrupted.`,
++				),
++				isError: true,
++			};
++		}
++		messages.push(createToolResultMessage(finalized));
++	}
++	for (const message of messages) await emitToolResultMessage(message, emit);
++	return { status: "completed", messages, terminate: false };
++}
++
+ async function executeToolCallsSequential(
+ 	currentContext: AgentContext,
+ 	assistantMessage: AssistantMessage,
+diff --git a/packages/agent/src/agent.ts b/packages/agent/src/agent.ts
+index f3cd110e..389f96f2 100644
+--- a/packages/agent/src/agent.ts
++++ b/packages/agent/src/agent.ts
+@@ -141,11 +141,7 @@ class PendingMessageQueue {
+ 	}
+ 
+ 	drain(): AgentMessage[] {
+-		if (this.mode === "all") {
+-			const drained = this.messages.slice();
+-			this.messages = [];
+-			return drained;
+-		}
++		if (this.mode === "all") return this.drainAll();
+ 
+ 		const first = this.messages[0];
+ 		if (!first) {
+@@ -155,6 +151,12 @@ class PendingMessageQueue {
+ 		return [first];
+ 	}
+ 
++	drainAll(): AgentMessage[] {
++		const drained = this.messages.slice();
++		this.messages = [];
++		return drained;
++	}
++
+ 	clear(): void {
+ 		this.messages = [];
+ 	}
+@@ -494,6 +496,10 @@ export class Agent {
+ 				return this.steeringQueue.drain();
+ 			},
+ 			getFollowUpMessages: async () => this.followUpQueue.drain(),
++			getMessagesBeforeToolDeferral: async () => [
++				...this.steeringQueue.drainAll(),
++				...this.followUpQueue.drainAll(),
++			],
+ 		};
+ 	}
+ 
+diff --git a/packages/agent/src/types.ts b/packages/agent/src/types.ts
+index 2a92b2c6..1fb034da 100644
+--- a/packages/agent/src/types.ts
++++ b/packages/agent/src/types.ts
+@@ -100,6 +100,19 @@ export interface EvaluateToolDeferralRequest<TParams = unknown> {
+ 	persistedHandlerVersion: number | undefined;
+ }
+ 
++/** Interrupt operation passed when ordinary user input continues a deferred Agent Thread. */
++export interface InterruptToolDeferralRequest<TParams = unknown> {
++	operation: "interrupt";
++	provenance: "new_user_prompt" | "preexisting_user_input";
++	toolCallId: string;
++	params: TParams;
++	persistedHandlerVersion: number | undefined;
++}
++
++export type ToolDeferralRequest<TParams = unknown> =
++	| EvaluateToolDeferralRequest<TParams>
++	| InterruptToolDeferralRequest<TParams>;
++
+ /** Result of evaluating whether a tool call should execute or defer durably. */
+ export type ToolDeferralResolution =
+ 	| { status: "ready"; disposition: "execute_batch" | "complete_owner" }
+@@ -113,6 +126,10 @@ export interface DeferredToolBatchResume {
+ 	correlationId: string;
+ 	handlerId: string;
+ 	handlerVersion: number;
++	interruption?: {
++		provenance: "new_user_prompt" | "preexisting_user_input";
++		messages: readonly AgentMessage[];
++	};
+ }
+ 
+ export type DeferredToolBatchResumeStatus = "still_deferred" | "advanced";
+@@ -122,7 +139,7 @@ export interface AgentToolDeferral<TParams = unknown> {
+ 	handlerId: string;
+ 	handlerVersion: number;
+ 	resumableHandlerVersions: readonly number[];
+-	resolve(request: EvaluateToolDeferralRequest<TParams>, signal?: AbortSignal): Promise<ToolDeferralResolution>;
++	resolve(request: ToolDeferralRequest<TParams>, signal?: AbortSignal): Promise<ToolDeferralResolution>;
+ }
+ 
+ /** Context passed to `beforeToolCall`. */
+@@ -287,6 +304,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
+ 	 */
+ 	getFollowUpMessages?: () => Promise<AgentMessage[]>;
+ 
++	/** Drains all accepted steering messages followed by all accepted follow-ups before durable deferral. */
++	getMessagesBeforeToolDeferral?: () => Promise<AgentMessage[]>;
++
+ 	/**
+ 	 * Tool execution mode.
+ 	 * - "sequential": execute tool calls one by one
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index 805cf6a7..ef8345bc 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -98,7 +98,13 @@ import { ModelRegistry } from "./model-registry.ts";
+ import type { ModelRuntime } from "./model-runtime.ts";
+ import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+-import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
++import type {
++	BranchSummaryEntry,
++	CompactionEntry,
++	SessionEntry,
++	SessionManager,
++	ToolBatchDeferredEntry,
++} from "./session-manager.ts";
+ import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
+ import type { SettingsManager } from "./settings-manager.ts";
+ import type { SlashCommandInfo } from "./slash-commands.ts";
+@@ -247,6 +253,18 @@ export interface PromptOptions {
+ 	preflightResult?: (success: boolean) => void;
+ }
+ 
++export class AgentSessionError extends Error {
++	readonly code: "agent_waiting" | "deferred_unavailable";
++	readonly deferredBatch: DeferredBatchSnapshot;
++
++	constructor(code: "agent_waiting" | "deferred_unavailable", message: string, deferredBatch: DeferredBatchSnapshot) {
++		super(message);
++		this.name = "AgentSessionError";
++		this.code = code;
++		this.deferredBatch = deferredBatch;
++	}
++}
++
+ /** Result from cycleModel() */
+ export interface ModelCycleResult {
+ 	model: Model<any>;
+@@ -1147,6 +1165,25 @@ export class AgentSession {
+ 		}
+ 	}
+ 
++	private async _interruptDeferredWithPrompt(marker: ToolBatchDeferredEntry, messages: AgentMessage[]): Promise<void> {
++		this._isAgentRunActive = true;
++		try {
++			await this.agent.resumeDeferredToolBatch({
++				ownerCallId: marker.ownerCallId,
++				heldCallIds: marker.heldCallIds,
++				correlationId: marker.correlationId,
++				handlerId: marker.handlerId,
++				handlerVersion: marker.handlerVersion,
++				interruption: { provenance: "new_user_prompt", messages },
++			});
++			while (await this._handlePostAgentRun()) await this.agent.continue();
++		} finally {
++			this._systemPromptOverride = undefined;
++			this._flushPendingBashMessages();
++			await this._emitAgentSettled();
++		}
++	}
++
+ 	private async _handlePostAgentRun(): Promise<boolean> {
+ 		const msg = this._lastAssistantMessage;
+ 		this._lastAssistantMessage = undefined;
+@@ -1230,8 +1267,10 @@ export class AgentSession {
+ 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+ 			}
+ 
+-			// If streaming, queue via steer() or followUp() based on option
+-			if (this.isStreaming) {
++			// Input after the durable marker is an ordered Interruption, even if the deferring run is still settling.
++			if (this.isStreaming && this.deferredBatch?.phase === "deferred") {
++				await this.waitForIdle();
++			} else if (this.isStreaming) {
+ 				if (!options?.streamingBehavior) {
+ 					throw new Error(
+ 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+@@ -1335,7 +1374,27 @@ export class AgentSession {
+ 			return;
+ 		}
+ 
++		const deferred = this.deferredBatch;
++		if (deferred?.availability.status === "unavailable") {
++			preflightResult?.(false);
++			throw new AgentSessionError(
++				"deferred_unavailable",
++				"The deferred interaction owner is unavailable; the prompt was not consumed.",
++				deferred,
++			);
++		}
+ 		preflightResult?.(true);
++		if (deferred?.phase === "deferred") {
++			const marker = this.sessionManager
++				.getBranch()
++				.find(
++					(entry): entry is ToolBatchDeferredEntry =>
++						entry.type === "tool_batch_deferred" && entry.assistantEntryId === deferred.assistantEntryId,
++				);
++			if (!marker) throw new Error("Deferred tool-batch marker was not found");
++			await this._interruptDeferredWithPrompt(marker, messages);
++			return;
++		}
+ 		await this._runAgentPrompt(messages);
+ 	}
+ 
+@@ -1444,6 +1503,7 @@ export class AgentSession {
+ 	 * Internal: Queue a steering message (already expanded, no extension command check).
+ 	 */
+ 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
++		this._throwIfWaitingForQueue();
+ 		this._steeringMessages.push(text);
+ 		this._emitQueueUpdate();
+ 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+@@ -1461,6 +1521,7 @@ export class AgentSession {
+ 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
+ 	 */
+ 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
++		this._throwIfWaitingForQueue();
+ 		this._followUpMessages.push(text);
+ 		this._emitQueueUpdate();
+ 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+@@ -1474,6 +1535,16 @@ export class AgentSession {
+ 		});
+ 	}
+ 
++	private _throwIfWaitingForQueue(): void {
++		const deferredBatch = this.deferredBatch;
++		if (!deferredBatch || (deferredBatch.phase === "markerless" && this.isStreaming)) return;
++		throw new AgentSessionError(
++			"agent_waiting",
++			"Agent is waiting for a deferred interaction; queueing another message is unavailable.",
++			deferredBatch,
++		);
++	}
++
+ 	/**
+ 	 * Throw an error if the text is an extension command.
+ 	 */
+@@ -1505,6 +1576,9 @@ export class AgentSession {
+ 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+ 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+ 	): Promise<void> {
++		if (this.isStreaming || options?.triggerTurn || options?.deliverAs !== undefined) {
++			this._throwIfWaitingForQueue();
++		}
+ 		const appMessage = {
+ 			role: "custom" as const,
+ 			customType: message.customType,
+diff --git a/packages/coding-agent/src/core/deferred-batch.ts b/packages/coding-agent/src/core/deferred-batch.ts
+index f0f1f2a5..44dadc18 100644
+--- a/packages/coding-agent/src/core/deferred-batch.ts
++++ b/packages/coding-agent/src/core/deferred-batch.ts
+@@ -8,6 +8,13 @@ export interface DeferredBatchCallSnapshot {
+ 	result: "missing" | "recorded";
+ }
+ 
++export interface DeferredBatchUnavailableReason {
++	code: "owner_unavailable" | "unsupported_protocol" | "incompatible_handler";
++	message: string;
++	callId?: string;
++	toolName?: string;
++}
++
+ export interface DeferredBatchSnapshot {
+ 	kind: "batch";
+ 	sessionId: string;
+@@ -16,7 +23,7 @@ export interface DeferredBatchSnapshot {
+ 	calls: DeferredBatchCallSnapshot[];
+ 	phase: "markerless" | "deferred";
+ 	correlationId?: string;
+-	availability: { status: "available" };
++	availability: { status: "available" } | { status: "unavailable"; reasons: DeferredBatchUnavailableReason[] };
+ }
+ 
+ export interface ResumeDeferredResult {
+@@ -65,18 +72,44 @@ export function reconstructDeferredBatch(
+ 	if (!batch) return undefined;
+ 	const marker = findMarker(branch, batch.entryId);
+ 	let ownerCallId: string;
++	let availability: DeferredBatchSnapshot["availability"] = { status: "available" };
+ 	if (marker) {
+ 		const ownerCall = batch.calls.find((call) => call.id === marker.ownerCallId);
+ 		const owner = ownerCall ? tools.find((tool) => tool.name === ownerCall.name) : undefined;
+-		if (
+-			!owner?.deferral ||
+-			marker.protocolVersion !== TOOL_DEFERRAL_PROTOCOL_VERSION ||
++		ownerCallId = marker.ownerCallId;
++		if (marker.protocolVersion !== TOOL_DEFERRAL_PROTOCOL_VERSION) {
++			availability = {
++				status: "unavailable",
++				reasons: [{ code: "unsupported_protocol", message: "The deferred protocol is not supported." }],
++			};
++		} else if (!ownerCall || !owner?.deferral) {
++			availability = {
++				status: "unavailable",
++				reasons: [
++					{
++						code: "owner_unavailable",
++						message: "The tool that owns this deferred interaction is unavailable.",
++						callId: marker.ownerCallId,
++						...(ownerCall ? { toolName: ownerCall.name } : {}),
++					},
++				],
++			};
++		} else if (
+ 			owner.deferral.handlerId !== marker.handlerId ||
+ 			!owner.deferral.resumableHandlerVersions.includes(marker.handlerVersion)
+ 		) {
+-			return undefined;
++			availability = {
++				status: "unavailable",
++				reasons: [
++					{
++						code: "incompatible_handler",
++						message: "The deferred interaction handler is incompatible with the persisted request.",
++						callId: marker.ownerCallId,
++						toolName: ownerCall.name,
++					},
++				],
++			};
+ 		}
+-		ownerCallId = marker.ownerCallId;
+ 	} else {
+ 		const owners = batch.calls.filter((call) => tools.some((tool) => tool.name === call.name && tool.deferral));
+ 		if (owners.length !== 1) return undefined;
+@@ -95,6 +128,6 @@ export function reconstructDeferredBatch(
+ 		})),
+ 		phase: marker ? "deferred" : "markerless",
+ 		...(marker ? { correlationId: marker.correlationId } : {}),
+-		availability: { status: "available" },
++		availability,
+ 	};
+ }
+diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
+index 158302e3..3e420b88 100644
+--- a/packages/coding-agent/src/core/extensions/types.ts
++++ b/packages/coding-agent/src/core/extensions/types.ts
+@@ -13,8 +13,8 @@ import type {
+ 	AgentToolDeferral,
+ 	AgentToolResult,
+ 	AgentToolUpdateCallback,
+-	EvaluateToolDeferralRequest,
+ 	ThinkingLevel,
++	ToolDeferralRequest,
+ 	ToolDeferralResolution,
+ 	ToolExecutionMode,
+ } from "@earendil-works/pi-agent-core";
+@@ -440,7 +440,7 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
+ export interface ToolDeferralDefinition<TParams extends TSchema = TSchema>
+ 	extends Omit<AgentToolDeferral<Static<TParams>>, "resolve"> {
+ 	resolve(
+-		request: EvaluateToolDeferralRequest<Static<TParams>>,
++		request: ToolDeferralRequest<Static<TParams>>,
+ 		signal: AbortSignal | undefined,
+ 		ctx: ExtensionContext,
+ 	): Promise<ToolDeferralResolution>;
+diff --git a/packages/coding-agent/src/core/index.ts b/packages/coding-agent/src/core/index.ts
+index 0bf15293..ba40b9cd 100644
+--- a/packages/coding-agent/src/core/index.ts
++++ b/packages/coding-agent/src/core/index.ts
+@@ -5,6 +5,7 @@
+ export {
+ 	AgentSession,
+ 	type AgentSessionConfig,
++	AgentSessionError,
+ 	type AgentSessionEvent,
+ 	type AgentSessionEventListener,
+ 	type ModelCycleResult,
+@@ -27,7 +28,12 @@ export {
+ } from "./agent-session-services.ts";
+ export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+ export type { CompactionResult } from "./compaction/index.ts";
+-export type { DeferredBatchCallSnapshot, DeferredBatchSnapshot, ResumeDeferredResult } from "./deferred-batch.ts";
++export type {
++	DeferredBatchCallSnapshot,
++	DeferredBatchSnapshot,
++	DeferredBatchUnavailableReason,
++	ResumeDeferredResult,
++} from "./deferred-batch.ts";
+ export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
+ export { areExperimentalFeaturesEnabled } from "./experimental.ts";
+ // Extensions system
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index 6bcab3b5..6ddbca91 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -15,6 +15,7 @@ export {
+ export {
+ 	AgentSession,
+ 	type AgentSessionConfig,
++	AgentSessionError,
+ 	type AgentSessionEvent,
+ 	type AgentSessionEventListener,
+ 	type ModelCycleResult,
+@@ -51,6 +52,7 @@ export {
+ export type {
+ 	DeferredBatchCallSnapshot,
+ 	DeferredBatchSnapshot,
++	DeferredBatchUnavailableReason,
+ 	ResumeDeferredResult,
+ } from "./core/deferred-batch.ts";
+ export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
+diff --git a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+index d3668ad2..83c7aeb0 100644
+--- a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
++++ b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+@@ -17,7 +17,9 @@ type QuestionInteractionRequest = {
+ type QuestionOutcome = {
+ 	version: 1;
+ 	requestId: string;
+-	outcome: { type: "response"; value: string };
++	outcome:
++		| { type: "response"; value: string }
++		| { type: "interruption"; provenance: "new_user_prompt" | "preexisting_user_input" };
+ };
+ 
+ type RecordResponseResult =
+@@ -55,10 +57,22 @@ export function deferredToolBatchMessage() {
+ export function questionExtension(
+ 	executions: string[],
+ 	controller?: InteractionRequestTestController,
+-	options: { includeOrdinary?: boolean } = {},
++	options: {
++		includeOrdinary?: boolean;
++		beforeInitialDeferral?: () => Promise<void>;
++		onFirstAgentEnd?: () => Promise<void>;
++	} = {},
+ ): ExtensionFactory {
+ 	return (pi) => {
+ 		let currentBranch: (() => SessionEntry[]) | undefined;
++		let sawAgentEnd = false;
++		if (options.onFirstAgentEnd) {
++			pi.on("agent_end", async () => {
++				if (sawAgentEnd) return;
++				sawAgentEnd = true;
++				await options.onFirstAgentEnd?.();
++			});
++		}
+ 		if (controller) {
+ 			controller.recordResponse = (value) => {
+ 				const branch = currentBranch?.();
+@@ -129,6 +143,9 @@ export function questionExtension(
+ 					if (outcome?.outcome.type === "response") {
+ 						return { status: "ready", disposition: "execute_batch" };
+ 					}
++					if (outcome?.outcome.type === "interruption") {
++						return { status: "ready", disposition: "complete_owner" };
++					}
+ 					if (!existingInteractionRequest) {
+ 						pi.appendEntry(requestType, {
+ 							version: 1,
+@@ -140,14 +157,31 @@ export function questionExtension(
+ 					}
+ 					if (controller?.resolverFailure === "throw") throw new Error("package failed");
+ 					if (controller?.resolverFailure === "malformed") return { status: "invalid" } as never;
++					if (request.operation === "evaluate") await options.beforeInitialDeferral?.();
++					if (request.operation === "interrupt") {
++						pi.appendEntry(outcomeType, {
++							version: 1,
++							requestId,
++							outcome: { type: "interruption", provenance: request.provenance },
++						} satisfies QuestionOutcome);
++						return { status: "ready", disposition: "complete_owner" };
++					}
+ 					return { status: "deferred", correlationId: requestId };
+ 				},
+ 			},
+ 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+ 				const outcome = findLastCustomData<QuestionOutcome>(ctx.sessionManager.getBranch(), outcomeType);
+-				if (!outcome) throw new Error("Response was not found");
++				if (!outcome) throw new Error("Interaction Request outcome was not found");
+ 				executions.push(params.question);
+-				return { content: [{ type: "text", text: outcome.outcome.value }], details: {} };
++				return {
++					content: [
++						{
++							type: "text",
++							text: outcome.outcome.type === "response" ? outcome.outcome.value : "Left unanswered",
++						},
++					],
++					details: {},
++				};
+ 			},
+ 		});
+ 	};
+diff --git a/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts b/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+new file mode 100644
+index 00000000..ed6aa4d8
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+@@ -0,0 +1,308 @@
++import { mkdtempSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage } from "@earendil-works/pi-ai";
++import { afterEach, describe, expect, it } from "vitest";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import { deferredToolBatchMessage, outcomeType, questionExtension } from "../deferred-tool-batch-fixture.ts";
++import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "../harness.ts";
++
++describe("regression #19: interrupt Waiting State", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	it("interrupts before the marker and drains every steering message before every follow-up", async () => {
++		let resolverStarted!: () => void;
++		const waitForResolver = new Promise<void>((resolve) => {
++			resolverStarted = resolve;
++		});
++		let releaseResolver!: () => void;
++		const resolverRelease = new Promise<void>((resolve) => {
++			releaseResolver = resolve;
++		});
++		const root = mkdtempSync(join(tmpdir(), "pi-pre-marker-input-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [
++				questionExtension(executions, undefined, {
++					beforeInitialDeferral: async () => {
++						resolverStarted();
++						await resolverRelease;
++					},
++				}),
++			],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage(), fauxAssistantMessage("Continued once")]);
++
++		const promptPromise = harness.session.prompt("Ask before shipping");
++		await waitForResolver;
++		await harness.session.steer("steer one");
++		await harness.session.steer("steer two");
++		await harness.session.followUp("follow up one");
++		await harness.session.followUp("follow up two");
++		releaseResolver();
++		await promptPromise;
++
++		expect(executions).toEqual(["Ship?"]);
++		expect(getUserTexts(harness)).toEqual([
++			"Ask before shipping",
++			"steer one",
++			"steer two",
++			"follow up one",
++			"follow up two",
++		]);
++		expect(getAssistantTexts(harness)).toEqual(["", "Continued once"]);
++		expect(harness.session.pendingMessageCount).toBe(0);
++		expect(harness.session.deferredBatch).toBeUndefined();
++		expect(
++			harness.eventsOfType("queue_update").map((event) => ({
++				steering: event.steering,
++				followUp: event.followUp,
++			})),
++		).toEqual([
++			{ steering: ["steer one"], followUp: [] },
++			{ steering: ["steer one", "steer two"], followUp: [] },
++			{ steering: ["steer one", "steer two"], followUp: ["follow up one"] },
++			{ steering: ["steer one", "steer two"], followUp: ["follow up one", "follow up two"] },
++			{ steering: ["steer two"], followUp: ["follow up one", "follow up two"] },
++			{ steering: [], followUp: ["follow up one", "follow up two"] },
++			{ steering: [], followUp: ["follow up two"] },
++			{ steering: [], followUp: [] },
++		]);
++		expect(manager.getBranch().some((entry) => entry.type === "tool_batch_deferred")).toBe(false);
++		const interruption = manager
++			.getBranch()
++			.find((entry) => entry.type === "custom" && entry.customType === outcomeType);
++		expect(interruption?.type === "custom" ? interruption.data : undefined).toMatchObject({
++			outcome: { type: "interruption", provenance: "preexisting_user_input" },
++		});
++		expect(harness.getPendingResponseCount()).toBe(0);
++	});
++
++	it("orders a prompt after the durable marker even while the deferring run is settling", async () => {
++		let markerPersisted!: () => void;
++		const waitForMarker = new Promise<void>((resolve) => {
++			markerPersisted = resolve;
++		});
++		let releaseSettling!: () => void;
++		const settlingRelease = new Promise<void>((resolve) => {
++			releaseSettling = resolve;
++		});
++		const root = mkdtempSync(join(tmpdir(), "pi-post-marker-prompt-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [
++				questionExtension(executions, undefined, {
++					onFirstAgentEnd: async () => {
++						markerPersisted();
++						await settlingRelease;
++					},
++				}),
++			],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage(), fauxAssistantMessage("Redirected")]);
++
++		const initialPrompt = harness.session.prompt("Ask before shipping");
++		await waitForMarker;
++		expect(harness.session.deferredBatch?.phase).toBe("deferred");
++		const interruption = harness.session.prompt("Do something else", { streamingBehavior: "steer" });
++		releaseSettling();
++		await initialPrompt;
++		await interruption;
++
++		expect(executions).toEqual(["Ship?"]);
++		expect(getUserTexts(harness)).toEqual(["Ask before shipping", "Do something else"]);
++		expect(harness.session.deferredBatch).toBeUndefined();
++		expect(harness.getPendingResponseCount()).toBe(0);
++	});
++
++	it("rejects an ordinary prompt before consumption when the owner is unavailable", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-unavailable-interruption-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		harness.session.setActiveToolsByName(["ordinary"]);
++		const deferredBatch = harness.session.deferredBatch;
++		const sessionFile = manager.getSessionFile()!;
++		const bytesBefore = readFileSync(sessionFile, "utf8");
++		const preflight: boolean[] = [];
++
++		await expect(
++			harness.session.prompt("Do something else", { preflightResult: (accepted) => preflight.push(accepted) }),
++		).rejects.toMatchObject({ code: "deferred_unavailable", deferredBatch });
++
++		expect(deferredBatch?.availability.status).toBe("unavailable");
++		expect(preflight).toEqual([false]);
++		expect(getUserTexts(harness)).toEqual(["Ask before shipping"]);
++		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBefore);
++		expect(harness.getPendingResponseCount()).toBe(0);
++	});
++
++	it("interrupts through the owner when held sibling tools are unavailable", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-unavailable-siblings-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		harness.session.setActiveToolsByName(["question"]);
++		harness.setResponses([fauxAssistantMessage("Redirected")]);
++
++		await harness.session.sendUserMessage("Do something else");
++
++		expect(executions).toEqual(["Ship?"]);
++		expect(getUserTexts(harness)).toEqual(["Ask before shipping", "Do something else"]);
++		expect(harness.session.deferredBatch).toBeUndefined();
++		expect(harness.getPendingResponseCount()).toBe(0);
++	});
++
++	it("rejects memory-only queue and turn injection APIs after durable deferral", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-reject-waiting-queues-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		const deferredBatch = harness.session.deferredBatch;
++		const sessionFile = manager.getSessionFile()!;
++		const bytesBefore = readFileSync(sessionFile, "utf8");
++
++		const attempts = [
++			() => harness.session.steer("steer"),
++			() => harness.session.followUp("follow up"),
++			() =>
++				harness.session.sendCustomMessage(
++					{ customType: "test", content: "next", display: false, details: undefined },
++					{ deliverAs: "nextTurn" },
++				),
++			() =>
++				harness.session.sendCustomMessage(
++					{ customType: "test", content: "trigger", display: false, details: undefined },
++					{ triggerTurn: true },
++				),
++			() =>
++				harness.session.sendCustomMessage(
++					{ customType: "test", content: "steer", display: false, details: undefined },
++					{ deliverAs: "steer" },
++				),
++		];
++		for (const attempt of attempts) {
++			await expect(attempt()).rejects.toMatchObject({ code: "agent_waiting", deferredBatch });
++		}
++
++		expect(harness.session.pendingMessageCount).toBe(0);
++		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBefore);
++		expect(harness.getPendingResponseCount()).toBe(0);
++	});
++
++	it("records Interruption before completing the held batch and continuing an ordinary prompt", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-interrupt-waiting-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		expect(harness.session.deferredBatch?.phase).toBe("deferred");
++
++		harness.events.splice(0);
++		harness.setResponses([fauxAssistantMessage("Redirected")]);
++		await harness.session.prompt("Do something else");
++
++		expect(executions).toEqual(["Ship?"]);
++		expect(getUserTexts(harness)).toEqual(["Ask before shipping", "Do something else"]);
++		expect(harness.getPendingResponseCount()).toBe(0);
++		expect(harness.session.deferredBatch).toBeUndefined();
++
++		const branch = manager.getBranch();
++		const outcomeIndex = branch.findIndex(
++			(entry) =>
++				entry.type === "custom" &&
++				entry.customType === outcomeType &&
++				(entry.data as { outcome?: { type?: string } }).outcome?.type === "interruption",
++		);
++		const results = branch.flatMap((entry, index) =>
++			entry.type === "message" && entry.message.role === "toolResult" ? [{ index, message: entry.message }] : [],
++		);
++		const redirectedUserIndex = branch.findIndex(
++			(entry, index) =>
++				index > outcomeIndex &&
++				entry.type === "message" &&
++				entry.message.role === "user" &&
++				getMessageText(entry.message) === "Do something else",
++		);
++
++		expect(outcomeIndex).toBeGreaterThan(-1);
++		expect(results.map(({ message }) => message.toolCallId)).toEqual(["call-0", "call-1", "call-2"]);
++		expect(results[0].message.content).toEqual([
++			{
++				type: "text",
++				text: 'Tool call "ordinary" was not executed because the deferred interaction was interrupted.',
++			},
++		]);
++		expect(results[1].message.content).toEqual([{ type: "text", text: "Left unanswered" }]);
++		expect(results[2].message.content).toEqual([
++			{
++				type: "text",
++				text: 'Tool call "ordinary" was not executed because the deferred interaction was interrupted.',
++			},
++		]);
++		expect(results[0].index).toBeGreaterThan(outcomeIndex);
++		expect(redirectedUserIndex).toBeGreaterThan(results.at(-1)!.index);
++
++		const eventTypes = harness.events.map((event) => event.type).filter((type) => type !== "message_update");
++		expect(eventTypes).toEqual([
++			"agent_start",
++			"entry_appended",
++			"tool_execution_start",
++			"tool_execution_end",
++			"message_start",
++			"message_end",
++			"message_start",
++			"message_end",
++			"message_start",
++			"message_end",
++			"turn_end",
++			"message_start",
++			"message_end",
++			"turn_start",
++			"message_start",
++			"message_end",
++			"turn_end",
++			"agent_end",
++			"agent_settled",
++		]);
++	});
++});
+-- 
+2.50.1 (Apple Git-155)
+
