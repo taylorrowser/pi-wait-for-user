@@ -1,0 +1,267 @@
+{
+  "target": {
+    "package": "@earendil-works/pi-coding-agent",
+    "version": "0.80.10",
+    "agentCoreVersion": "0.80.10",
+    "sessionVersion": 3
+  },
+  "summary": {
+    "passed": 22,
+    "failed": 0
+  },
+  "checks": [
+    {
+      "name": "journal.defers-new-file-until-assistant",
+      "pass": true,
+      "observed": "file absent after initial user message"
+    },
+    {
+      "name": "journal.flushes-assistant-call-before-resolution",
+      "pass": true,
+      "observed": "file exists after assistant message"
+    },
+    {
+      "name": "journal.control-entries-advance-leaf",
+      "pass": true,
+      "observed": {
+        "requestParentIsAssistant": true,
+        "markerBecameLeaf": true
+      }
+    },
+    {
+      "name": "context.control-entries-are-excluded",
+      "pass": true,
+      "observed": {
+        "before": [
+          "user",
+          "assistant"
+        ],
+        "after": [
+          "user",
+          "assistant"
+        ]
+      }
+    },
+    {
+      "name": "journal.unknown-core-entry-survives-open",
+      "pass": true,
+      "observed": "tool_batch_deferred"
+    },
+    {
+      "name": "recovery.classifies-every-complete-append-boundary",
+      "pass": true,
+      "observed": [
+        {
+          "name": "assistant",
+          "state": "markerless_recovery"
+        },
+        {
+          "name": "request",
+          "state": "markerless_recovery"
+        },
+        {
+          "name": "marker",
+          "state": "waiting"
+        },
+        {
+          "name": "outcome",
+          "state": "ready_to_resume"
+        },
+        {
+          "name": "owner-result",
+          "state": "partial_resume"
+        },
+        {
+          "name": "all-results",
+          "state": "complete"
+        }
+      ]
+    },
+    {
+      "name": "recovery.conflicting-terminal-outcomes-are-detectable",
+      "pass": true,
+      "observed": {
+        "state": "invalid_multiple_outcomes",
+        "count": 2
+      }
+    },
+    {
+      "name": "recovery.duplicate-result-advancement-is-detectable",
+      "pass": true,
+      "observed": {
+        "state": "invalid_duplicate_results",
+        "callIds": [
+          "call-question"
+        ]
+      }
+    },
+    {
+      "name": "resume.open-is-non-advancing",
+      "pass": true,
+      "observed": "opening appended no bytes"
+    },
+    {
+      "name": "reload.rebinds-without-advancing-session",
+      "pass": true,
+      "observed": {
+        "exit": {
+          "code": 0,
+          "signal": null
+        },
+        "lifecycle": [
+          "start:startup",
+          "shutdown:reload",
+          "start:reload",
+          "shutdown:quit"
+        ],
+        "leafPreservedAcrossReload": true,
+        "journalBytesPreservedAcrossReload": true,
+        "stderr": ""
+      }
+    },
+    {
+      "name": "recovery.unavailable-is-recoverable-state",
+      "pass": true,
+      "observed": {
+        "missingOwner": {
+          "state": "unavailable",
+          "reason": "missing_tool",
+          "toolName": "question"
+        },
+        "missingSibling": {
+          "state": "unavailable",
+          "reason": "missing_tool",
+          "toolName": "read"
+        },
+        "wrongProtocol": {
+          "state": "unavailable",
+          "reason": "incompatible_protocol",
+          "toolName": "question"
+        },
+        "wrongHandler": {
+          "state": "unavailable",
+          "reason": "incompatible_handler",
+          "toolName": "question"
+        }
+      }
+    },
+    {
+      "name": "queue.preexisting-input-prevents-waiting-and-drains-all",
+      "pass": true,
+      "observed": {
+        "decision": "interrupt_before_waiting",
+        "ownerCallId": "call-question",
+        "provenance": "preexisting_user_input",
+        "drained": {
+          "steering": [
+            "steer one",
+            "steer two"
+          ],
+          "followUp": [
+            "follow one",
+            "follow two"
+          ]
+        }
+      }
+    },
+    {
+      "name": "batch.multiple-deferral-owners-rejected",
+      "pass": true,
+      "observed": {
+        "decision": "reject_multiple_owners"
+      }
+    },
+    {
+      "name": "batch.one-owner-holds-entire-batch",
+      "pass": true,
+      "observed": {
+        "decision": "append_deferred_marker",
+        "ownerCallId": "call-question",
+        "heldCallIds": [
+          "call-question",
+          "call-read"
+        ]
+      }
+    },
+    {
+      "name": "queue.current-pi-queues-are-memory-only",
+      "pass": true,
+      "observed": {
+        "queuedBeforeClear": true,
+        "serializedStateContainsQueue": false,
+        "queuedAfterClear": false
+      }
+    },
+    {
+      "name": "tree.pending-state-is-branch-local",
+      "pass": true,
+      "observed": {
+        "branchLocalState": "complete",
+        "globalState": "waiting",
+        "reopenKeptLatestAppendedLeaf": true
+      }
+    },
+    {
+      "name": "clone.copies-pending-identities-verbatim",
+      "pass": true,
+      "observed": {
+        "sessionIdChanged": true,
+        "requestIdCopied": "request:fixture:call-question",
+        "markerEntryIdCopied": true
+      }
+    },
+    {
+      "name": "fork.cut-before-deferred-batch-does-not-copy-waiting-state",
+      "pass": true,
+      "observed": {
+        "state": "complete"
+      }
+    },
+    {
+      "name": "new.starts-unaffiliated-empty-session",
+      "pass": true,
+      "observed": {
+        "sessionIdChanged": true,
+        "entryCount": 0
+      }
+    },
+    {
+      "name": "compaction.deferred-assistant-must-be-pinned",
+      "pass": true,
+      "observed": {
+        "withoutPin": [
+          "compactionSummary",
+          "toolResult",
+          "toolResult"
+        ],
+        "withPin": [
+          "compactionSummary",
+          "assistant"
+        ]
+      }
+    },
+    {
+      "name": "journal.torn-tail-poisons-next-append",
+      "pass": true,
+      "observed": {
+        "requestSurvivedTornTail": false
+      }
+    },
+    {
+      "name": "capability.current-core-has-no-defer-result",
+      "pass": true,
+      "observed": {
+        "beforeToolCallHasDefer": false
+      }
+    }
+  ],
+  "findings": [
+    "A first-class unknown control entry survives open, branching, cloning, and context reconstruction, but every control entry advances the active leaf.",
+    "Complete append boundaries are sufficient to reconstruct markerless, waiting, ready, partial, complete, and unavailable states from one JSONL branch.",
+    "Compaction must pin the deferred assistant batch until every matching tool result is recorded; otherwise resumed results become orphaned in model context.",
+    "Current clone mechanics copy call, request, marker, and entry identities verbatim into a new session id; affiliation policy cannot be inferred from SessionManager.",
+    "Current queue state is memory-only. The proposed transition must inspect and drain all pre-marker steering and follow-up input before recording stable Waiting State.",
+    "Current JSONL loading skips a torn final line but does not truncate it, so the next append is concatenated onto the malformed tail and is also lost on reopen.",
+    "SessionManager itself does not provide durable deferral, idempotent result advancement, or a typed append API for the proposed core entry."
+  ]
+}
