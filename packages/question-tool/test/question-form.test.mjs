@@ -7,6 +7,7 @@ const key = {
 	down: "\u001b[B",
 	enter: "\r",
 	escape: "\u001b",
+	up: "\u001b[A",
 };
 
 const identityTheme = {
@@ -70,6 +71,29 @@ test("Escape leaves custom editing without deleting the in-form draft, and a sin
 			questionId: "environment",
 			answer: "draft answer",
 			kind: "custom",
+		},
+	]);
+	await form.pending;
+});
+
+test("Up Arrow leaves custom editing and returns to the preceding option", async () => {
+	const form = openForm(oneQuestion);
+
+	form.component.handleInput(key.down);
+	form.component.handleInput("draft answer");
+	form.component.handleInput(key.up);
+
+	const rendered = form.component.render(80).join("\n");
+	assert.match(rendered, /draft answer/);
+	assert.match(rendered, /↑↓ choices/);
+
+	form.component.handleInput(key.enter);
+	assert.deepEqual(form.result, [
+		{
+			questionId: "environment",
+			answer: "Staging",
+			kind: "choice",
+			selectedIndex: 1,
 		},
 	]);
 	await form.pending;

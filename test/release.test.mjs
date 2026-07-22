@@ -18,6 +18,12 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const releaseCli = join(repositoryRoot, "scripts", "release.mjs");
 const releaseGateCli = join(repositoryRoot, "scripts", "release-gate.mjs");
+const activeReleaseId = JSON.parse(
+  readFileSync(join(repositoryRoot, "releases", "active.json"), "utf8"),
+).releaseId;
+const activeManifest = JSON.parse(
+  readFileSync(join(repositoryRoot, "releases", activeReleaseId, "manifest.json"), "utf8"),
+);
 const temporaryRoots = [];
 
 after(() => {
@@ -55,7 +61,7 @@ function copyBundleFixture() {
   ]) {
     cpSync(join(repositoryRoot, path), join(root, path), { recursive: true });
   }
-  const manifest = JSON.parse(readFileSync(join(root, "releases", "pi-v0.81.1-patch.2", "manifest.json"), "utf8"));
+  const manifest = JSON.parse(readFileSync(join(root, "releases", activeReleaseId, "manifest.json"), "utf8"));
   const gate = JSON.parse(readFileSync(join(root, manifest.fixtureGate.path), "utf8"));
   const stages = gate.requiredStages.map((name) => ({
     name,
@@ -89,7 +95,10 @@ test("the active release manifest verifies every pinned input", () => {
   const result = verify(repositoryRoot);
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Verified pi-v0\.81\.1-patch\.2: Pi v0\.81\.1, 10 patches, Question Tool 0\.1\.1/);
+  assert.match(
+    result.stdout,
+    new RegExp(`Verified ${activeReleaseId.replaceAll(".", "\\.")}: Pi v0\\.81\\.1, 10 patches, Question Tool ${activeManifest.questionTool.version.replaceAll(".", "\\.")}`),
+  );
 });
 
 test("the release gate lists every required fixture category", () => {
@@ -131,23 +140,23 @@ test("a passing release builds checksummed patch, binary, and Question Tool down
 
   assert.equal(result.status, 0, result.stderr);
   const files = readdirSync(output);
-  assert.ok(files.includes("pi-wait-for-user-pi-v0.81.1-patch.2.tgz"));
-  assert.ok(files.includes("taylorrowser-pi-question-tool-0.1.1.tgz"));
+  assert.ok(files.includes(`pi-wait-for-user-${activeReleaseId}.tgz`));
+  assert.ok(files.includes(`taylorrowser-pi-question-tool-${activeManifest.questionTool.version}.tgz`));
   assert.ok(files.includes("install.sh"));
   assert.ok(files.includes("pi-wait-for-user-darwin-arm64.tar.gz"));
   assert.ok(files.includes("pi-wait-for-user-linux-x64.tar.gz"));
   const sums = readFileSync(join(output, "SHA256SUMS"), "utf8");
-  assert.match(sums, /pi-wait-for-user-pi-v0\.81\.1-patch\.2\.tgz/);
-  assert.match(sums, /taylorrowser-pi-question-tool-0\.1\.1\.tgz/);
+  assert.match(sums, new RegExp(`pi-wait-for-user-${activeReleaseId.replaceAll(".", "\\.")}\\.tgz`));
+  assert.match(sums, new RegExp(`taylorrowser-pi-question-tool-${activeManifest.questionTool.version.replaceAll(".", "\\.")}\\.tgz`));
 });
 
 test("bundling refuses an incomplete required gate even if marked passed", () => {
   const root = copyReleaseFixture();
   mkdirSync(join(root, "scripts"), { recursive: true });
   cpSync(releaseCli, join(root, "scripts", "release.mjs"));
-  const manifest = JSON.parse(readFileSync(join(root, "releases", "pi-v0.81.1-patch.2", "manifest.json"), "utf8"));
+  const manifest = JSON.parse(readFileSync(join(root, "releases", activeReleaseId, "manifest.json"), "utf8"));
   const gate = JSON.parse(readFileSync(join(root, manifest.fixtureGate.path), "utf8"));
-  const reportDirectory = join(root, "releases", "pi-v0.81.1-patch.2", "reports");
+  const reportDirectory = join(root, "releases", activeReleaseId, "reports");
   mkdirSync(reportDirectory, { recursive: true });
   writeFileSync(join(reportDirectory, "release-candidate.json"), JSON.stringify({
     schemaVersion: 1,
@@ -173,11 +182,11 @@ test("bundling refuses a release-candidate report that did not pass", () => {
   const root = copyReleaseFixture();
   mkdirSync(join(root, "scripts"), { recursive: true });
   cpSync(releaseCli, join(root, "scripts", "release.mjs"));
-  const reportDirectory = join(root, "releases", "pi-v0.81.1-patch.2", "reports");
+  const reportDirectory = join(root, "releases", activeReleaseId, "reports");
   mkdirSync(reportDirectory, { recursive: true });
   writeFileSync(join(reportDirectory, "release-candidate.json"), JSON.stringify({
     schemaVersion: 1,
-    releaseId: "pi-v0.81.1-patch.2",
+    releaseId: activeReleaseId,
     result: "failed",
   }));
   const output = join(root, "dist");

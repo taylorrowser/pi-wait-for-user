@@ -8,6 +8,9 @@ import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const expectedQuestionVersion = JSON.parse(
+  readFileSync(join(repositoryRoot, "packages", "question-tool", "package.json"), "utf8"),
+).version;
 const nativePlatform = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
 const temporaryRoots = [];
 
@@ -113,7 +116,7 @@ test("a binary release loads the clearly named Question Tool without a source ch
     "--version",
   ]);
   const questionManifest = readFileSync(join(fixture.installation, "question-tool", "package.json"), "utf8");
-  assert.match(questionManifest, /"version": "0\.1\.1"/);
+  assert.equal(JSON.parse(questionManifest).version, expectedQuestionVersion);
   assert.match(questionManifest, /\.\/extensions\/question-tool\.ts/);
 
   writeFileSync(join(fixture.installation, "release.json"), "{}\n");

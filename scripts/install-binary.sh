@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-release_id="pi-v0.81.1-patch.2"
+release_id="pi-v0.81.1-patch.3"
 payload_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 action=${1:-install}
 if [ "$#" -gt 0 ]; then shift; fi
@@ -39,7 +39,7 @@ verify_directory() {
     echo "pi-wait-for-user: Question Tool is missing" >&2
     return 1
   }
-  grep -q '"releaseId": "pi-v0.81.1-patch.2"' "$directory/release.json" || {
+  grep -q '"releaseId": "pi-v0.81.1-patch.3"' "$directory/release.json" || {
     echo "pi-wait-for-user: release identity mismatch" >&2
     return 1
   }

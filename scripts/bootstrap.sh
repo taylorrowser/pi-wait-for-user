@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-release_id="pi-v0.81.1-patch.2"
+release_id="pi-v0.81.1-patch.3"
 repository="taylorrowser/pi-wait-for-user"
 base_url="https://github.com/${repository}/releases/download/${release_id}"
 
