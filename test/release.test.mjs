@@ -104,7 +104,7 @@ test("the active release manifest verifies every pinned input", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
-    new RegExp(`Verified ${activeReleaseId.replaceAll(".", "\\.")}: Pi v0\\.81\\.1, 12 patches, Question Tool ${activeManifest.questionTool.version.replaceAll(".", "\\.")}`),
+    new RegExp(`Verified ${activeReleaseId.replaceAll(".", "\\.")}: Pi v0\\.81\\.1, 13 patches, Question Tool ${activeManifest.questionTool.version.replaceAll(".", "\\.")}`),
   );
 });
 

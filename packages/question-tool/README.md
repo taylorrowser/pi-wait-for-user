@@ -21,7 +21,7 @@ Handler and protocol compatibility is exact. Restoring this package to an unavai
 The supported release installer builds the exact patched Pi and places this exact Question Tool beside it:
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.5/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.6/install.sh | sh
 pi-wait-for-user --version
 ```
 

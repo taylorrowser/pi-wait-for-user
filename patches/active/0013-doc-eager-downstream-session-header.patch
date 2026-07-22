@@ -1,0 +1,72 @@
+diff --git a/packages/coding-agent/docs/session-format.md b/packages/coding-agent/docs/session-format.md
+index 61b0e918..cbab6f5b 100644
+--- a/packages/coding-agent/docs/session-format.md
++++ b/packages/coding-agent/docs/session-format.md
+@@ -28,13 +28,15 @@ Existing sessions are automatically migrated to the current version (v3) when lo
+ 
+ ### Downstream durable-deferral format
+ 
+-A session that first records durable deferred work is changed to the fail-closed downstream header type `dev.taylorrowser.pi-wait-for-user/session`, downstream format version `1`, with `basedOnPiSessionVersion: 3`. This namespace prevents unpatched Pi or a future official schema from silently interpreting experimental records.
++Every new persisted session created by this downstream enables durable deferral before its first append. Its first flush therefore uses the fail-closed downstream header type `dev.taylorrowser.pi-wait-for-user/session`, downstream format version `1`, with `basedOnPiSessionVersion: 3` — even if the Agent Thread never defers a tool call. This namespace prevents unpatched Pi or a future official schema from silently interpreting experimental records.
+ 
+ ```json
+ {"type":"dev.taylorrowser.pi-wait-for-user/session","version":1,"basedOnPiSessionVersion":3,"id":"uuid","timestamp":"...","cwd":"/path/to/project"}
+ ```
+ 
+-Unsupported downstream versions or mismatched base Pi versions are rejected before mutation. Durable deferral is unavailable for in-memory sessions and `--no-session`. See [Durable Tool Deferral](deferred-tools.md).
++This eager conversion is deliberate. Session entries are append-only and immutable, so waiting until the first deferral after ordinary history has flushed would require rewriting the header and introduce a failure window. The compatibility tradeoff is that Stock Pi cannot open any new persisted session created by this downstream, including sessions containing only ordinary prompts and responses.
++
++Unsupported downstream versions or mismatched base Pi versions are rejected before mutation. Already-flushed Stock Pi sessions keep their upstream header and remain readable by Stock Pi, but cannot enable durable deferral. Durable deferral is also unavailable for in-memory sessions and `--no-session`. See [Durable Tool Deferral](deferred-tools.md).
+ 
+ ## Source Files
+ 
+diff --git a/packages/coding-agent/test/suite/regressions/44-eager-downstream-session-header.test.ts b/packages/coding-agent/test/suite/regressions/44-eager-downstream-session-header.test.ts
+new file mode 100644
+index 00000000..0b68135a
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/44-eager-downstream-session-header.test.ts
+@@ -0,0 +1,44 @@
++import { mkdtempSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage } from "@earendil-works/pi-ai";
++import { afterEach, describe, expect, it } from "vitest";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++describe("regression #44: eager downstream session header", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	it("uses the fail-closed downstream header when an Agent Thread never defers", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-ordinary-downstream-session-"));
++		roots.push(root);
++		const sessionManager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({ sessionManager });
++		harnesses.push(harness);
++		harness.setResponses([fauxAssistantMessage("Ordinary response")]);
++
++		await harness.session.prompt("Ordinary prompt");
++
++		const sessionFile = sessionManager.getSessionFile();
++		expect(sessionFile).toBeDefined();
++		const [header] = readFileSync(sessionFile!, "utf8")
++			.trim()
++			.split("\n")
++			.map((line) => JSON.parse(line));
++		expect(header).toEqual({
++			type: "dev.taylorrowser.pi-wait-for-user/session",
++			version: 1,
++			basedOnPiSessionVersion: 3,
++			id: sessionManager.getSessionId(),
++			timestamp: expect.any(String),
++			cwd: root,
++		});
++		expect(sessionManager.getEntries().some((entry) => entry.type === "tool_batch_deferred")).toBe(false);
++	});
++});
