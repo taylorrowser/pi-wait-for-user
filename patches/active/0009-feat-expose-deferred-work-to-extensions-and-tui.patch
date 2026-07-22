@@ -1,0 +1,1435 @@
+From fd14fdb9c617a2985c60d6ca5f351999a48c3c6a Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Tue, 21 Jul 2026 21:54:33 -0400
+Subject: [PATCH] feat(coding-agent): expose deferred work to extensions and
+ TUI
+
+---
+ packages/agent/src/agent-loop.ts              |   6 +-
+ .../coding-agent/src/core/agent-session.ts    |  15 +-
+ .../coding-agent/src/core/extensions/index.ts |   1 +
+ .../src/core/extensions/loader.ts             |  30 ++++
+ .../src/core/extensions/runner.ts             |  10 +-
+ .../coding-agent/src/core/extensions/types.ts |  26 ++-
+ .../coding-agent/src/core/slash-commands.ts   |   1 +
+ packages/coding-agent/src/index.ts            |   1 +
+ .../components/deferred-inspector.ts          |  81 ++++++++++
+ .../interactive/components/tool-execution.ts  |  49 +++++-
+ .../src/modes/interactive/interactive-mode.ts | 146 +++++++++++++++--
+ .../test/deferred-inspector.test.ts           |  65 ++++++++
+ .../test/extensions-runner.test.ts            |   3 +
+ .../interactive-mode-startup-input.test.ts    |  29 ++++
+ .../19-interrupt-waiting-state.test.ts        |   6 +
+ ...21-extension-deferred-presentation.test.ts | 150 ++++++++++++++++++
+ ...-interactive-deferred-presentation.test.ts | 141 ++++++++++++++++
+ ...hinking-toggle-pending-tool-render.test.ts |   2 +
+ .../5943-session-start-notify.test.ts         |   8 +
+ .../test/tool-execution-component.test.ts     |  64 ++++++++
+ .../test/trigger-compact-extension.test.ts    |   1 +
+ 21 files changed, 813 insertions(+), 22 deletions(-)
+ create mode 100644 packages/coding-agent/src/modes/interactive/components/deferred-inspector.ts
+ create mode 100644 packages/coding-agent/test/deferred-inspector.test.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/21-extension-deferred-presentation.test.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts
+
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index 12751b5f..556a8df3 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -1009,6 +1009,7 @@ async function completeInterruptedToolBatch(
+ 				toolCall,
+ 				result: createErrorToolResult(
+ 					`Tool call "${toolCall.name}" was not executed because the deferred interaction was ${disposition}.`,
++					{ deferredToolBatch: { execution: "not_executed", reason: disposition } },
+ 				),
+ 				isError: true,
+ 			};
+@@ -1030,6 +1031,7 @@ async function completeAbandonedToolBatchFallback(
+ 			toolCall,
+ 			result: createErrorToolResult(
+ 				`Tool call "${toolCall.name}" was not executed because the deferred interaction was abandoned while compatible package code was unavailable.`,
++				{ deferredToolBatch: { execution: "not_executed", reason: "tool_unavailable" } },
+ 			),
+ 			isError: true,
+ 		};
+@@ -1398,10 +1400,10 @@ async function finalizeExecutedToolCall(
+ 	};
+ }
+ 
+-function createErrorToolResult(message: string): AgentToolResult<any> {
++function createErrorToolResult(message: string, details: Record<string, unknown> = {}): AgentToolResult<any> {
+ 	return {
+ 		content: [{ type: "text", text: message }],
+-		details: {},
++		details,
+ 	};
+ }
+ 
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index 0b6e8900..befb8ff2 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -2666,6 +2666,14 @@ export class AgentSession {
+ 					}
+ 					this._emitDeferredBatchChanged();
+ 				},
++				resumeDeferred: async () => {
++					await this.waitForIdle();
++					return this.resumeDeferred();
++				},
++				abandonDeferred: async () => {
++					await this.waitForIdle();
++					return this.abandonDeferred();
++				},
+ 				setSessionName: (name) => {
+ 					this.setSessionName(name);
+ 				},
+@@ -2690,6 +2698,7 @@ export class AgentSession {
+ 			},
+ 			{
+ 				getModel: () => this.model,
++				getDeferredBatch: () => this.deferredBatch,
+ 				isIdle: () => this.isIdle,
+ 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
+ 				getSignal: () => this.agent.signal,
+@@ -2884,12 +2893,14 @@ export class AgentSession {
+ 	}
+ 
+ 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+-		const previousFlagValues = this._extensionRunner.getFlagValues();
+-		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
++		const previousRunner = this._extensionRunner;
++		const previousFlagValues = previousRunner.getFlagValues();
++		await emitSessionShutdownEvent(previousRunner, { type: "session_shutdown", reason: "reload" });
+ 		await this.settingsManager.reload();
+ 		this.syncQueueModesFromSettings();
+ 		resetApiProviders();
+ 		await this._resourceLoader.reload();
++		previousRunner.invalidate();
+ 		this._buildRuntime({
+ 			activeToolNames: this.getActiveToolNames(),
+ 			flagValues: previousFlagValues,
+diff --git a/packages/coding-agent/src/core/extensions/index.ts b/packages/coding-agent/src/core/extensions/index.ts
+index 621f218e..e1f848ea 100644
+--- a/packages/coding-agent/src/core/extensions/index.ts
++++ b/packages/coding-agent/src/core/extensions/index.ts
+@@ -49,6 +49,7 @@ export type {
+ 	ContextUsage,
+ 	CustomToolCallEvent,
+ 	CustomToolResultEvent,
++	DeferredToolPresenter,
+ 	EditorFactory,
+ 	EditToolCallEvent,
+ 	EditToolResultEvent,
+diff --git a/packages/coding-agent/src/core/extensions/loader.ts b/packages/coding-agent/src/core/extensions/loader.ts
+index 89f59c03..70c08746 100644
+--- a/packages/coding-agent/src/core/extensions/loader.ts
++++ b/packages/coding-agent/src/core/extensions/loader.ts
+@@ -182,6 +182,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
+ 		sendMessage: notInitialized,
+ 		sendUserMessage: notInitialized,
+ 		appendEntry: notInitialized,
++		resumeDeferred: () => Promise.reject(new Error("Extension runtime not initialized")),
++		abandonDeferred: () => Promise.reject(new Error("Extension runtime not initialized")),
+ 		setSessionName: notInitialized,
+ 		getSessionName: notInitialized,
+ 		setLabel: notInitialized,
+@@ -316,6 +318,34 @@ function createExtensionAPI(
+ 			runtime.appendEntry(customType, data);
+ 		},
+ 
++		async resumeDeferred() {
++			runtime.assertActive();
++			return new Promise((resolve, reject) => {
++				setTimeout(() => {
++					try {
++						runtime.assertActive();
++						void runtime.resumeDeferred().then(resolve, reject);
++					} catch (error) {
++						reject(error);
++					}
++				}, 0);
++			});
++		},
++
++		async abandonDeferred() {
++			runtime.assertActive();
++			return new Promise((resolve, reject) => {
++				setTimeout(() => {
++					try {
++						runtime.assertActive();
++						void runtime.abandonDeferred().then(resolve, reject);
++					} catch (error) {
++						reject(error);
++					}
++				}, 0);
++			});
++		},
++
+ 		setSessionName(name: string): void {
+ 			runtime.assertActive();
+ 			runtime.setSessionName(name);
+diff --git a/packages/coding-agent/src/core/extensions/runner.ts b/packages/coding-agent/src/core/extensions/runner.ts
+index 4be53e8f..6fac2736 100644
+--- a/packages/coding-agent/src/core/extensions/runner.ts
++++ b/packages/coding-agent/src/core/extensions/runner.ts
+@@ -6,7 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
+ import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
+ import type { KeyId } from "@earendil-works/pi-tui";
+ import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+-import { AGENT_SESSION_CAPABILITIES } from "../deferred-batch.ts";
++import { AGENT_SESSION_CAPABILITIES, type DeferredBatchSnapshot } from "../deferred-batch.ts";
+ import type { ResourceDiagnostic } from "../diagnostics.ts";
+ import type { KeybindingsConfig } from "../keybindings.ts";
+ import type { ModelRegistry } from "../model-registry.ts";
+@@ -274,6 +274,7 @@ export class ExtensionRunner {
+ 	private modelRegistry: ModelRegistry;
+ 	private errorListeners: Set<ExtensionErrorListener> = new Set();
+ 	private getModel: () => Model<any> | undefined = () => undefined;
++	private getDeferredBatchFn: () => DeferredBatchSnapshot | undefined = () => undefined;
+ 	private isIdleFn: () => boolean = () => true;
+ 	private isProjectTrustedFn: () => boolean = () => true;
+ 	private getSignalFn: () => AbortSignal | undefined = () => undefined;
+@@ -322,6 +323,8 @@ export class ExtensionRunner {
+ 		this.runtime.sendMessage = actions.sendMessage;
+ 		this.runtime.sendUserMessage = actions.sendUserMessage;
+ 		this.runtime.appendEntry = actions.appendEntry;
++		this.runtime.resumeDeferred = actions.resumeDeferred;
++		this.runtime.abandonDeferred = actions.abandonDeferred;
+ 		this.runtime.setSessionName = actions.setSessionName;
+ 		this.runtime.getSessionName = actions.getSessionName;
+ 		this.runtime.setLabel = actions.setLabel;
+@@ -336,6 +339,7 @@ export class ExtensionRunner {
+ 
+ 		// Context actions (required)
+ 		this.getModel = contextActions.getModel;
++		this.getDeferredBatchFn = contextActions.getDeferredBatch;
+ 		this.isIdleFn = contextActions.isIdle;
+ 		this.isProjectTrustedFn = contextActions.isProjectTrusted;
+ 		this.getSignalFn = contextActions.getSignal;
+@@ -687,6 +691,10 @@ export class ExtensionRunner {
+ 				runner.assertActive();
+ 				return AGENT_SESSION_CAPABILITIES;
+ 			},
++			getDeferredBatch: () => {
++				runner.assertActive();
++				return runner.getDeferredBatchFn();
++			},
+ 			get sessionManager() {
+ 				runner.assertActive();
+ 				return runner.sessionManager;
+diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
+index 6aa97599..7b5690a3 100644
+--- a/packages/coding-agent/src/core/extensions/types.ts
++++ b/packages/coding-agent/src/core/extensions/types.ts
+@@ -52,7 +52,12 @@ import type { Static, TSchema } from "typebox";
+ import type { Theme } from "../../modes/interactive/theme/theme.ts";
+ import type { BashResult } from "../bash-executor.ts";
+ import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
+-import type { AgentSessionCapabilities } from "../deferred-batch.ts";
++import type {
++	AgentSessionCapabilities,
++	DeferredBatch,
++	DeferredBatchSnapshot,
++	DeferredOperationResult,
++} from "../deferred-batch.ts";
+ import type { EventBus } from "../event-bus.ts";
+ import type { ExecOptions, ExecResult } from "../exec.ts";
+ import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
+@@ -319,6 +324,8 @@ export interface ExtensionContext {
+ 	cwd: string;
+ 	/** Exact deferred-tool-batch protocols and operations supported by this Pi. */
+ 	capabilities: AgentSessionCapabilities;
++	/** Read the complete neutral deferred-batch snapshot for the active branch. */
++	getDeferredBatch(): DeferredBatchSnapshot | undefined;
+ 	/** Session manager (read-only) */
+ 	sessionManager: ReadonlySessionManager;
+ 	/** Model registry for API key resolution */
+@@ -440,10 +447,16 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
+ 	showImages: boolean;
+ 	/** Whether the current result is an error. */
+ 	isError: boolean;
++	/** Durable waiting role for this row, when its batch is currently deferred. */
++	deferredState?: "owner" | "held";
+ }
+ 
++export type DeferredToolPresenter = (snapshot: DeferredBatch, ctx: ExtensionContext) => Promise<void> | void;
++
+ export interface ToolDeferralDefinition<TParams extends TSchema = TSchema>
+ 	extends Omit<AgentToolDeferral<Static<TParams>>, "resolve" | "inspectAvailability"> {
++	/** Optional package-owned TUI presentation for compatible deferred work. */
++	presenter?: DeferredToolPresenter;
+ 	inspectAvailability?(
+ 		request: InspectToolDeferralRequest<Static<TParams>>,
+ 		ctx: ExtensionContext,
+@@ -1311,6 +1324,12 @@ export interface ExtensionAPI {
+ 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
+ 	appendEntry<T = unknown>(customType: string, data?: T): void;
+ 
++	/** Schedule argument-free advancement after the current extension callback or custom UI teardown. */
++	resumeDeferred(): Promise<DeferredOperationResult>;
++
++	/** Schedule argument-free abandonment after the current extension callback or custom UI teardown. */
++	abandonDeferred(): Promise<DeferredOperationResult>;
++
+ 	// =========================================================================
+ 	// Session Metadata
+ 	// =========================================================================
+@@ -1553,6 +1572,8 @@ export type SendUserMessageHandler = (
+ 
+ export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
+ 
++export type DeferredOperationHandler = () => Promise<DeferredOperationResult>;
++
+ export type SetSessionNameHandler = (name: string) => void;
+ 
+ export type GetSessionNameHandler = () => string | undefined;
+@@ -1613,6 +1634,8 @@ export interface ExtensionActions {
+ 	sendMessage: SendMessageHandler;
+ 	sendUserMessage: SendUserMessageHandler;
+ 	appendEntry: AppendEntryHandler;
++	resumeDeferred: DeferredOperationHandler;
++	abandonDeferred: DeferredOperationHandler;
+ 	setSessionName: SetSessionNameHandler;
+ 	getSessionName: GetSessionNameHandler;
+ 	setLabel: SetLabelHandler;
+@@ -1632,6 +1655,7 @@ export interface ExtensionActions {
+  */
+ export interface ExtensionContextActions {
+ 	getModel: () => Model<any> | undefined;
++	getDeferredBatch: () => DeferredBatchSnapshot | undefined;
+ 	isIdle: () => boolean;
+ 	isProjectTrusted: () => boolean;
+ 	getSignal: () => AbortSignal | undefined;
+diff --git a/packages/coding-agent/src/core/slash-commands.ts b/packages/coding-agent/src/core/slash-commands.ts
+index 7204988f..f1d9b02d 100644
+--- a/packages/coding-agent/src/core/slash-commands.ts
++++ b/packages/coding-agent/src/core/slash-commands.ts
+@@ -36,6 +36,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+ 	{ name: "logout", description: "Remove provider authentication" },
+ 	{ name: "new", description: "Start a new session" },
+ 	{ name: "compact", description: "Manually compact the session context" },
++	{ name: "deferred", description: "Inspect or recover the active deferred tool batch" },
+ 	{ name: "resume", description: "Resume a different session" },
+ 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
+ 	{ name: "quit", description: `Quit ${APP_NAME}` },
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index a9b5ba15..eb1259d0 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -82,6 +82,7 @@ export type {
+ 	ContextEvent,
+ 	ContextUsage,
+ 	CustomToolCallEvent,
++	DeferredToolPresenter,
+ 	EditToolCallEvent,
+ 	EntryRenderer,
+ 	EntryRenderOptions,
+diff --git a/packages/coding-agent/src/modes/interactive/components/deferred-inspector.ts b/packages/coding-agent/src/modes/interactive/components/deferred-inspector.ts
+new file mode 100644
+index 00000000..4237afa6
+--- /dev/null
++++ b/packages/coding-agent/src/modes/interactive/components/deferred-inspector.ts
+@@ -0,0 +1,81 @@
++import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
++import type { DeferredBatchSnapshot } from "../../../core/deferred-batch.ts";
++import { theme } from "../theme/theme.ts";
++
++export type DeferredInspectorAction = "retry" | "abandon" | "dismiss";
++
++type InspectorOption = { action: DeferredInspectorAction; label: string };
++
++export class DeferredInspectorComponent {
++	private readonly snapshot: DeferredBatchSnapshot;
++	private readonly onAction: (action: DeferredInspectorAction) => void;
++	private readonly options: InspectorOption[];
++	private selectedIndex = 0;
++
++	constructor(snapshot: DeferredBatchSnapshot, onAction: (action: DeferredInspectorAction) => void) {
++		this.snapshot = snapshot;
++		this.onAction = onAction;
++		this.options =
++			snapshot.kind === "batch"
++				? [
++						{ action: "retry", label: "Retry advancement" },
++						{ action: "abandon", label: "Abandon deferred batch" },
++						{ action: "dismiss", label: "Close" },
++					]
++				: [{ action: "dismiss", label: "Close" }];
++	}
++
++	handleInput(data: string): void {
++		if (matchesKey(data, Key.up)) {
++			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
++			return;
++		}
++		if (matchesKey(data, Key.down)) {
++			this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + 1);
++			return;
++		}
++		if (matchesKey(data, Key.enter)) {
++			this.onAction(this.options[this.selectedIndex].action);
++			return;
++		}
++		if (matchesKey(data, Key.escape)) {
++			this.onAction("dismiss");
++		}
++	}
++
++	render(width: number): string[] {
++		const renderWidth = Math.max(1, width);
++		const lines: string[] = [];
++		const add = (text: string) => lines.push(...wrapTextWithAnsi(text, renderWidth));
++
++		add(theme.fg("accent", theme.bold("Deferred tool batch")));
++		if (this.snapshot.kind === "invalid") {
++			add(theme.fg("error", `${this.snapshot.code}: ${this.snapshot.message}`));
++		} else {
++			add(theme.fg("muted", `Phase: ${this.snapshot.phase}`));
++			lines.push("");
++			for (const call of this.snapshot.calls) {
++				const owner = call.toolCallId === this.snapshot.ownerCallId ? "owner" : "held";
++				add(`  ${theme.fg("text", call.toolName)} ${theme.fg("dim", `(${owner}, ${call.result})`)}`);
++			}
++			if (this.snapshot.availability.status === "unavailable") {
++				lines.push("");
++				add(theme.fg("warning", "Unavailable:"));
++				for (const reason of this.snapshot.availability.reasons) {
++					add(`  ${theme.fg("warning", reason.message)}`);
++				}
++			}
++		}
++
++		lines.push("");
++		for (let index = 0; index < this.options.length; index++) {
++			const option = this.options[index];
++			const prefix = index === this.selectedIndex ? theme.fg("accent", "> ") : "  ";
++			add(`${prefix}${theme.fg(index === this.selectedIndex ? "accent" : "text", option.label)}`);
++		}
++		lines.push(theme.fg("dim", truncateToWidth("Up/Down to select · Enter to confirm · Esc to close", renderWidth)));
++		return lines;
++	}
++
++	invalidate(): void {}
++}
+diff --git a/packages/coding-agent/src/modes/interactive/components/tool-execution.ts b/packages/coding-agent/src/modes/interactive/components/tool-execution.ts
+index ad84f441..46674703 100644
+--- a/packages/coding-agent/src/modes/interactive/components/tool-execution.ts
++++ b/packages/coding-agent/src/modes/interactive/components/tool-execution.ts
+@@ -39,6 +39,7 @@ export class ToolExecutionComponent extends Container {
+ 	};
+ 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
+ 	private hideComponent = false;
++	private deferredState: "owner" | "held" | undefined;
+ 
+ 	constructor(
+ 		toolName: string,
+@@ -129,6 +130,7 @@ export class ToolExecutionComponent extends Container {
+ 			expanded: this.expanded,
+ 			showImages: this.showImages,
+ 			isError: this.result?.isError ?? false,
++			deferredState: this.deferredState,
+ 		};
+ 	}
+ 
+@@ -198,6 +200,12 @@ export class ToolExecutionComponent extends Container {
+ 		}
+ 	}
+ 
++	setDeferredState(state: "owner" | "held" | undefined): void {
++		this.deferredState = state;
++		this.updateDisplay();
++		this.ui.requestRender();
++	}
++
+ 	setExpanded(expanded: boolean): void {
+ 		this.expanded = expanded;
+ 		this.updateDisplay();
+@@ -250,12 +258,24 @@ export class ToolExecutionComponent extends Container {
+ 		return super.render(width);
+ 	}
+ 
++	private getDeferredNotExecutedReason(): string | undefined {
++		if (!this.result || typeof this.result.details !== "object" || this.result.details === null) return undefined;
++		const marker = (this.result.details as { deferredToolBatch?: unknown }).deferredToolBatch;
++		if (typeof marker !== "object" || marker === null) return undefined;
++		const deferred = marker as { execution?: unknown; reason?: unknown };
++		return deferred.execution === "not_executed" && typeof deferred.reason === "string" ? deferred.reason : undefined;
++	}
++
+ 	private updateDisplay(): void {
+-		const bgFn = this.isPartial
+-			? (text: string) => theme.bg("toolPendingBg", text)
+-			: this.result?.isError
+-				? (text: string) => theme.bg("toolErrorBg", text)
+-				: (text: string) => theme.bg("toolSuccessBg", text);
++		const deferredNotExecutedReason = this.getDeferredNotExecutedReason();
++		const bgFn =
++			this.deferredState === "held" || deferredNotExecutedReason
++				? (text: string) => theme.bg("toolPendingBg", text)
++				: this.isPartial
++					? (text: string) => theme.bg("toolPendingBg", text)
++					: this.result?.isError
++						? (text: string) => theme.bg("toolErrorBg", text)
++						: (text: string) => theme.bg("toolSuccessBg", text);
+ 
+ 		let hasContent = false;
+ 		this.hideComponent = false;
+@@ -283,7 +303,18 @@ export class ToolExecutionComponent extends Container {
+ 				}
+ 			}
+ 
+-			if (this.result) {
++			if (this.deferredState === "held" && !this.result) {
++				renderContainer.addChild(new Text(theme.fg("muted", "Held—not executed"), 0, 0));
++				hasContent = true;
++			} else if (deferredNotExecutedReason) {
++				let text = theme.fg("muted", "Not executed");
++				if (this.expanded) {
++					const output = this.getTextOutput();
++					text += `\n${theme.fg("dim", output || deferredNotExecutedReason)}`;
++				}
++				renderContainer.addChild(new Text(text, 0, 0));
++				hasContent = true;
++			} else if (this.result) {
+ 				const resultRenderer = this.getResultRenderer();
+ 				if (!resultRenderer) {
+ 					const component = this.createResultFallback();
+@@ -314,7 +345,11 @@ export class ToolExecutionComponent extends Container {
+ 			}
+ 		} else {
+ 			this.contentText.setCustomBgFn(bgFn);
+-			this.contentText.setText(this.formatToolExecution());
++			this.contentText.setText(
++				this.deferredState === "held"
++					? `${theme.fg("toolTitle", theme.bold(this.toolName))}\n${theme.fg("muted", "Held—not executed")}`
++					: this.formatToolExecution(),
++			);
+ 			hasContent = true;
+ 		}
+ 
+diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+index 54bf831a..c910b712 100644
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -51,7 +51,12 @@ import {
+ 	getShareViewerUrl,
+ 	VERSION,
+ } from "../../config.ts";
+-import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
++import {
++	type AgentSession,
++	AgentSessionError,
++	type AgentSessionEvent,
++	parseSkillBlock,
++} from "../../core/agent-session.ts";
+ import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+ import {
+ 	CACHE_TTL_MS,
+@@ -106,6 +111,7 @@ import { CustomEditor } from "./components/custom-editor.ts";
+ import { CustomEntryComponent } from "./components/custom-entry.ts";
+ import { CustomMessageComponent } from "./components/custom-message.ts";
+ import { DaxnutsComponent } from "./components/daxnuts.ts";
++import { type DeferredInspectorAction, DeferredInspectorComponent } from "./components/deferred-inspector.ts";
+ import { DynamicBorder } from "./components/dynamic-border.ts";
+ import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
+ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
+@@ -362,6 +368,9 @@ export class InteractiveMode {
+ 	// Tool execution tracking: toolCallId -> component
+ 	private pendingTools = new Map<string, ToolExecutionComponent>();
+ 
++	// Last automatically presented active-branch deferred batch. Dismissal does not clear it.
++	private presentedDeferredKey: string | undefined;
++
+ 	// Tool output expansion state
+ 	private toolOutputExpanded = false;
+ 
+@@ -789,6 +798,7 @@ export class InteractiveMode {
+ 
+ 		// Render initial messages AFTER showing loaded resources
+ 		this.renderInitialMessages();
++		await this.presentDeferredBatch();
+ 
+ 		// Set up theme file watcher
+ 		onThemeChange(() => {
+@@ -885,8 +895,7 @@ export class InteractiveMode {
+ 			try {
+ 				await this.session.prompt(initialMessage, { images: initialImages });
+ 			} catch (error: unknown) {
+-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+-				this.showError(errorMessage);
++				this.handlePromptError(error);
+ 			}
+ 		}
+ 
+@@ -895,8 +904,7 @@ export class InteractiveMode {
+ 				try {
+ 					await this.session.prompt(message);
+ 				} catch (error: unknown) {
+-					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+-					this.showError(errorMessage);
++					this.handlePromptError(error);
+ 				}
+ 			}
+ 		}
+@@ -907,12 +915,18 @@ export class InteractiveMode {
+ 			try {
+ 				await this.session.prompt(userInput);
+ 			} catch (error: unknown) {
+-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+-				this.showError(errorMessage);
++				this.handlePromptError(error, userInput);
+ 			}
+ 		}
+ 	}
+ 
++	private handlePromptError(error: unknown, rejectedInput?: string): void {
++		if (error instanceof AgentSessionError && error.code === "deferred_unavailable" && rejectedInput) {
++			this.editor.setText(rejectedInput);
++		}
++		this.showError(error instanceof Error ? error.message : "Unknown error occurred");
++	}
++
+ 	private async checkForPackageUpdates(): Promise<string[]> {
+ 		if (process.env.PI_OFFLINE) {
+ 			return [];
+@@ -1658,6 +1672,8 @@ export class InteractiveMode {
+ 
+ 					this.chatContainer.clear();
+ 					this.renderInitialMessages();
++					this.presentedDeferredKey = undefined;
++					await this.presentDeferredBatch();
+ 					if (result.editorText && !this.editor.getText().trim()) {
+ 						this.editor.setText(result.editorText);
+ 					}
+@@ -1730,6 +1746,9 @@ export class InteractiveMode {
+ 		await this.updateAvailableProviderCount();
+ 		this.updateEditorBorderColor();
+ 		this.updateTerminalTitle();
++		if (options.renderBeforeBind) {
++			await this.presentDeferredBatch();
++		}
+ 	}
+ 
+ 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
+@@ -1758,6 +1777,92 @@ export class InteractiveMode {
+ 		return this.session.getToolDefinition(toolName);
+ 	}
+ 
++	private applyDeferredToolRows(): void {
++		const snapshot = this.session.deferredBatch;
++		if (!snapshot || snapshot.kind !== "batch") return;
++		for (const call of snapshot.calls) {
++			if (call.result === "recorded") continue;
++			this.pendingTools
++				.get(call.toolCallId)
++				?.setDeferredState(call.toolCallId === snapshot.ownerCallId ? "owner" : "held");
++		}
++	}
++
++	private async presentDeferredBatch(options: { force?: boolean } = {}): Promise<void> {
++		const snapshot = this.session.deferredBatch;
++		if (!snapshot) {
++			this.presentedDeferredKey = undefined;
++			return;
++		}
++
++		const leafId = this.sessionManager.getLeafId() ?? "root";
++		if (snapshot.kind === "invalid") {
++			const key = `invalid:${leafId}:${snapshot.code}`;
++			if (!options.force && this.presentedDeferredKey === key) return;
++			this.presentedDeferredKey = key;
++			await this.showDeferredInspector();
++			return;
++		}
++
++		const key = `${snapshot.sessionId}:${snapshot.assistantEntryId}:${leafId}`;
++		if (!options.force && this.presentedDeferredKey === key) return;
++		this.presentedDeferredKey = key;
++
++		const owner = snapshot.calls.find((call) => call.toolCallId === snapshot.ownerCallId);
++		const presenter =
++			snapshot.availability.status === "available" && owner
++				? this.session.getToolDefinition(owner.toolName)?.deferral?.presenter
++				: undefined;
++		if (presenter) {
++			try {
++				await presenter(snapshot, this.session.extensionRunner.createContext());
++				return;
++			} catch (error) {
++				this.showExtensionError(
++					owner?.toolName ?? "deferred",
++					error instanceof Error ? error.message : String(error),
++				);
++			}
++		}
++		await this.showDeferredInspector();
++	}
++
++	private async showDeferredInspector(): Promise<void> {
++		const snapshot = this.session.deferredBatch;
++		if (!snapshot) {
++			this.showStatus("No deferred tool batch on the active branch");
++			return;
++		}
++
++		const action = await this.showExtensionCustom<DeferredInspectorAction>((tui, _theme, _keybindings, done) => {
++			return new DeferredInspectorComponent(snapshot, (selected) => {
++				done(selected);
++				tui.requestRender();
++			});
++		});
++		if (action === "dismiss") return;
++
++		try {
++			if (action === "abandon") {
++				const confirmed = await this.showExtensionConfirm(
++					"Abandon deferred tool batch?",
++					"This records Cancellation when possible and completes held calls without executing them.",
++				);
++				if (!confirmed) return;
++				await this.session.abandonDeferred();
++			} else {
++				await this.session.resumeDeferred();
++			}
++		} catch (error) {
++			this.showError(error instanceof Error ? error.message : String(error));
++		}
++
++		if (this.session.deferredBatch) {
++			this.presentedDeferredKey = undefined;
++			await this.presentDeferredBatch();
++		}
++	}
++
+ 	/**
+ 	 * Set up keyboard shortcuts registered by extensions.
+ 	 */
+@@ -1772,6 +1877,7 @@ export class InteractiveMode {
+ 			hasUI: true,
+ 			cwd: this.sessionManager.getCwd(),
+ 			capabilities: this.session.capabilities,
++			getDeferredBatch: () => this.session.deferredBatch,
+ 			sessionManager: this.sessionManager,
+ 			modelRegistry: extensionRunner.getModelRegistry(),
+ 			model: this.session.model,
+@@ -2736,6 +2842,11 @@ export class InteractiveMode {
+ 				await this.handleReloadCommand();
+ 				return;
+ 			}
++			if (text === "/deferred") {
++				this.editor.setText("");
++				await this.showDeferredInspector();
++				return;
++			}
+ 			if (text === "/debug") {
+ 				this.handleDebugCommand();
+ 				this.editor.setText("");
+@@ -2831,7 +2942,7 @@ export class InteractiveMode {
+ 
+ 		switch (event.type) {
+ 			case "agent_start":
+-				this.pendingTools.clear();
++				if (!this.session.deferredBatch) this.pendingTools.clear();
+ 				if (this.settingsManager.getShowTerminalProgress()) {
+ 					this.ui.terminal.setProgress(true);
+ 				}
+@@ -2938,6 +3049,16 @@ export class InteractiveMode {
+ 
+ 			case "message_end":
+ 				if (event.message.role === "user") break;
++				if (event.message.role === "toolResult") {
++					const component = this.pendingTools.get(event.message.toolCallId);
++					if (component) {
++						component.setDeferredState(undefined);
++						component.updateResult(event.message);
++						this.pendingTools.delete(event.message.toolCallId);
++						this.ui.requestRender();
++					}
++					break;
++				}
+ 				if (this.streamingComponent && event.message.role === "assistant") {
+ 					this.streamingMessage = event.message;
+ 					let errorMessage: string | undefined;
+@@ -3020,6 +3141,7 @@ export class InteractiveMode {
+ 			}
+ 
+ 			case "agent_end":
++				this.applyDeferredToolRows();
+ 				if (this.settingsManager.getShowTerminalProgress()) {
+ 					this.ui.terminal.setProgress(false);
+ 				}
+@@ -3029,12 +3151,13 @@ export class InteractiveMode {
+ 					this.streamingComponent = undefined;
+ 					this.streamingMessage = undefined;
+ 				}
+-				this.pendingTools.clear();
++				if (!this.session.deferredBatch) this.pendingTools.clear();
+ 
+ 				this.ui.requestRender();
+ 				break;
+ 
+ 			case "agent_settled":
++				await this.presentDeferredBatch();
+ 				await this.checkShutdownRequested();
+ 				break;
+ 
+@@ -3386,6 +3509,7 @@ export class InteractiveMode {
+ 		for (const [toolCallId, component] of renderedPendingTools) {
+ 			this.pendingTools.set(toolCallId, component);
+ 		}
++		this.applyDeferredToolRows();
+ 		this.ui.requestRender();
+ 	}
+ 
+@@ -4713,6 +4837,8 @@ export class InteractiveMode {
+ 						// Update UI
+ 						this.chatContainer.clear();
+ 						this.renderInitialMessages();
++						this.presentedDeferredKey = undefined;
++						await this.presentDeferredBatch();
+ 						if (result.editorText && !this.editor.getText().trim()) {
+ 							this.editor.setText(result.editorText);
+ 						}
+@@ -5398,6 +5524,8 @@ export class InteractiveMode {
+ 			);
+ 			dismissReloadBox(this.editor as Component);
+ 			reloadBoxDismissed = true;
++			this.presentedDeferredKey = undefined;
++			await this.presentDeferredBatch();
+ 		} catch (error) {
+ 			if (!reloadBoxDismissed) {
+ 				dismissReloadBox(previousEditor as Component);
+diff --git a/packages/coding-agent/test/deferred-inspector.test.ts b/packages/coding-agent/test/deferred-inspector.test.ts
+new file mode 100644
+index 00000000..98ac45e3
+--- /dev/null
++++ b/packages/coding-agent/test/deferred-inspector.test.ts
+@@ -0,0 +1,65 @@
++import { beforeAll, describe, expect, it } from "vitest";
++import type { DeferredBatch } from "../src/core/deferred-batch.ts";
++import {
++	type DeferredInspectorAction,
++	DeferredInspectorComponent,
++} from "../src/modes/interactive/components/deferred-inspector.ts";
++import { initTheme } from "../src/modes/interactive/theme/theme.ts";
++import { stripAnsi } from "../src/utils/ansi.ts";
++
++const SNAPSHOT: DeferredBatch = {
++	kind: "batch",
++	sessionId: "session-21",
++	assistantEntryId: "assistant-21",
++	ownerCallId: "owner-21",
++	calls: [
++		{ toolCallId: "sibling-1", toolName: "read_policy", result: "recorded" },
++		{ toolCallId: "owner-21", toolName: "question", result: "missing" },
++		{ toolCallId: "sibling-2", toolName: "deploy", result: "missing" },
++	],
++	phase: "partial",
++	correlationId: "private-package-correlation",
++	availability: {
++		status: "unavailable",
++		reasons: [
++			{
++				code: "tool_unavailable",
++				message: "Held tool deploy is not currently active.",
++				callId: "sibling-2",
++				toolName: "deploy",
++				details: { privateArgument: "do not render" },
++			},
++		],
++	},
++};
++
++describe("DeferredInspectorComponent", () => {
++	beforeAll(() => initTheme("dark"));
++
++	it("renders neutral progress and recovery reasons without package correlation or private details", () => {
++		const component = new DeferredInspectorComponent(SNAPSHOT, () => {});
++		const rendered = stripAnsi(component.render(100).join("\n"));
++
++		expect(rendered).toContain("Deferred tool batch");
++		expect(rendered).toContain("Phase: partial");
++		expect(rendered.indexOf("read_policy")).toBeLessThan(rendered.indexOf("question"));
++		expect(rendered.indexOf("question")).toBeLessThan(rendered.indexOf("deploy"));
++		expect(rendered).toContain("recorded");
++		expect(rendered).toContain("missing");
++		expect(rendered).toContain("Held tool deploy is not currently active.");
++		expect(rendered).not.toContain("private-package-correlation");
++		expect(rendered).not.toContain("do not render");
++	});
++
++	it("offers retry, confirmed abandonment, and dismissal actions", () => {
++		const actions: DeferredInspectorAction[] = [];
++		const component = new DeferredInspectorComponent(SNAPSHOT, (action) => actions.push(action));
++
++		component.handleInput("\r");
++		component.handleInput("\x1b[B");
++		component.handleInput("\r");
++		component.handleInput("\x1b");
++
++		expect(actions).toEqual(["retry", "abandon", "dismiss"]);
++	});
++});
+diff --git a/packages/coding-agent/test/extensions-runner.test.ts b/packages/coding-agent/test/extensions-runner.test.ts
+index 69f20be9..3427d08c 100644
+--- a/packages/coding-agent/test/extensions-runner.test.ts
++++ b/packages/coding-agent/test/extensions-runner.test.ts
+@@ -75,6 +75,8 @@ describe("ExtensionRunner", () => {
+ 		sendMessage: () => {},
+ 		sendUserMessage: () => {},
+ 		appendEntry: () => {},
++		resumeDeferred: async () => ({ status: "none", deferredBatch: undefined }),
++		abandonDeferred: async () => ({ status: "none", deferredBatch: undefined }),
+ 		setSessionName: () => {},
+ 		getSessionName: () => undefined,
+ 		setLabel: () => {},
+@@ -90,6 +92,7 @@ describe("ExtensionRunner", () => {
+ 
+ 	const extensionContextActions: ExtensionContextActions = {
+ 		getModel: () => undefined,
++		getDeferredBatch: () => undefined,
+ 		isIdle: () => true,
+ 		isProjectTrusted: () => true,
+ 		getSignal: () => undefined,
+diff --git a/packages/coding-agent/test/interactive-mode-startup-input.test.ts b/packages/coding-agent/test/interactive-mode-startup-input.test.ts
+index b784f376..2344c23d 100644
+--- a/packages/coding-agent/test/interactive-mode-startup-input.test.ts
++++ b/packages/coding-agent/test/interactive-mode-startup-input.test.ts
+@@ -1,4 +1,6 @@
+ import { describe, expect, it, vi } from "vitest";
++import { AgentSessionError } from "../src/core/agent-session.ts";
++import type { DeferredBatch } from "../src/core/deferred-batch.ts";
+ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+ 
+ type SubmitContext = {
+@@ -26,6 +28,11 @@ type InputContext = {
+ type InteractiveModePrivate = {
+ 	setupEditorSubmitHandler(this: SubmitContext): void;
+ 	getUserInput(this: InputContext): Promise<string>;
++	handlePromptError(
++		this: { editor: { setText(text: string): void }; showError(message: string): void },
++		error: unknown,
++		rejectedInput?: string,
++	): void;
+ };
+ 
+ const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModePrivate;
+@@ -69,4 +76,26 @@ describe("InteractiveMode startup input", () => {
+ 		expect(context.onInputCallback).toBeUndefined();
+ 		expect(context.pendingUserInputs).toEqual([]);
+ 	});
++
++	it("restores editor text when an unavailable deferred owner rejects a normal prompt", () => {
++		const deferredBatch: DeferredBatch = {
++			kind: "batch",
++			sessionId: "session",
++			assistantEntryId: "assistant",
++			ownerCallId: "owner",
++			calls: [{ toolCallId: "owner", toolName: "question", result: "missing" }],
++			phase: "deferred",
++			availability: { status: "unavailable", reasons: [] },
++		};
++		const context = {
++			editor: { setText: vi.fn() },
++			showError: vi.fn(),
++		};
++		const error = new AgentSessionError("deferred_unavailable", "The deferred owner is unavailable", deferredBatch);
++
++		interactiveModePrototype.handlePromptError.call(context, error, "keep this message");
++
++		expect(context.editor.setText).toHaveBeenCalledWith("keep this message");
++		expect(context.showError).toHaveBeenCalledWith("The deferred owner is unavailable");
++	});
+ });
+diff --git a/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts b/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+index e4719fa4..97fbf32f 100644
+--- a/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
++++ b/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+@@ -272,6 +272,9 @@ describe("regression #19: interrupt Waiting State", () => {
+ 				text: 'Tool call "ordinary" was not executed because the deferred interaction was interrupted.',
+ 			},
+ 		]);
++		expect(results[0].message.details).toEqual({
++			deferredToolBatch: { execution: "not_executed", reason: "interrupted" },
++		});
+ 		expect(results[1].message.content).toEqual([{ type: "text", text: "Left unanswered" }]);
+ 		expect(results[2].message.content).toEqual([
+ 			{
+@@ -279,6 +282,9 @@ describe("regression #19: interrupt Waiting State", () => {
+ 				text: 'Tool call "ordinary" was not executed because the deferred interaction was interrupted.',
+ 			},
+ 		]);
++		expect(results[2].message.details).toEqual({
++			deferredToolBatch: { execution: "not_executed", reason: "interrupted" },
++		});
+ 		expect(results[0].index).toBeGreaterThan(outcomeIndex);
+ 		expect(redirectedUserIndex).toBeGreaterThan(results.at(-1)!.index);
+ 
+diff --git a/packages/coding-agent/test/suite/regressions/21-extension-deferred-presentation.test.ts b/packages/coding-agent/test/suite/regressions/21-extension-deferred-presentation.test.ts
+new file mode 100644
+index 00000000..54581304
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/21-extension-deferred-presentation.test.ts
+@@ -0,0 +1,150 @@
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage } from "@earendil-works/pi-ai";
++import { afterEach, describe, expect, it } from "vitest";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import type {
++	DeferredBatchSnapshot,
++	DeferredOperationResult,
++	ExtensionFactory,
++	ExtensionUIContext,
++} from "../../../src/index.ts";
++import {
++	deferredToolBatchMessage,
++	type InteractionRequestTestController,
++	questionExtension,
++} from "../deferred-tool-batch-fixture.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++describe("regression #21: extension deferred presentation seam", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	it("lets an extension inspect waiting state and schedule Response resumption after its callback returns", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-extension-deferred-"));
++		roots.push(root);
++		const controller: InteractionRequestTestController = {};
++		const executions: string[] = [];
++		const callbackStates: string[] = [];
++		const snapshots: DeferredBatchSnapshot[] = [];
++		let scheduledResume: Promise<DeferredOperationResult> | undefined;
++		let scheduled = false;
++
++		const presenter: ExtensionFactory = (pi) => {
++			pi.on("agent_settled", (_event, ctx) => {
++				const snapshot = ctx.getDeferredBatch();
++				if (!snapshot || scheduled) return;
++				scheduled = true;
++				snapshots.push(snapshot);
++				controller.recordResponse?.("Ship it");
++				callbackStates.push("callback");
++				scheduledResume = pi.resumeDeferred().then((result) => {
++					callbackStates.push("resumed");
++					return result;
++				});
++				callbackStates.push("returned");
++			});
++		};
++
++		const harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension(executions, controller), presenter],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage(), fauxAssistantMessage("Continued")]);
++
++		await harness.session.prompt("Ask before shipping");
++		await scheduledResume;
++
++		expect(snapshots).toHaveLength(1);
++		expect(snapshots[0]).toMatchObject({ kind: "batch", phase: "deferred", ownerCallId: "call-1" });
++		expect(callbackStates).toEqual(["callback", "returned", "resumed"]);
++		expect(executions).toEqual(["ordinary:Prepare?", "Ship?", "ordinary:Deploy?"]);
++		expect(harness.session.deferredBatch).toBeUndefined();
++	});
++
++	it("defers advancement until a package custom UI has torn down", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-extension-custom-ui-"));
++		roots.push(root);
++		const controller: InteractionRequestTestController = {};
++		const states: string[] = [];
++		let scheduledResume: Promise<DeferredOperationResult> | undefined;
++		let scheduled = false;
++		const presenter: ExtensionFactory = (pi) => {
++			pi.on("agent_settled", async (_event, ctx) => {
++				if (!ctx.getDeferredBatch() || scheduled) return;
++				scheduled = true;
++				controller.recordResponse?.("Ship it");
++				await ctx.ui.custom<void>((_tui, _theme, _keybindings, done) => {
++					states.push("custom-callback");
++					scheduledResume = pi.resumeDeferred().then((result) => {
++						states.push("resumed");
++						return result;
++					});
++					done();
++					return { render: () => [], invalidate: () => {} };
++				});
++				states.push("custom-returned");
++			});
++		};
++		const uiContext = {
++			custom: async <T>(factory: Parameters<ExtensionUIContext["custom"]>[0]) => {
++				let result: T | undefined;
++				const component = await factory({} as never, {} as never, {} as never, (value) => {
++					result = value as T;
++				});
++				component.dispose?.();
++				states.push("custom-torn-down");
++				return result as T;
++			},
++		} as ExtensionUIContext;
++		const harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension([], controller), presenter],
++		});
++		harnesses.push(harness);
++		await harness.session.bindExtensions({ mode: "tui", uiContext });
++		harness.setResponses([deferredToolBatchMessage(), fauxAssistantMessage("Continued")]);
++
++		await harness.session.prompt("Ask before shipping");
++		await scheduledResume;
++
++		expect(states).toEqual(["custom-callback", "custom-torn-down", "custom-returned", "resumed"]);
++	});
++
++	it("exposes argument-free abandonment through the same scheduled extension seam", async () => {
++		let abandonDeferred: (() => Promise<DeferredOperationResult>) | undefined;
++		const harness = await createHarness({
++			extensionFactories: [
++				(pi) => {
++					abandonDeferred = () => pi.abandonDeferred();
++				},
++			],
++		});
++		harnesses.push(harness);
++
++		await expect(abandonDeferred?.()).resolves.toEqual({ status: "none", deferredBatch: undefined });
++	});
++
++	it("rejects deferred operations captured from an extension instance invalidated by reload", async () => {
++		let oldResume: (() => Promise<DeferredOperationResult>) | undefined;
++		let loadCount = 0;
++		const extension: ExtensionFactory = (pi) => {
++			loadCount++;
++			if (loadCount === 1) oldResume = () => pi.resumeDeferred();
++		};
++		const harness = await createHarness({ extensionFactories: [extension] });
++		harnesses.push(harness);
++
++		await harness.session.bindExtensions({ mode: "tui" });
++		await harness.session.reload();
++
++		await expect(oldResume?.()).rejects.toThrow(/stale after session replacement or reload/i);
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts b/packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts
+new file mode 100644
+index 00000000..53f437c2
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts
+@@ -0,0 +1,141 @@
++import { Text, type TUI } from "@earendil-works/pi-tui";
++import { Type } from "typebox";
++import { beforeAll, describe, expect, it, vi } from "vitest";
++import type { DeferredBatch, ExtensionContext, ToolDefinition } from "../../../src/index.ts";
++import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
++import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
++import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
++import { stripAnsi } from "../../../src/utils/ansi.ts";
++
++const SNAPSHOT: DeferredBatch = {
++	kind: "batch",
++	sessionId: "session-21",
++	assistantEntryId: "assistant-21",
++	ownerCallId: "call-owner",
++	calls: [
++		{ toolCallId: "call-owner", toolName: "question", result: "missing" },
++		{ toolCallId: "call-sibling", toolName: "ordinary", result: "missing" },
++	],
++	phase: "deferred",
++	correlationId: "request-21",
++	availability: { status: "available" },
++};
++
++type PresentationContext = {
++	session: {
++		deferredBatch: DeferredBatch | undefined;
++		getToolDefinition(name: string): ToolDefinition | undefined;
++		extensionRunner: { createContext(): ExtensionContext };
++	};
++	sessionManager: { getLeafId(): string | null };
++	presentedDeferredKey?: string;
++	showDeferredInspector: ReturnType<typeof vi.fn<() => Promise<void>>>;
++	showExtensionError: ReturnType<typeof vi.fn<(path: string, error: string) => void>>;
++};
++
++type PresentDeferredBatch = (this: PresentationContext, options?: { force?: boolean }) => Promise<void>;
++
++const interactiveModePrototype = InteractiveMode.prototype as unknown as {
++	presentDeferredBatch: PresentDeferredBatch;
++	applyDeferredToolRows(this: {
++		session: { deferredBatch: DeferredBatch | undefined };
++		pendingTools: Map<string, ToolExecutionComponent>;
++	}): void;
++};
++const presentDeferredBatch = interactiveModePrototype.presentDeferredBatch;
++
++function contextFor(
++	presenter?: ToolDefinition["deferral"] extends infer _T
++		? (snapshot: DeferredBatch, ctx: ExtensionContext) => Promise<void> | void
++		: never,
++): PresentationContext {
++	const extensionContext = {} as ExtensionContext;
++	return {
++		session: {
++			deferredBatch: SNAPSHOT,
++			getToolDefinition: () =>
++				({
++					name: "question",
++					label: "Question",
++					description: "Question",
++					parameters: {} as never,
++					deferral: presenter
++						? {
++								handlerId: "dev.example.question",
++								handlerVersion: 1,
++								resumableHandlerVersions: [1],
++								resolve: async () => ({ status: "deferred", correlationId: "request-21" }),
++								presenter,
++							}
++						: undefined,
++					execute: async () => ({ content: [], details: {} }),
++				}) as ToolDefinition,
++			extensionRunner: { createContext: () => extensionContext },
++		},
++		sessionManager: { getLeafId: () => "leaf-21" },
++		showDeferredInspector: vi.fn(async () => {}),
++		showExtensionError: vi.fn(),
++	};
++}
++
++describe("regression #21: interactive deferred presenter selection", () => {
++	beforeAll(() => initTheme("dark"));
++
++	it("maps the active owner and held siblings onto their existing source-ordered tool rows", () => {
++		const tui = { requestRender: vi.fn() } as unknown as TUI;
++		const definition: ToolDefinition = {
++			name: "question",
++			label: "Question",
++			description: "Question",
++			parameters: Type.Any(),
++			execute: async () => ({ content: [], details: {} }),
++			renderCall: (_args, _theme, context) =>
++				new Text(context.deferredState === "owner" ? "Package waiting" : "Question", 0, 0),
++		};
++		const owner = new ToolExecutionComponent("question", "call-owner", {}, {}, definition, tui, process.cwd());
++		const sibling = new ToolExecutionComponent("ordinary", "call-sibling", {}, {}, undefined, tui, process.cwd());
++		const context = {
++			session: { deferredBatch: SNAPSHOT },
++			pendingTools: new Map([
++				["call-owner", owner],
++				["call-sibling", sibling],
++			]),
++		};
++
++		interactiveModePrototype.applyDeferredToolRows.call(context);
++
++		expect(stripAnsi(owner.render(100).join("\n"))).toContain("Package waiting");
++		expect(stripAnsi(sibling.render(100).join("\n"))).toContain("Held—not executed");
++	});
++
++	it("opens a compatible package presenter once for reconstructed waiting state", async () => {
++		const presenter = vi.fn(async () => {});
++		const context = contextFor(presenter);
++
++		await presentDeferredBatch.call(context);
++		await presentDeferredBatch.call(context);
++
++		expect(presenter).toHaveBeenCalledTimes(1);
++		expect(presenter).toHaveBeenCalledWith(SNAPSHOT, expect.any(Object));
++		expect(context.showDeferredInspector).not.toHaveBeenCalled();
++
++		context.session.deferredBatch = undefined;
++		await presentDeferredBatch.call(context);
++		context.session.deferredBatch = SNAPSHOT;
++		await presentDeferredBatch.call(context);
++		expect(presenter).toHaveBeenCalledTimes(2);
++	});
++
++	it("falls back to the generic inspector when presentation is missing or fails", async () => {
++		const missing = contextFor();
++		await presentDeferredBatch.call(missing);
++		expect(missing.showDeferredInspector).toHaveBeenCalledTimes(1);
++
++		const failure = contextFor(async () => {
++			throw new Error("presenter failed");
++		});
++		await presentDeferredBatch.call(failure);
++		expect(failure.showExtensionError).toHaveBeenCalledWith("question", "presenter failed");
++		expect(failure.showDeferredInspector).toHaveBeenCalledTimes(1);
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts b/packages/coding-agent/test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts
+index 42e5546b..72922637 100644
+--- a/packages/coding-agent/test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts
++++ b/packages/coding-agent/test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts
+@@ -51,6 +51,7 @@ type RenderSessionContextThis = {
+ 	getRegisteredToolDefinition(toolName: string): undefined;
+ 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
+ 	renderSessionItems: RenderSessionItems;
++	applyDeferredToolRows(): void;
+ };
+ 
+ type RenderSessionEntries = (
+@@ -81,6 +82,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
+ 		getRegisteredToolDefinition: (_toolName: string) => undefined,
+ 		renderSessionItems: (InteractiveMode.prototype as unknown as { renderSessionItems: RenderSessionItems })
+ 			.renderSessionItems,
++		applyDeferredToolRows: () => {},
+ 		addMessageToChat(message: AgentMessage) {
+ 			chatContainer.addChild(new Text(message.role, 0, 0));
+ 		},
+diff --git a/packages/coding-agent/test/suite/regressions/5943-session-start-notify.test.ts b/packages/coding-agent/test/suite/regressions/5943-session-start-notify.test.ts
+index b020205d..0178bfc8 100644
+--- a/packages/coding-agent/test/suite/regressions/5943-session-start-notify.test.ts
++++ b/packages/coding-agent/test/suite/regressions/5943-session-start-notify.test.ts
+@@ -82,6 +82,7 @@ type RebindContext = {
+ 	updateAvailableProviderCount: () => Promise<void>;
+ 	updateEditorBorderColor: () => void;
+ 	updateTerminalTitle: () => void;
++	presentDeferredBatch: () => Promise<void>;
+ };
+ 
+ type ReloadCommandContext = {
+@@ -125,6 +126,8 @@ type ReloadCommandContext = {
+ 	showStatus: (message: string) => void;
+ 	showWarning: (message: string) => void;
+ 	showError: (message: string) => void;
++	presentedDeferredKey?: string;
++	presentDeferredBatch: () => Promise<void>;
+ };
+ 
+ type InteractiveModePrototype = {
+@@ -199,6 +202,8 @@ function createReloadCommandContext(overrides: ReloadCommandContextOverrides = {
+ 		showStatus: overrides.showStatus ?? (() => {}),
+ 		showWarning: overrides.showWarning ?? (() => {}),
+ 		showError: overrides.showError ?? (() => {}),
++		presentedDeferredKey: undefined,
++		presentDeferredBatch: async () => {},
+ 	};
+ }
+ 
+@@ -296,6 +301,7 @@ describe("regression #5943: session_start transient UI", () => {
+ 				updateAvailableProviderCount: async () => {},
+ 				updateEditorBorderColor: () => {},
+ 				updateTerminalTitle: () => {},
++				presentDeferredBatch: async () => {},
+ 			};
+ 
+ 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
+@@ -345,6 +351,7 @@ describe("regression #5943: session_start transient UI", () => {
+ 				updateAvailableProviderCount: async () => {},
+ 				updateEditorBorderColor: () => {},
+ 				updateTerminalTitle: () => {},
++				presentDeferredBatch: async () => {},
+ 			};
+ 
+ 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
+@@ -397,6 +404,7 @@ describe("regression #5943: session_start transient UI", () => {
+ 				updateAvailableProviderCount: async () => {},
+ 				updateEditorBorderColor: () => {},
+ 				updateTerminalTitle: () => {},
++				presentDeferredBatch: async () => {},
+ 			};
+ 
+ 			await interactiveModePrototype.rebindCurrentSession.call(context, { renderBeforeBind: true });
+diff --git a/packages/coding-agent/test/tool-execution-component.test.ts b/packages/coding-agent/test/tool-execution-component.test.ts
+index c0588c52..38d7bd82 100644
+--- a/packages/coding-agent/test/tool-execution-component.test.ts
++++ b/packages/coding-agent/test/tool-execution-component.test.ts
+@@ -344,6 +344,70 @@ describe("ToolExecutionComponent parity", () => {
+ 		expect(rendered).toContain("arg:bar");
+ 	});
+ 
++	test("renders held siblings without running or success/error presentation", () => {
++		const component = new ToolExecutionComponent(
++			"custom_tool",
++			"tool-held",
++			{ privateArgument: "value" },
++			{},
++			createBaseToolDefinition(),
++			createFakeTui(),
++			process.cwd(),
++		);
++
++		component.setDeferredState("held");
++
++		const rendered = stripAnsi(component.render(120).join("\n"));
++		expect(rendered).toContain("Held—not executed");
++		expect(rendered).not.toContain("Not executed:");
++	});
++
++	test("exposes owner waiting state to the package renderer", () => {
++		const toolDefinition: ToolDefinition = {
++			...createBaseToolDefinition(),
++			renderCall: (_args, _theme, context) => new Text(`state:${context.deferredState}`, 0, 0),
++		};
++		const component = new ToolExecutionComponent(
++			"custom_tool",
++			"tool-owner",
++			{},
++			{},
++			toolDefinition,
++			createFakeTui(),
++			process.cwd(),
++		);
++
++		component.setDeferredState("owner");
++
++		expect(stripAnsi(component.render(120).join("\n"))).toContain("state:owner");
++	});
++
++	test("renders fixed deferred not-executed results compactly with expandable reasons", () => {
++		const component = new ToolExecutionComponent(
++			"custom_tool",
++			"tool-not-executed",
++			{},
++			{},
++			createBaseToolDefinition(),
++			createFakeTui(),
++			process.cwd(),
++		);
++		component.updateResult({
++			content: [
++				{ type: "text", text: "Tool call was not executed because the deferred interaction was interrupted." },
++			],
++			details: { deferredToolBatch: { execution: "not_executed", reason: "interrupted" } },
++			isError: true,
++		});
++
++		const compact = stripAnsi(component.render(120).join("\n"));
++		expect(compact).toContain("Not executed");
++		expect(compact).not.toContain("because the deferred interaction");
++
++		component.setExpanded(true);
++		expect(stripAnsi(component.render(120).join("\n"))).toContain("because the deferred interaction");
++	});
++
+ 	test("falls back when custom renderers are absent", () => {
+ 		const toolDefinition: ToolDefinition = {
+ 			...createBaseToolDefinition(),
+diff --git a/packages/coding-agent/test/trigger-compact-extension.test.ts b/packages/coding-agent/test/trigger-compact-extension.test.ts
+index b0d130f9..b4f590b1 100644
+--- a/packages/coding-agent/test/trigger-compact-extension.test.ts
++++ b/packages/coding-agent/test/trigger-compact-extension.test.ts
+@@ -10,6 +10,7 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
+ 		ui: {} as ExtensionContext["ui"],
+ 		cwd: process.cwd(),
+ 		capabilities: AGENT_SESSION_CAPABILITIES,
++		getDeferredBatch: () => undefined,
+ 		sessionManager: {} as ExtensionContext["sessionManager"],
+ 		modelRegistry: {} as ExtensionContext["modelRegistry"],
+ 		model: undefined,
+-- 
+2.50.1 (Apple Git-155)
+
