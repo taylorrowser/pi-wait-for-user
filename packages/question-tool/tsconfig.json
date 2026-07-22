@@ -1,0 +1,7 @@
+{
+	"extends": "../../.work/pi-v0.81.1/tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true
+	},
+	"include": ["extensions/**/*.ts", "src/**/*.ts"]
+}

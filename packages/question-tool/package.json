@@ -1,0 +1,51 @@
+{
+	"name": "@taylorrowser/pi-question-tool",
+	"version": "0.1.0",
+	"description": "A durable Question Tool for the Pi coding agent",
+	"type": "module",
+	"license": "MIT",
+	"keywords": [
+		"pi-package",
+		"pi-extension"
+	],
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"test": "node --test test/*.test.mjs",
+		"typecheck": "../../.work/pi-v0.81.1/node_modules/.bin/tsc -p tsconfig.json --noEmit"
+	},
+	"files": [
+		"extensions",
+		"src",
+		"README.md"
+	],
+	"exports": {
+		".": "./src/index.ts",
+		"./extension": "./extensions/index.ts"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"pi": {
+		"extensions": [
+			"./extensions/index.ts"
+		]
+	},
+	"piWaitForUser": {
+		"upstreamPiVersion": "0.81.1",
+		"coreProtocolVersions": [
+			1
+		],
+		"handlerId": "dev.taylorrowser.pi-question-tool.question",
+		"handlerVersion": 1,
+		"resumableHandlerVersions": [
+			1
+		],
+		"packageSchemaVersions": [
+			1
+		]
+	}
+}

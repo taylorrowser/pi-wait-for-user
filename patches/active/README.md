@@ -24,3 +24,7 @@ and scheduled lifecycle operations, package-owned deferred presenters, a
 generic interactive deferred inspector, fail-fast capability registration,
 public resolver contract types, a minimal package-owned example, comprehensive
 Pi-style guidance, and the offline `pi conformance` command for Pi v0.81.1.
+
+The durable Question Tool is intentionally not another Pi patch. It is the
+independently versioned package under [`packages/question-tool`](../../packages/question-tool),
+loaded on top of this complete active series.
