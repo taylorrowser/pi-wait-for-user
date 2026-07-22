@@ -9,9 +9,10 @@ release ID and a fresh release-candidate report.
 The active series currently contains the durable deferral, Response-resumption,
 atomic whole-batch, idempotent recovery, unavailable recovery/abandonment,
 ordinary/queued user-input Interruption, branch/compaction preservation,
-non-TUI projection, extension/TUI presentation, and extension-conformance
-slices for issues #13 through #22. It adds the versioned tool capability, the
-fail-closed downstream session identity, persisted deferred-batch marker, neutral
+non-TUI projection, extension/TUI presentation, extension conformance, and the
+live unavailable-resolver fix for issues #13 through #22 and #45. It adds the
+versioned tool capability, fail-closed downstream session identity, typed
+live-path resolver failures, persisted deferred-batch marker, neutral
 markerless/deferred/partial/continuation AgentSession snapshot, package-owned
 typed Response, Interruption, and Cancellation paths, argument-free
 `resumeDeferred()` and `abandonDeferred()`, exact capability discovery,

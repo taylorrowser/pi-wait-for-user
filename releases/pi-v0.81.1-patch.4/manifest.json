@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "pi-v0.81.1-patch.4",
+  "tag": "pi-v0.81.1-patch.4",
+  "upstream": {
+    "repository": "https://github.com/earendil-works/pi.git",
+    "tag": "v0.81.1",
+    "commit": "20be4b18d4c57487f8993d2762bace129f0cf7c6",
+    "packageVersion": "0.81.1"
+  },
+  "binaryPlatforms": [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64",
+    "windows-arm64",
+    "windows-x64"
+  ],
+  "patches": [
+    { "path": "patches/active/0001-feat-add-durable-single-tool-deferral.patch", "sha256": "00490f0b4ab701ede5f2db621040b49d87c780db53e943afe02b6bb79c8a4621" },
+    { "path": "patches/active/0002-feat-respond-and-resume-deferred-tool-call.patch", "sha256": "9cdee449e8c84e153d7236b71bc0d24bf077f55b34d90d290ddae2c6e846b5ef" },
+    { "path": "patches/active/0003-feat-hold-and-resume-tool-batches-atomically.patch", "sha256": "6d63bd9a48d611645cd2e60afbbe926b09c70d7460ab8052c81ce5184c419765" },
+    { "path": "patches/active/0004-feat-interrupt-waiting-state-with-user-input.patch", "sha256": "daf577cbde71675d5c9962a007d1c83f28d59d0b1bb9bdeb9a93bd25c8d65b48" },
+    { "path": "patches/active/0005-feat-recover-deferred-batches-idempotently.patch", "sha256": "63770e31fe26d8a4b7be7c7f17b112b8dcb0d0acdd35af26573ed3f642e2e695" },
+    { "path": "patches/active/0006-feat-preserve-deferred-lifecycle-through-branches.patch", "sha256": "3da4a7058635a7bea3baa490dba4c0ca7b1b850ee61e8f6e7aca698d4f760a30" },
+    { "path": "patches/active/0007-feat-restore-or-abandon-unavailable-deferred-batches.patch", "sha256": "3e4f238a3ff4c7586332c50bfb8d44d0640520fd5b16d52ae1a24fbb299f3686" },
+    { "path": "patches/active/0008-feat-expose-deferred-work-in-headless-modes.patch", "sha256": "9bc4d4c08b53eaaf2329946bd9f9e9608d78ea2acb73a312ea5f7df2772ccacb" },
+    { "path": "patches/active/0009-feat-expose-deferred-work-to-extensions-and-tui.patch", "sha256": "6c78cdab8680d89de49161f2de143e91c5aa73d9c44181ef35bbebe79badf1f4" },
+    { "path": "patches/active/0010-feat-add-deferred-extension-conformance.patch", "sha256": "12b21426d39711296c3ca9976c9319401ba9cec1791b32a22fa56122181f5d10" },
+    { "path": "patches/active/0011-fix-fail-closed-on-live-unavailable-resolver.patch", "sha256": "0ce85715f091a4b1682bc4c63c0f703fc3afaecf81977666968922c085185544" }
+  ],
+  "fixtureGate": {
+    "path": "releases/pi-v0.81.1-patch.4/fixture-gate.json",
+    "sha256": "c159090f90d207872582ee7edaf32dd656b2ceb830f928bf735d2a76c1253a71"
+  },
+  "questionTool": {
+    "name": "@taylorrowser/pi-question-tool",
+    "version": "0.1.3",
+    "manifestPath": "packages/question-tool/package.json",
+    "manifestSha256": "e090a3e81d36f3e9308716546e9bf77d4c3904f34d3327e852a21983c7388739",
+    "coreProtocolVersions": [1],
+    "handlerId": "dev.taylorrowser.pi-question-tool.question",
+    "handlerVersion": 1,
+    "packageSchemaVersions": [1]
+  }
+}

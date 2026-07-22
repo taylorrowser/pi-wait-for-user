@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "requiredStages": [
+    "release-inputs",
+    "repository-tests",
+    "prepare-exact-patch",
+    "install-dependencies",
+    "typecheck",
+    "hydrate-model-data",
+    "build",
+    "legacy-compatibility",
+    "full-pi-suite",
+    "public-conformance",
+    "question-tool-typecheck",
+    "question-tool-suite"
+  ],
+  "categories": [
+    { "name": "legacy", "fixtures": ["prototype/session-journal-harness/harness.mjs"] },
+    { "name": "markerless", "fixtures": ["packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts"] },
+    { "name": "deferred", "fixtures": ["packages/coding-agent/test/suite/agent-session-deferred.test.ts"] },
+    { "name": "ready", "fixtures": ["packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts"] },
+    { "name": "partial", "fixtures": ["packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts"] },
+    { "name": "complete", "fixtures": ["packages/coding-agent/test/suite/agent-session-deferred.test.ts"] },
+    { "name": "unavailable", "fixtures": ["packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts", "packages/coding-agent/test/suite/regressions/45-live-unavailable-resolver.test.ts"] },
+    { "name": "incompatible-version", "fixtures": ["packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts"] },
+    { "name": "compaction", "fixtures": ["packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts"] },
+    { "name": "branch", "fixtures": ["packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts"] },
+    { "name": "queue", "fixtures": ["packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts"] },
+    { "name": "abandonment", "fixtures": ["packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts"] },
+    { "name": "rpc", "fixtures": ["packages/coding-agent/test/suite/regressions/20-rpc-deferred-mode.test.ts", "packages/coding-agent/test/suite/regressions/20-rpc-client-deferred.test.ts"] },
+    { "name": "json", "fixtures": ["packages/coding-agent/test/suite/regressions/20-print-json-deferred-modes.test.ts"] },
+    { "name": "print", "fixtures": ["packages/coding-agent/test/suite/regressions/20-print-json-deferred-modes.test.ts"] },
+    { "name": "tui", "fixtures": ["packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts", "packages/coding-agent/test/deferred-inspector.test.ts"] },
+    { "name": "question-tool", "fixtures": ["packages/question-tool/test/agent-session.test.mjs", "packages/question-tool/test/question-form.test.mjs", "packages/question-tool/test/package.test.mjs"] }
+  ]
+}

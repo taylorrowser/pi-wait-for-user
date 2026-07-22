@@ -1,0 +1,110 @@
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index 556a8df3..82b06946 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -823,7 +823,7 @@ async function resolveToolBatchDeferral(
+ 		return { status: "ready", preparations };
+ 	}
+ 	if (resolution.status === "unavailable") {
+-		throw new Error(resolution.reason);
++		throw new ToolDeferralResolverError(resolution.reason);
+ 	}
+ 	return {
+ 		status: "deferred",
+diff --git a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+index 98aa6f27..14b821d5 100644
+--- a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
++++ b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+@@ -29,7 +29,7 @@ type RecordResponseResult =
+ 
+ export type InteractionRequestTestController = {
+ 	recordResponse?: (value: string) => RecordResponseResult;
+-	resolverFailure?: "malformed" | "throw";
++	resolverFailure?: "malformed" | "throw" | "unavailable";
+ };
+ 
+ function customData<T>(entry: SessionEntry, customType: string): T | undefined {
+@@ -66,6 +66,7 @@ export function questionExtension(
+ 		includeOrdinary?: boolean;
+ 		beforeInitialDeferral?: () => Promise<void>;
+ 		onFirstAgentEnd?: () => Promise<void>;
++		beforeResolverFailure?: () => Promise<void> | void;
+ 		supportedPackageVersions?: readonly number[];
+ 	} = {},
+ ): ExtensionFactory {
+@@ -201,8 +202,12 @@ export function questionExtension(
+ 							payload: { question: request.params.question },
+ 						} satisfies QuestionInteractionRequest);
+ 					}
++					if (controller?.resolverFailure) await options.beforeResolverFailure?.();
+ 					if (controller?.resolverFailure === "throw") throw new Error("package failed");
+ 					if (controller?.resolverFailure === "malformed") return { status: "invalid" } as never;
++					if (controller?.resolverFailure === "unavailable") {
++						return { status: "unavailable", reason: "package unavailable" };
++					}
+ 					if (request.operation === "evaluate") await options.beforeInitialDeferral?.();
+ 					if (request.operation === "interrupt") {
+ 						pi.appendEntry(outcomeType, {
+diff --git a/packages/coding-agent/test/suite/regressions/45-live-unavailable-resolver.test.ts b/packages/coding-agent/test/suite/regressions/45-live-unavailable-resolver.test.ts
+new file mode 100644
+index 00000000..b686c570
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/45-live-unavailable-resolver.test.ts
+@@ -0,0 +1,57 @@
++import { mkdtempSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
++import { afterEach, describe, expect, it } from "vitest";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import { type InteractionRequestTestController, questionExtension } from "../deferred-tool-batch-fixture.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++describe("regression #45: unavailable live resolver", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	it("fails closed without appending a synthetic assistant failure", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-live-unavailable-resolver-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const controller: InteractionRequestTestController = { resolverFailure: "unavailable" };
++		let bytesBeforeFailure: string | undefined;
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [
++				questionExtension([], controller, {
++					beforeResolverFailure: () => {
++						bytesBeforeFailure = readFileSync(manager.getSessionFile()!, "utf8");
++					},
++				}),
++			],
++		});
++		harnesses.push(harness);
++		harness.setResponses([
++			fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: "call-1" }), {
++				stopReason: "toolUse",
++			}),
++		]);
++
++		await expect(harness.session.prompt("Ask before shipping")).rejects.toMatchObject({
++			code: "resolver_error",
++			message: "package unavailable",
++		});
++
++		expect(bytesBeforeFailure).toBeDefined();
++		expect(readFileSync(manager.getSessionFile()!, "utf8")).toBe(bytesBeforeFailure);
++		expect(manager.getBranch().map((entry) => entry.type)).toEqual(["message", "message", "custom"]);
++		expect(manager.getBranch().flatMap((entry) => (entry.type === "message" ? [entry.message.role] : []))).toEqual([
++			"user",
++			"assistant",
++		]);
++		expect(harness.events.some((event) => event.type === "tool_execution_start")).toBe(false);
++		expect(harness.events.some((event) => event.type === "turn_end")).toBe(false);
++	});
++});
