@@ -2,67 +2,30 @@
 
 A maintained downstream Pi release that can stop an Agent Thread for durable human input, survive complete process teardown, and continue through an explicit Response, Interruption, Cancellation, resume, or abandonment path.
 
-The active release is **`pi-v0.81.1-patch.1`**. It combines:
+The active release is **`pi-v0.81.1-patch.2`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 - the ten ordered durable-deferral patches in [`patches/active`](patches/active); and
-- the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.0`.
+- the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.1`.
 
-## Install
+## Fast install
 
 ### Requirements
 
-- macOS or Linux
-- Node.js 22.19 or newer
-- Git, npm, curl, and tar
-- enough disk space to build Pi from its pinned source
+- macOS or Linux, on ARM64 or x64
+- `curl` and `tar`
 
-The installer builds in a versioned user-data directory and creates a separate `pi-wait-for-user` command. It does **not** replace an existing `pi` command, and it does not modify Pi settings, credentials, or sessions in `~/.pi/agent`.
-
-### Recommended one-command install
+The normal installer downloads a precompiled, checksummed binary for the current platform. It does **not** clone Pi, run npm, hydrate model data, compile source, require Node.js, or replace an existing `pi` command.
 
 Review [`scripts/bootstrap.sh`](scripts/bootstrap.sh), then run:
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.1/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.2/install.sh | sh
 ```
 
-The bootstrap downloads the release bundle and `SHA256SUMS`, verifies the bundle, and runs the transactional installer. The installer then:
+The installer verifies `SHA256SUMS`, installs into a versioned user-data directory, runs the public 8/8 deferred conformance check, and creates `~/.local/bin/pi-wait-for-user`. If that directory is not on `PATH`, it prints the exact directory to add.
 
-1. verifies the immutable release manifest and passing release-candidate report;
-2. clones exactly Pi `v0.81.1` and refuses a repository, tag, commit, or package-version mismatch;
-3. applies all patches only after the complete series passes preflight;
-4. installs dependencies and builds Pi;
-5. runs the public 8/8 deferred conformance suite;
-6. installs the exact Question Tool source beside Pi; and
-7. creates `~/.local/bin/pi-wait-for-user`.
-
-If `~/.local/bin` is not on `PATH`, the installer prints the exact directory to add.
-
-### Manual, checksum-first install
-
-Download these assets from the [active GitHub release](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.1):
-
-- `pi-wait-for-user-pi-v0.81.1-patch.1.tgz`
-- `SHA256SUMS`
-
-Then verify and install:
-
-```bash
-grep 'pi-wait-for-user-pi-v0.81.1-patch.1.tgz$' SHA256SUMS | sha256sum --check # Linux
-# or: grep 'pi-wait-for-user-pi-v0.81.1-patch.1.tgz$' SHA256SUMS | shasum -a 256 -c - # macOS
-
-tar -xzf pi-wait-for-user-pi-v0.81.1-patch.1.tgz
-node package/scripts/install.mjs install
-```
-
-Advanced users can build from an existing pristine checkout of the exact upstream pin:
-
-```bash
-node package/scripts/install.mjs install --source /path/to/pi-v0.81.1
-```
-
-The checkout still must have the exact origin, tag, commit, package versions, and clean tracked state.
+Windows x64 and ARM64 binaries are attached to the release for manual use; the one-command installer currently targets macOS and Linux.
 
 ## Use
 
@@ -73,7 +36,16 @@ cd /path/to/project
 pi-wait-for-user
 ```
 
-The bundled Question Tool loads automatically. Pi uses its normal authentication and session directories, so existing `/login` credentials and sessions remain available. Run `question` through the model as usual; a durable Interaction Request can be dismissed and reopened with `/q` or `Alt+Q` without losing its lifecycle.
+The bundled Question Tool loads automatically. At startup, Pi reports it as:
+
+```text
+[Extensions]
+  question-tool.ts
+```
+
+Its model-facing tool name is **`question`**. Ask the model to use the `question` tool when it needs one or more blocking multiple-choice questions with a custom-answer option. `/q` and `Alt+Q` reopen a dismissed Interaction Request.
+
+Pi uses its normal authentication and session directories, so existing `/login` credentials and sessions remain available.
 
 Useful checks:
 
@@ -84,25 +56,56 @@ pi-wait-for-user conformance     # Deferred conformance passed (8/8)
 
 See the [Question Tool guide](packages/question-tool/README.md) for interaction behavior and the typed SDK/RPC outcome seam.
 
+## Checksum-first manual install
+
+Download `SHA256SUMS` and the matching asset from the [active GitHub release](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.2):
+
+| Platform | Asset |
+| --- | --- |
+| Apple Silicon | `pi-wait-for-user-darwin-arm64.tar.gz` |
+| Intel macOS | `pi-wait-for-user-darwin-x64.tar.gz` |
+| Linux x64 | `pi-wait-for-user-linux-x64.tar.gz` |
+| Linux ARM64 | `pi-wait-for-user-linux-arm64.tar.gz` |
+
+Verify the selected asset, extract it, and run its installer:
+
+```bash
+asset=pi-wait-for-user-darwin-arm64.tar.gz
+grep "$asset$" SHA256SUMS | shasum -a 256 -c - # macOS
+# or: grep "$asset$" SHA256SUMS | sha256sum --check # Linux
+
+tar -xzf "$asset"
+sh pi-wait-for-user/install.sh install
+```
+
 ## Verify, uninstall, or roll back
 
-The same small bootstrap can invoke release management without trusting whatever is currently on `PATH`:
+The release bootstrap can manage the exact version without relying on whichever executable is currently on `PATH`:
 
 ```bash
-# Verify the installed source identity and start the version check
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.1/install.sh | sh -s -- verify
+# Verify
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.2/install.sh | sh -s -- verify
 
-# Remove this release and its launcher
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.1/install.sh | sh -s -- uninstall
+# Uninstall this release
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.2/install.sh | sh -s -- uninstall
 ```
 
-Uninstall leaves `~/.pi/agent` untouched. It also leaves any separately installed upstream `pi` command untouched.
+Uninstall leaves `~/.pi/agent` and any upstream `pi` installation untouched.
 
-Releases install into separate versioned directories. To roll back after a future release, download the older release's `install.sh` and run its `activate` action. The old artifact, manifest, and report remain unchanged and downloadable:
+Releases install into separate versioned directories. To roll back after a future release, use the older immutable release's `install.sh` with `activate`. Archived [`pi-v0.81.1-patch.1`](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.1) remains unchanged and downloadable.
+
+## Source-build fallback
+
+Use this only when a prebuilt binary is unsuitable. It requires Node.js 22.19+, Git, and npm, and performs the slower exact-source clone and build:
 
 ```bash
-curl -fsSL OLD_RELEASE_INSTALL_URL | sh -s -- activate
+gh release download pi-v0.81.1-patch.2 \
+  --pattern 'pi-wait-for-user-pi-v0.81.1-patch.2.tgz'
+tar -xzf pi-wait-for-user-pi-v0.81.1-patch.2.tgz
+node package/scripts/install.mjs install
 ```
+
+The source installer verifies the immutable release manifest and report, clones exactly Pi `v0.81.1`, preflights every patch, builds, runs conformance, and installs a separate launcher.
 
 ## Exact release identity
 
@@ -114,26 +117,32 @@ curl -fsSL OLD_RELEASE_INSTALL_URL | sh -s -- activate
 - the required fixture inventory; and
 - the completed release-candidate report.
 
-`node scripts/release.mjs verify` fails if any pinned input changes. Release assets include their own `artifact-manifest.json` and `SHA256SUMS`.
+`node scripts/release.mjs verify` fails if any pinned input changes. Every source, platform binary, Question Tool package, report, and manifest is covered by the published `SHA256SUMS` and GitHub provenance attestation.
 
 ## Maintainer workflow
 
-Run the complete release gate from a clean checkout:
+The tag workflow:
+
+1. runs the complete 12-stage release gate against a fresh exact source;
+2. uses Pi's upstream Bun cross-compilation path to build macOS, Linux, and Windows binaries for ARM64 and x64;
+3. packages the exact Question Tool beside each binary;
+4. smoke-tests the Linux binary, conformance command, and package payload;
+5. builds all checksummed source and binary assets; and
+6. publishes one immutable GitHub release.
+
+For local source verification:
 
 ```bash
 npm test
 node scripts/release-gate.mjs
-node scripts/release.mjs bundle dist/pi-v0.81.1-patch.1
 ```
 
-The gate prepares a fresh `.work/pi-v0.81.1`, then checks the exact patch, Pi typechecking/build/full suite, the 22-probe legacy journal harness, public conformance, and the real Question Tool typecheck/integration/package suite. Its machine-readable report maps the required legacy, markerless, deferred, ready, partial, complete, unavailable, incompatible-version, compaction, branch, queue, abandonment, RPC, JSON, print, TUI, and Question Tool fixture categories. Any failed stage exits nonzero and prevents bundling.
-
-The tag workflow in [`.github/workflows/release.yml`](.github/workflows/release.yml) repeats this gate, uploads the bundle as a workflow artifact, attests its provenance, and publishes a GitHub release only for the exact active tag.
+The gate covers the legacy 22-probe journal harness, all patched Pi tests, public conformance, Question Tool typechecking, and Question Tool integration/package tests. Any failed required stage prevents bundling.
 
 ### Active and archived patch policy
 
 Exactly one release is active. A newer release gets a new release ID, tag, manifest directory, report, and assets. Promotion changes only `releases/active.json`; it never edits or replaces an older release directory, tag, report, checksum file, or downloadable artifact.
 
-Older releases are **archived**, not supported. They remain reproducible and downloadable for their exact Pi version, but receive no rebases, feature updates, or retroactive fixes. Fixes ship in the active release unless this policy is explicitly changed.
+Older releases are **archived**, not supported. They remain reproducible and downloadable for their pinned Pi source but receive no rebases, feature updates, or retroactive fixes.
 
-No Depot configuration is required for the current gate. GitHub-hosted runners are sufficient; npm caching can be added if runtime becomes material. Publishing uses the repository `GITHUB_TOKEN` only. Enable GitHub's immutable-releases setting so published tags and assets cannot be changed after release.
+No Depot configuration is currently required. GitHub-hosted runners and Bun's cross-compilation support build all target binaries in one release job.

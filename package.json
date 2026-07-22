@@ -1,6 +1,6 @@
 {
   "name": "@taylorrowser/pi-wait-for-user-release",
-  "version": "0.81.1-patch.1",
+  "version": "0.81.1-patch.2",
   "private": true,
   "type": "module",
   "engines": {
@@ -16,10 +16,12 @@
     "patches/active",
     "releases/README.md",
     "releases/active.json",
-    "releases/pi-v0.81.1-patch.1",
+    "releases/pi-v0.81.1-patch.2",
     "scripts/bootstrap.sh",
+    "scripts/install-binary.sh",
     "scripts/install.mjs",
     "scripts/launch.mjs",
+    "scripts/package-binaries.mjs",
     "scripts/pi-patch.mjs",
     "scripts/release.mjs",
     "upstream"
