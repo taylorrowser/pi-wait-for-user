@@ -21,18 +21,18 @@ Handler and protocol compatibility is exact. Restoring this package to an unavai
 The supported release installer builds the exact patched Pi and places this exact Question Tool beside it:
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.6/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.7/install.sh | sh
 pi-wait-for-user --version
 ```
 
 The version must be `0.81.1`. The separate `pi-wait-for-user` launcher loads the Question Tool automatically from the precompiled release. Startup identifies the extension as `question-tool.ts`; its model-facing tool name is `question`. The installer does not clone source, require Node/npm/Git, replace an upstream `pi` command, or alter existing Pi settings and sessions. See the repository [installation, verification, rollback, and uninstall guide](../../README.md#fast-install).
 
-The GitHub release also publishes `taylorrowser-pi-question-tool-0.1.3.tgz` as an independently checksummed package artifact. Hosts that already run the exact compatible patch can unpack it and use Pi's normal local-package workflow:
+The GitHub release also publishes `taylorrowser-pi-question-tool-0.1.4.tgz` as an independently checksummed package artifact. Hosts that already run the exact compatible patch can unpack it and use Pi's normal local-package workflow:
 
 ```bash
-mkdir pi-question-tool-0.1.3
-tar -xzf taylorrowser-pi-question-tool-0.1.3.tgz -C pi-question-tool-0.1.3
-pi install "$(pwd)/pi-question-tool-0.1.3/package"
+mkdir pi-question-tool-0.1.4
+tar -xzf taylorrowser-pi-question-tool-0.1.4.tgz -C pi-question-tool-0.1.4
+pi install "$(pwd)/pi-question-tool-0.1.4/package"
 ```
 
 Unpatched Pi lacks protocol v1; the extension detects that absence and does not register `question`.
@@ -55,12 +55,15 @@ The `question` tool accepts one or more required questions. Each question has co
 - Selecting or typing in the custom row enters editing mode; Left/Right move within its text.
 - Up leaves custom editing for the preceding supplied choice without deleting the draft.
 - Escape leaves custom editing without deleting its draft.
-- Escape outside editing dismisses presentation without changing lifecycle state.
-- `Alt+Q` or `/q` reopens the active request.
+- Escape outside editing dismisses presentation without changing lifecycle state and restores Pi's persistent Question summary.
+- `/deferred` is the durable re-entry path; `Alt+Q` and `/q` remain package conveniences.
+- `/deferred inspect` always opens Pi's generic Retry/Abandon/Close inspector.
 - A normal editor message records Interruption and continues the Agent Thread; it is never treated as a Response.
 - `Ctrl+O` expands settled history to show questions, choices, descriptions, and selected or custom Responses.
 
 Selections and custom text remain available while navigating within an open form, including after Escape leaves custom-editing mode. They are presentation-local rather than journaled: dismissing the form or leaving the process before submission starts the form again without that unfinished work. The durable Interaction Request itself remains pending and can still be reopened.
+
+Pi core owns the persistent deferred-work affordance, command routing, fallback inspector, and cleanup. The package supplies only the full question presenter and privacy-safe short text (question count, never question content or tool arguments). Missing or failing package presentation falls back to Pi's generic affordance and inspector.
 
 ## Programmatic outcomes
 
@@ -107,7 +110,7 @@ source-ordered tool results
 assistant continuation
 ```
 
-Opening, reload, resume selection, and tree navigation reconstruct but do not advance the request. If a Response is durable but resumed work remains unavailable, the package preserves that immutable outcome and directs the user to `/deferred` for recovery.
+Opening, reload, resume selection, and tree navigation reconstruct but do not advance the request. If a Response is durable but resumed work remains unavailable, the package preserves that immutable outcome; `/deferred inspect` provides the explicit core recovery path.
 
 ## Development
 

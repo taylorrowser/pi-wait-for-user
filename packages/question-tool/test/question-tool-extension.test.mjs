@@ -56,7 +56,7 @@ function createHarness(requests) {
 	let registeredTool;
 	let resumeCalls = 0;
 	let resolveResume;
-	let widget;
+	let widgetCalls = 0;
 	const resume = new Promise((resolve) => {
 		resolveResume = resolve;
 	});
@@ -74,8 +74,8 @@ function createHarness(requests) {
 		},
 		notify() {},
 		setStatus() {},
-		setWidget(_key, content) {
-			widget = content;
+		setWidget() {
+			widgetCalls++;
 		},
 	};
 	const ctx = {
@@ -123,9 +123,14 @@ function createHarness(requests) {
 			activeBatch = batch;
 		},
 		tool: registeredTool,
-		widgetText() {
-			if (!widget) return undefined;
-			return widget({}, identityTheme).render(120).join("\n");
+		get widgetCalls() {
+			return widgetCalls;
+		},
+		summaryText(batch) {
+			return registeredTool.deferral.summary(batch, {
+				cwd: "/project",
+				sessionManager: ctx.sessionManager,
+			});
 		},
 	};
 }
@@ -137,6 +142,20 @@ async function waitFor(predicate) {
 	}
 	assert.fail("Timed out waiting for extension state");
 }
+
+test("package presentation does not open for an unavailable deferred batch", async () => {
+	const interactionRequest = request(1);
+	const batch = {
+		...deferredBatch(interactionRequest),
+		availability: { status: "unavailable", message: "Package is incompatible" },
+	};
+	const harness = createHarness([interactionRequest]);
+	harness.setActiveBatch(batch);
+
+	await harness.tool.deferral.presenter(batch, harness.ctx);
+
+	assert.equal(harness.components.length, 0);
+});
 
 test("a completed resume cannot replace a newer Question Interaction Request's presentation", async () => {
 	const firstRequest = request(1);
@@ -165,12 +184,12 @@ test("a completed resume cannot replace a newer Question Interaction Request's p
 
 	harness.resolveResume({ status: "still_deferred", deferredBatch: secondBatch });
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(harness.widgetText(), undefined);
+	assert.equal(harness.widgetCalls, 0);
 
 	harness.components[1].handleInput("\u001b");
 	await secondPresentation;
-	assert.match(harness.widgetText(), /Alt\+Q or \/q to open/);
-	assert.doesNotMatch(harness.widgetText(), /Response recorded/);
+	assert.equal(await harness.summaryText(secondBatch), "1 question needs a Response");
+	assert.equal(harness.widgetCalls, 0);
 });
 
 test("a completed resume still shows recovery for the recorded Interaction Request", async () => {
@@ -186,6 +205,9 @@ test("a completed resume still shows recovery for the recorded Interaction Reque
 
 	harness.resolveResume({ status: "still_deferred", deferredBatch: firstBatch });
 	await new Promise((resolve) => setImmediate(resolve));
-	assert.match(harness.widgetText(), /Response recorded; deferred work remains/);
-	assert.match(harness.widgetText(), /Run \/deferred/);
+	assert.equal(
+		await harness.summaryText(firstBatch),
+		"Question outcome recorded; deferred work remains",
+	);
+	assert.equal(harness.widgetCalls, 0);
 });

@@ -1,0 +1,1631 @@
+From 3ce6e878c7b2177f97c9b073b737679c26bc8d14 Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Wed, 22 Jul 2026 23:44:07 -0400
+Subject: [PATCH] feat(coding-agent): add core deferred re-entry affordance
+ (#49)
+
+---
+ packages/coding-agent/docs/deferred-tools.md  |  31 +-
+ packages/coding-agent/docs/extensions.md      |  24 +-
+ .../examples/extensions/durable-deferral.ts   |   8 +
+ .../coding-agent/src/core/extensions/index.ts |   2 +
+ .../extensions/tool-deferral-validation.ts    |   3 +
+ .../coding-agent/src/core/extensions/types.ts |  18 +-
+ .../coding-agent/src/core/slash-commands.ts   |   6 +-
+ packages/coding-agent/src/index.ts            |   2 +
+ .../interactive/deferred-presentation.ts      | 235 +++++++++++
+ .../src/modes/interactive/interactive-mode.ts | 269 +++++++-----
+ ...-interactive-deferred-presentation.test.ts |  83 +---
+ .../22-deferred-tool-registration.test.ts     |   5 +
+ .../49-deferred-presentation.test.ts          | 389 ++++++++++++++++++
+ .../49-deferred-surface-lifecycle.test.ts     | 117 ++++++
+ 14 files changed, 998 insertions(+), 194 deletions(-)
+ create mode 100644 packages/coding-agent/src/modes/interactive/deferred-presentation.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/49-deferred-presentation.test.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/49-deferred-surface-lifecycle.test.ts
+
+diff --git a/packages/coding-agent/docs/deferred-tools.md b/packages/coding-agent/docs/deferred-tools.md
+index ae77e8e0..0c7ea03d 100644
+--- a/packages/coding-agent/docs/deferred-tools.md
++++ b/packages/coding-agent/docs/deferred-tools.md
+@@ -15,13 +15,15 @@ Pi core owns mechanical Deferred Tool Batch behavior:
+ - journal markers, branch reconstruction, compaction pinning, and missing-result advancement
+ - argument-free `resumeDeferred()` and `abandonDeferred()` operations
+ - SDK, RPC, JSON, print, and generic TUI projection
++- persistent deferred-work affordance visibility and lifecycle
++- `/deferred` and `/deferred inspect` routing and generic recovery fallback
+ 
+ The extension package owns its Interaction Request:
+ 
+ - request and outcome custom-entry schemas
+ - Response, Interruption, and Cancellation validation
+ - the first-terminal-outcome race
+-- package-specific tool results and presentation
++- package-specific tool results and optional presentation text
+ - compatibility checks for its persisted payload
+ 
+ Pi never accepts an answer, tool arguments, call IDs, or fabricated tool results through its resume/abandon operations. The package durably appends its outcome first; Pi rebinds the original call from active session history.
+@@ -49,7 +51,11 @@ pi.registerTool({
+       return { status: "deferred", correlationId: "package-request-id" };
+     },
+     async presenter(snapshot, ctx) {
+-      // Optional TUI-only package presentation.
++      // Optional full TUI package presentation.
++    },
++    summary(snapshot, ctx) {
++      // Optional privacy-safe short text. Core owns rendering and cleanup.
++      return "Durable response waiting";
+     },
+   },
+   async execute(toolCallId, params, signal, onUpdate, ctx) {
+@@ -58,7 +64,7 @@ pi.registerTool({
+ });
+ ```
+ 
+-Public types include `ToolDeferralDefinition`, `ToolDeferralRequest`, `ToolDeferralResolution`, `ToolDeferralAvailability`, `DeferredToolPresenter`, `DeferredBatchSnapshot`, and `DeferredOperationResult`.
++Public types include `ToolDeferralDefinition`, `ToolDeferralRequest`, `ToolDeferralResolution`, `ToolDeferralAvailability`, `DeferredToolPresenter`, `DeferredToolSummary`, `DeferredToolSummaryContext`, `DeferredBatchSnapshot`, and `DeferredOperationResult`.
+ 
+ ### Registration validation
+ 
+@@ -68,10 +74,25 @@ Registration fails before the tool becomes active when:
+ - `handlerVersion` is not a positive integer
+ - `resumableHandlerVersions` is empty, contains duplicates/non-positive integers, or omits the current `handlerVersion`
+ - `resolve` is not a function
+-- `inspectAvailability` or `presenter` is present but not a function
++- `inspectAvailability`, `presenter`, or `summary` is present but not a function
+ 
+ Handler identity is independent of tool name and package version. Keep it stable across tool renames. Versions are exact positive integers, not semver ranges.
+ 
++## TUI presentation and re-entry
++
++Pi core owns the persistent deferred-work affordance. A compatible package can provide a full `presenter` and a short `summary`, but it must not mount or clear its own deferred widget. `summary` receives the neutral snapshot and a read-only context containing `cwd` and `sessionManager`; it must return privacy-safe text and must not expose tool arguments or package payloads. Core adds command guidance, renders the text, suppresses it while a full deferred UI owns input, restores it after Escape, and clears it as soon as `session.deferredBatch` is absent.
++
++Presentation selection is:
++
++| Capability | Full UI | Affordance after dismissal |
++|---|---|---|
++| Compatible presenter and summary | Package presenter | Package summary |
++| Compatible presenter without a summary | Package presenter | Core generic summary |
++| Missing or unavailable presenter | Core inspector | Core generic summary |
++| Presenter or summary throws | Core inspector for presenter failure; package presenter remains usable after summary failure | Core generic summary |
++
++`/deferred` opens the compatible package presenter and otherwise falls back to the core inspector. `/deferred inspect` always opens the core inspector, which provides Retry, Abandon, and Close. Package-specific commands and shortcuts can remain conveniences, but they are not the durable re-entry path. Core retries package presentation after reload, so restoring compatible package code recovers without changing journal state.
++
+ ## Resolver operations
+ 
+ `resolve` receives validated current parameters, the original tool-call ID, the current signal/context, and one operation:
+@@ -161,7 +182,7 @@ The durability claim is limited to completed session append calls and process te
+ 
+ | Mode | Behavior |
+ |---|---|
+-| TUI | Uses a compatible package presenter, falling back to `/deferred`; held siblings render as not executed. |
++| TUI | Uses a compatible package presenter, keeps one core-owned re-entry affordance after dismissal, routes `/deferred` to package presentation, and reserves `/deferred inspect` for the generic inspector. |
+ | SDK | Exposes snapshots/events and argument-free resume/abandon operations. |
+ | RPC | Mirrors SDK with JSON `null`, capability discovery, typed errors, and settled operation responses. |
+ | JSON | Emits initial `deferred_batch_state` after the session header and later `deferred_batch_changed` events. |
+diff --git a/packages/coding-agent/docs/extensions.md b/packages/coding-agent/docs/extensions.md
+index ef456a49..24cd7c07 100644
+--- a/packages/coding-agent/docs/extensions.md
++++ b/packages/coding-agent/docs/extensions.md
+@@ -1872,7 +1872,25 @@ Register tools the LLM can call via `pi.registerTool()`. Tools appear in the sys
+ 
+ A tool may declare one versioned `deferral` capability next to `execute`. Exactly one capable call may own a batch; Pi validates every call before executing any of them and persists a neutral marker when the owner returns `deferred`.
+ 
+-Registration validates namespaced handler identity, positive exact versions, resumable versions, resolver functions, availability inspection, and presenter configuration. Invalid definitions fail while the extension loads. Start with [`durable-deferral.ts`](../examples/extensions/durable-deferral.ts), run `pi conformance`, and read [Durable Tool Deferral](deferred-tools.md) before implementing package records or presentation.
++Registration validates namespaced handler identity, positive exact versions, resumable versions, resolver functions, availability inspection, and presenter/summary configuration. Invalid definitions fail while the extension loads. Start with [`durable-deferral.ts`](../examples/extensions/durable-deferral.ts), run `pi conformance`, and read [Durable Tool Deferral](deferred-tools.md) before implementing package records or presentation.
++
++A deferral capability may define two presentation callbacks:
++
++```typescript
++ deferral: {
++   // ...handler identity, resolver, and availability...
++   async presenter(snapshot, ctx) {
++     // Optional full TUI package UI.
++   },
++   summary(snapshot, ctx) {
++     // Optional privacy-safe short text for core's persistent affordance.
++     // ctx exposes only cwd and a read-only sessionManager.
++     return "Durable response waiting";
++   },
++ }
++```
++
++Core chooses, mounts, hides, restores, and clears deferred UI. Packages must not mirror `ctx.getDeferredBatch()` into `ctx.ui.setWidget()`. `/deferred` opens a compatible package presenter and falls back to the generic inspector; `/deferred inspect` always opens the generic inspector. Escape dismisses the full UI without changing lifecycle state and restores package summary text or core generic text. Missing, unavailable, or throwing package presentation fails open to core UI.
+ 
+ Use `promptSnippet` for a short one-line entry in the `Available tools` section in the default system prompt. If omitted, custom tools are left out of that section.
+ 
+@@ -2711,6 +2729,8 @@ The callback receives:
+ 
+ See [tui.md](tui.md) for the full component API.
+ 
++When a package-specific command or shortcut opens custom UI for the active Deferred Tool Batch, pass `{ deferredBatch: true }`. Core then retires that surface if the batch resolves, disappears, or is replaced. A presenter invoked through core deferred routing is already tracked, but may also set this option.
++
+ #### Overlay Mode (Experimental)
+ 
+ Pass `{ overlay: true }` to render the component as a floating modal on top of existing content, without clearing the screen:
+@@ -2879,7 +2899,7 @@ const highlighted = highlightCode(code, lang, theme);
+ 
+ | Mode | `ctx.mode` | `ctx.hasUI` | Notes |
+ |------|------------|-------------|-------|
+-| Interactive | `"tui"` | `true` | Full TUI; compatible deferred presenters may open after durable settlement. |
++| Interactive | `"tui"` | `true` | Full TUI; core owns the persistent deferred affordance, `/deferred` presentation routing, and `/deferred inspect` recovery. |
+ | RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs and notifications via JSON protocol; `custom()` returns `undefined`; deferred work uses dedicated RPC state/operations. See [rpc.md](rpc.md) |
+ | JSON (`--mode json`) | `"json"` | `false` | Event stream to stdout; UI methods are no-ops; deferred state is emitted and exits successfully. |
+ | Print (`-p`) | `"print"` | `false` | Extensions cannot prompt; Waiting/unavailable state is printed safely and exits successfully. |
+diff --git a/packages/coding-agent/examples/extensions/durable-deferral.ts b/packages/coding-agent/examples/extensions/durable-deferral.ts
+index 45c0415c..46d58e7c 100644
+--- a/packages/coding-agent/examples/extensions/durable-deferral.ts
++++ b/packages/coding-agent/examples/extensions/durable-deferral.ts
+@@ -183,6 +183,14 @@ export function createDurableWaitExtension(controller?: Partial<DurableWaitContr
+ 						void pi.resumeDeferred();
+ 					}
+ 				},
++				summary: (snapshot, ctx) => {
++					const request = ctx.sessionManager
++						.getBranch()
++						.map((entry) => customData<WaitRequest>(entry, REQUEST_TYPE))
++						.find((entry) => entry?.requestId === snapshot.correlationId);
++					if (!request) throw new Error("Durable wait request was not found");
++					return "Durable response waiting";
++				},
+ 			},
+ 			async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+ 				currentBranch = () => ctx.sessionManager.getBranch();
+diff --git a/packages/coding-agent/src/core/extensions/index.ts b/packages/coding-agent/src/core/extensions/index.ts
+index dc8351ae..2fe13bd8 100644
+--- a/packages/coding-agent/src/core/extensions/index.ts
++++ b/packages/coding-agent/src/core/extensions/index.ts
+@@ -51,6 +51,8 @@ export type {
+ 	CustomToolCallEvent,
+ 	CustomToolResultEvent,
+ 	DeferredToolPresenter,
++	DeferredToolSummary,
++	DeferredToolSummaryContext,
+ 	EditorFactory,
+ 	EditToolCallEvent,
+ 	EditToolResultEvent,
+diff --git a/packages/coding-agent/src/core/extensions/tool-deferral-validation.ts b/packages/coding-agent/src/core/extensions/tool-deferral-validation.ts
+index bd54b639..e6edaa0b 100644
+--- a/packages/coding-agent/src/core/extensions/tool-deferral-validation.ts
++++ b/packages/coding-agent/src/core/extensions/tool-deferral-validation.ts
+@@ -44,4 +44,7 @@ export function validateToolDeferralRegistration(tool: ToolDefinition): void {
+ 	if (capability.presenter !== undefined && typeof capability.presenter !== "function") {
+ 		fail(tool.name, "deferral.presenter must be a function when provided");
+ 	}
++	if (capability.summary !== undefined && typeof capability.summary !== "function") {
++		fail(tool.name, "deferral.summary must be a function when provided");
++	}
+ }
+diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
+index 404ca621..a9db2471 100644
+--- a/packages/coding-agent/src/core/extensions/types.ts
++++ b/packages/coding-agent/src/core/extensions/types.ts
+@@ -225,6 +225,8 @@ export interface ExtensionUIContext {
+ 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+ 		options?: {
+ 			overlay?: boolean;
++			/** Associate this surface with the active Deferred Tool Batch so core can retire stale presentation. */
++			deferredBatch?: boolean;
+ 			/** Overlay positioning/sizing options. Can be static or a function for dynamic updates. */
+ 			overlayOptions?: OverlayOptions | (() => OverlayOptions);
+ 			/** Called with the overlay handle after the overlay is shown. Use to control visibility. */
+@@ -467,10 +469,24 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
+ 
+ export type DeferredToolPresenter = (snapshot: DeferredBatch, ctx: ExtensionContext) => Promise<void> | void;
+ 
++/** Read-only package context for producing persistent deferred-work text. */
++export interface DeferredToolSummaryContext {
++	cwd: string;
++	sessionManager: ReadonlySessionManager;
++}
++
++/** Privacy-safe short text rendered and lifecycle-managed by Pi core. */
++export type DeferredToolSummary = (
++	snapshot: DeferredBatch,
++	ctx: DeferredToolSummaryContext,
++) => Promise<string> | string;
++
+ export interface ToolDeferralDefinition<TParams extends TSchema = TSchema>
+ 	extends Omit<AgentToolDeferral<Static<TParams>>, "resolve" | "inspectAvailability"> {
+-	/** Optional package-owned TUI presentation for compatible deferred work. */
++	/** Optional package-owned full TUI presentation for compatible deferred work. */
+ 	presenter?: DeferredToolPresenter;
++	/** Optional privacy-safe short text for core's persistent re-entry affordance. */
++	summary?: DeferredToolSummary;
+ 	inspectAvailability?(
+ 		request: InspectToolDeferralRequest<Static<TParams>>,
+ 		ctx: ExtensionContext,
+diff --git a/packages/coding-agent/src/core/slash-commands.ts b/packages/coding-agent/src/core/slash-commands.ts
+index f1d9b02d..9cb3979e 100644
+--- a/packages/coding-agent/src/core/slash-commands.ts
++++ b/packages/coding-agent/src/core/slash-commands.ts
+@@ -36,7 +36,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+ 	{ name: "logout", description: "Remove provider authentication" },
+ 	{ name: "new", description: "Start a new session" },
+ 	{ name: "compact", description: "Manually compact the session context" },
+-	{ name: "deferred", description: "Inspect or recover the active deferred tool batch" },
++	{
++		name: "deferred",
++		description: "Open deferred work (use 'inspect' for core recovery)",
++		argumentHint: "[inspect]",
++	},
+ 	{ name: "resume", description: "Resume a different session" },
+ 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
+ 	{ name: "quit", description: `Quit ${APP_NAME}` },
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index 9b48dc2f..870f3755 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -84,6 +84,8 @@ export type {
+ 	ContextUsage,
+ 	CustomToolCallEvent,
+ 	DeferredToolPresenter,
++	DeferredToolSummary,
++	DeferredToolSummaryContext,
+ 	EditToolCallEvent,
+ 	EntryRenderer,
+ 	EntryRenderOptions,
+diff --git a/packages/coding-agent/src/modes/interactive/deferred-presentation.ts b/packages/coding-agent/src/modes/interactive/deferred-presentation.ts
+new file mode 100644
+index 00000000..c02f83c2
+--- /dev/null
++++ b/packages/coding-agent/src/modes/interactive/deferred-presentation.ts
+@@ -0,0 +1,235 @@
++import type { DeferredBatch, DeferredBatchSnapshot } from "../../core/deferred-batch.ts";
++import type {
++	DeferredToolPresenter,
++	DeferredToolSummary,
++	DeferredToolSummaryContext,
++	ExtensionContext,
++	ToolDefinition,
++} from "../../core/extensions/types.ts";
++
++export type DeferredAffordance =
++	| { kind: "package"; text: string }
++	| { kind: "generic"; snapshot: DeferredBatchSnapshot };
++
++export interface DeferredPresentationHost {
++	getSnapshot(): DeferredBatchSnapshot | undefined;
++	getPresentationKey(snapshot: DeferredBatchSnapshot): string;
++	getToolDefinition(name: string): ToolDefinition | undefined;
++	createPresenterContext(): ExtensionContext;
++	createSummaryContext(): DeferredToolSummaryContext;
++	setAffordance(affordance: DeferredAffordance | undefined): void;
++	dismissFullSurfaces(): void;
++	showInspector(): Promise<void>;
++	showNoDeferred(): void;
++	showError(toolName: string, message: string): void;
++}
++
++export function parseDeferredCommand(text: string): "inspect" | "present" | undefined {
++	if (text === "/deferred") return "present";
++	if (text === "/deferred inspect") return "inspect";
++	return undefined;
++}
++
++type PackagePresentation = {
++	toolName: string;
++	presenter: DeferredToolPresenter;
++	summary: DeferredToolSummary | undefined;
++};
++
++/** Owns deferred presentation selection while the interactive mode supplies rendering primitives. */
++export class DeferredPresentationController {
++	private readonly host: DeferredPresentationHost;
++	private presentedKey: string | undefined;
++	private fullSurfaceDepth = 0;
++	private activeSurfaceKey: string | undefined;
++	private pendingPresentation: { force?: boolean } | undefined;
++	private failedPresenterKey: string | undefined;
++	private failedSummaryKey: string | undefined;
++	private affordanceGeneration = 0;
++
++	constructor(host: DeferredPresentationHost) {
++		this.host = host;
++	}
++
++	reset(): void {
++		this.presentedKey = undefined;
++		this.activeSurfaceKey = undefined;
++		this.pendingPresentation = undefined;
++		this.failedPresenterKey = undefined;
++		this.failedSummaryKey = undefined;
++		this.affordanceGeneration += 1;
++	}
++
++	async stateChanged(): Promise<void> {
++		const snapshot = this.host.getSnapshot();
++		if (!snapshot) {
++			this.presentedKey = undefined;
++			this.pendingPresentation = undefined;
++			if (this.activeSurfaceKey) this.host.dismissFullSurfaces();
++		} else if (this.activeSurfaceKey && this.activeSurfaceKey !== this.host.getPresentationKey(snapshot)) {
++			this.pendingPresentation = {};
++			this.host.dismissFullSurfaces();
++		}
++		await this.refreshAffordance();
++	}
++
++	async present(options: { force?: boolean } = {}): Promise<void> {
++		const snapshot = this.getActiveSnapshotOrNotify();
++		if (!snapshot) return;
++		if (this.fullSurfaceDepth > 0) {
++			this.pendingPresentation = { force: this.pendingPresentation?.force || options.force };
++			return;
++		}
++
++		const key = this.host.getPresentationKey(snapshot);
++		if (!options.force && this.presentedKey === key) {
++			await this.refreshAffordance();
++			return;
++		}
++		this.presentedKey = key;
++		this.activeSurfaceKey = key;
++
++		try {
++			await this.withFullSurface(async () => {
++				const presentation = this.getPackagePresentation(snapshot);
++				if (!presentation || this.failedPresenterKey === key) {
++					await this.host.showInspector();
++					return;
++				}
++
++				try {
++					await presentation.presenter(snapshot as DeferredBatch, this.host.createPresenterContext());
++				} catch (error) {
++					this.failedPresenterKey = key;
++					if (this.isCurrentPresentation(key)) {
++						this.host.showError(presentation.toolName, error instanceof Error ? error.message : String(error));
++						await this.host.showInspector();
++					}
++				}
++			});
++		} finally {
++			if (this.activeSurfaceKey === key) this.activeSurfaceKey = undefined;
++		}
++	}
++
++	async inspect(): Promise<void> {
++		const snapshot = this.getActiveSnapshotOrNotify();
++		if (!snapshot) return;
++		const key = this.host.getPresentationKey(snapshot);
++		this.activeSurfaceKey = key;
++		try {
++			await this.withFullSurface(() => this.host.showInspector());
++		} finally {
++			if (this.activeSurfaceKey === key) this.activeSurfaceKey = undefined;
++		}
++	}
++
++	hasActiveSurface(): boolean {
++		return this.activeSurfaceKey !== undefined;
++	}
++
++	shouldRetireActiveSurface(): boolean {
++		return this.activeSurfaceKey !== undefined && !this.isCurrentPresentation(this.activeSurfaceKey);
++	}
++
++	surfaceOpened(trackDeferredBatch = false): void {
++		if (trackDeferredBatch && !this.activeSurfaceKey) {
++			const snapshot = this.host.getSnapshot();
++			if (snapshot) this.activeSurfaceKey = this.host.getPresentationKey(snapshot);
++		}
++		this.fullSurfaceDepth += 1;
++		this.affordanceGeneration += 1;
++		this.host.setAffordance(undefined);
++	}
++
++	async surfaceClosed(): Promise<void> {
++		this.fullSurfaceDepth = Math.max(0, this.fullSurfaceDepth - 1);
++		if (this.fullSurfaceDepth === 0) {
++			this.activeSurfaceKey = undefined;
++			if (this.pendingPresentation) {
++				const pending = this.pendingPresentation;
++				this.pendingPresentation = undefined;
++				await this.present(pending);
++				return;
++			}
++		}
++		await this.refreshAffordance();
++	}
++
++	private getActiveSnapshotOrNotify(): DeferredBatchSnapshot | undefined {
++		const snapshot = this.host.getSnapshot();
++		if (snapshot) return snapshot;
++		this.presentedKey = undefined;
++		this.host.setAffordance(undefined);
++		this.host.showNoDeferred();
++		return undefined;
++	}
++
++	private async withFullSurface(open: () => Promise<void>): Promise<void> {
++		this.surfaceOpened();
++		try {
++			await open();
++		} finally {
++			await this.surfaceClosed();
++		}
++	}
++
++	private isCurrentPresentation(key: string): boolean {
++		const snapshot = this.host.getSnapshot();
++		return snapshot !== undefined && this.host.getPresentationKey(snapshot) === key;
++	}
++
++	private getPackagePresentation(snapshot: DeferredBatchSnapshot): PackagePresentation | undefined {
++		if (snapshot.kind !== "batch" || snapshot.availability.status !== "available") return undefined;
++		const owner = snapshot.calls.find((call) => call.toolCallId === snapshot.ownerCallId);
++		if (!owner) return undefined;
++		const deferral = this.host.getToolDefinition(owner.toolName)?.deferral;
++		if (!deferral?.presenter) return undefined;
++		return { toolName: owner.toolName, presenter: deferral.presenter, summary: deferral.summary };
++	}
++
++	private async refreshAffordance(): Promise<void> {
++		const generation = ++this.affordanceGeneration;
++		const snapshot = this.host.getSnapshot();
++		if (!snapshot || this.fullSurfaceDepth > 0) {
++			this.host.setAffordance(undefined);
++			return;
++		}
++
++		const key = this.host.getPresentationKey(snapshot);
++		const presentation = this.getPackagePresentation(snapshot);
++		if (!presentation?.summary || this.failedPresenterKey === key || this.failedSummaryKey === key) {
++			this.host.setAffordance({ kind: "generic", snapshot });
++			return;
++		}
++
++		this.host.setAffordance({ kind: "generic", snapshot });
++		let text: string;
++		try {
++			text = await presentation.summary(snapshot as DeferredBatch, this.host.createSummaryContext());
++		} catch (error) {
++			this.failedSummaryKey = key;
++			if (generation === this.affordanceGeneration && this.isCurrentPresentation(key)) {
++				this.host.showError(presentation.toolName, error instanceof Error ? error.message : String(error));
++				this.host.setAffordance({ kind: "generic", snapshot });
++			}
++			return;
++		}
++
++		if (
++			generation !== this.affordanceGeneration ||
++			this.fullSurfaceDepth > 0 ||
++			this.host.getSnapshot() === undefined ||
++			this.host.getPresentationKey(this.host.getSnapshot()!) !== key
++		) {
++			return;
++		}
++		if (typeof text !== "string") {
++			this.failedSummaryKey = key;
++			this.host.setAffordance({ kind: "generic", snapshot });
++			return;
++		}
++		const normalized = text.trim();
++		this.host.setAffordance(normalized ? { kind: "package", text: normalized } : { kind: "generic", snapshot });
++	}
++}
+diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+index c910b712..8ef8830b 100644
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -143,6 +143,11 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
+ import { TrustSelectorComponent } from "./components/trust-selector.ts";
+ import { UserMessageComponent } from "./components/user-message.ts";
+ import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
++import {
++	type DeferredAffordance,
++	DeferredPresentationController,
++	parseDeferredCommand,
++} from "./deferred-presentation.ts";
+ import { getModelSearchText } from "./model-search.ts";
+ import {
+ 	getAvailableThemes,
+@@ -368,8 +373,7 @@ export class InteractiveMode {
+ 	// Tool execution tracking: toolCallId -> component
+ 	private pendingTools = new Map<string, ToolExecutionComponent>();
+ 
+-	// Last automatically presented active-branch deferred batch. Dismissal does not clear it.
+-	private presentedDeferredKey: string | undefined;
++	private deferredPresentation: DeferredPresentationController;
+ 
+ 	// Tool output expansion state
+ 	private toolOutputExpanded = false;
+@@ -411,10 +415,12 @@ export class InteractiveMode {
+ 	private extensionInput: ExtensionInputComponent | undefined = undefined;
+ 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
+ 	private extensionTerminalInputUnsubscribers = new Set<() => void>();
++	private activeCustomSurfaceDismissers = new Set<() => void>();
+ 
+ 	// Extension widgets (components rendered above/below the editor)
+ 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
+ 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
++	private deferredAffordance: (Component & { dispose?(): void }) | undefined;
+ 	private widgetContainerAbove!: Container;
+ 	private widgetContainerBelow!: Container;
+ 
+@@ -495,6 +501,28 @@ export class InteractiveMode {
+ 			(message) => this.showError(message),
+ 			() => this.updateEditorBorderColor(),
+ 		);
++		this.deferredPresentation = new DeferredPresentationController({
++			getSnapshot: () => this.session.deferredBatch,
++			getPresentationKey: (snapshot) => {
++				const leafId = this.sessionManager.getLeafId() ?? "root";
++				return snapshot.kind === "invalid"
++					? `invalid:${leafId}:${snapshot.code}`
++					: `${snapshot.sessionId}:${snapshot.assistantEntryId}:${snapshot.ownerCallId}:${leafId}`;
++			},
++			getToolDefinition: (name) => this.session.getToolDefinition(name),
++			createPresenterContext: () => this.session.extensionRunner.createContext(),
++			createSummaryContext: () => ({
++				cwd: this.sessionManager.getCwd(),
++				sessionManager: this.sessionManager,
++			}),
++			setAffordance: (affordance) => this.setDeferredAffordance(affordance),
++			dismissFullSurfaces: () => {
++				for (const dismiss of [...this.activeCustomSurfaceDismissers].reverse()) dismiss();
++			},
++			showInspector: () => this.showDeferredInspectorSurface(),
++			showNoDeferred: () => this.showStatus("No deferred tool batch on the active branch"),
++			showError: (toolName, message) => this.showExtensionError(toolName, message),
++		});
+ 	}
+ 
+ 	private getAutocompleteSourceTag(sourceInfo?: SourceInfo): string | undefined {
+@@ -1672,7 +1700,7 @@ export class InteractiveMode {
+ 
+ 					this.chatContainer.clear();
+ 					this.renderInitialMessages();
+-					this.presentedDeferredKey = undefined;
++					this.deferredPresentation.reset();
+ 					await this.presentDeferredBatch();
+ 					if (result.editorText && !this.editor.getText().trim()) {
+ 						this.editor.setText(result.editorText);
+@@ -1789,58 +1817,23 @@ export class InteractiveMode {
+ 	}
+ 
+ 	private async presentDeferredBatch(options: { force?: boolean } = {}): Promise<void> {
+-		const snapshot = this.session.deferredBatch;
+-		if (!snapshot) {
+-			this.presentedDeferredKey = undefined;
+-			return;
+-		}
+-
+-		const leafId = this.sessionManager.getLeafId() ?? "root";
+-		if (snapshot.kind === "invalid") {
+-			const key = `invalid:${leafId}:${snapshot.code}`;
+-			if (!options.force && this.presentedDeferredKey === key) return;
+-			this.presentedDeferredKey = key;
+-			await this.showDeferredInspector();
+-			return;
+-		}
+-
+-		const key = `${snapshot.sessionId}:${snapshot.assistantEntryId}:${leafId}`;
+-		if (!options.force && this.presentedDeferredKey === key) return;
+-		this.presentedDeferredKey = key;
+-
+-		const owner = snapshot.calls.find((call) => call.toolCallId === snapshot.ownerCallId);
+-		const presenter =
+-			snapshot.availability.status === "available" && owner
+-				? this.session.getToolDefinition(owner.toolName)?.deferral?.presenter
+-				: undefined;
+-		if (presenter) {
+-			try {
+-				await presenter(snapshot, this.session.extensionRunner.createContext());
+-				return;
+-			} catch (error) {
+-				this.showExtensionError(
+-					owner?.toolName ?? "deferred",
+-					error instanceof Error ? error.message : String(error),
+-				);
+-			}
+-		}
+-		await this.showDeferredInspector();
++		await this.deferredPresentation.present(options);
+ 	}
+ 
+-	private async showDeferredInspector(): Promise<void> {
++	private async showDeferredInspectorSurface(): Promise<void> {
+ 		const snapshot = this.session.deferredBatch;
+-		if (!snapshot) {
+-			this.showStatus("No deferred tool batch on the active branch");
+-			return;
+-		}
++		if (!snapshot) return;
+ 
+-		const action = await this.showExtensionCustom<DeferredInspectorAction>((tui, _theme, _keybindings, done) => {
+-			return new DeferredInspectorComponent(snapshot, (selected) => {
+-				done(selected);
+-				tui.requestRender();
+-			});
+-		});
+-		if (action === "dismiss") return;
++		const action = await this.showExtensionCustom<DeferredInspectorAction | undefined>(
++			(tui, _theme, _keybindings, done) => {
++				return new DeferredInspectorComponent(snapshot, (selected) => {
++					done(selected);
++					tui.requestRender();
++				});
++			},
++			{ deferredBatch: true },
++		);
++		if (action === undefined || action === "dismiss") return;
+ 
+ 		try {
+ 			if (action === "abandon") {
+@@ -1856,11 +1849,38 @@ export class InteractiveMode {
+ 		} catch (error) {
+ 			this.showError(error instanceof Error ? error.message : String(error));
+ 		}
++	}
+ 
+-		if (this.session.deferredBatch) {
+-			this.presentedDeferredKey = undefined;
+-			await this.presentDeferredBatch();
++	private setDeferredAffordance(affordance: DeferredAffordance | undefined): void {
++		this.deferredAffordance?.dispose?.();
++		this.deferredAffordance = undefined;
++		if (affordance) {
++			let title: string;
++			let detail: string;
++			if (affordance.kind === "package") {
++				title = "Deferred work waiting";
++				detail = affordance.text;
++			} else if (affordance.snapshot.kind === "invalid") {
++				title = "Deferred work needs recovery";
++				detail = "The active branch contains invalid deferred history.";
++			} else if (affordance.snapshot.availability.status === "unavailable") {
++				title = "Deferred work unavailable";
++				detail = "Restore compatible package code or inspect core recovery options.";
++			} else {
++				const count = affordance.snapshot.calls.length;
++				title = "Deferred work waiting";
++				detail = `${count} tool call${count === 1 ? " is" : "s are"} held.`;
++			}
++			this.deferredAffordance = new Text(
++				[
++					theme.fg("warning", theme.bold(title)) + theme.fg("muted", `  ${detail}`),
++					theme.fg("dim", "  /deferred to open • /deferred inspect for core recovery"),
++				].join("\n"),
++				0,
++				0,
++			);
+ 		}
++		this.renderWidgets();
+ 	}
+ 
+ 	/**
+@@ -2088,7 +2108,13 @@ export class InteractiveMode {
+ 	 */
+ 	private renderWidgets(): void {
+ 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
+-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
++		this.renderWidgetContainer(
++			this.widgetContainerAbove,
++			this.extensionWidgetsAbove,
++			true,
++			true,
++			this.deferredAffordance,
++		);
+ 		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
+ 		this.ui.requestRender();
+ 	}
+@@ -2098,10 +2124,11 @@ export class InteractiveMode {
+ 		widgets: Map<string, Component & { dispose?(): void }>,
+ 		spacerWhenEmpty: boolean,
+ 		leadingSpacer: boolean,
++		coreComponent?: Component,
+ 	): void {
+ 		container.clear();
+ 
+-		if (widgets.size === 0) {
++		if (widgets.size === 0 && !coreComponent) {
+ 			if (spacerWhenEmpty) {
+ 				container.addChild(new Spacer(1));
+ 			}
+@@ -2111,6 +2138,9 @@ export class InteractiveMode {
+ 		if (leadingSpacer) {
+ 			container.addChild(new Spacer(1));
+ 		}
++		if (coreComponent) {
++			container.addChild(coreComponent);
++		}
+ 		for (const component of widgets.values()) {
+ 			container.addChild(component);
+ 		}
+@@ -2297,27 +2327,26 @@ export class InteractiveMode {
+ 				return;
+ 			}
+ 
+-			const onAbort = () => {
++			let settled = false;
++			let onAbort = () => {};
++			const dismiss = () => finish(undefined);
++			const finish = (value: string | undefined) => {
++				if (settled) return;
++				settled = true;
++				opts?.signal?.removeEventListener("abort", onAbort);
++				this.activeCustomSurfaceDismissers?.delete(dismiss);
+ 				this.hideExtensionSelector();
+-				resolve(undefined);
++				resolve(value);
+ 			};
++			onAbort = dismiss;
+ 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+ 
+-			this.extensionSelector = new ExtensionSelectorComponent(
+-				title,
+-				options,
+-				(option) => {
+-					opts?.signal?.removeEventListener("abort", onAbort);
+-					this.hideExtensionSelector();
+-					resolve(option);
+-				},
+-				() => {
+-					opts?.signal?.removeEventListener("abort", onAbort);
+-					this.hideExtensionSelector();
+-					resolve(undefined);
+-				},
+-				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
+-			);
++			this.extensionSelector = new ExtensionSelectorComponent(title, options, (option) => finish(option), dismiss, {
++				tui: this.ui,
++				timeout: opts?.timeout,
++				onToggleToolsExpanded: () => this.toggleToolOutputExpansion(),
++			});
++			this.trackDeferredSurfaceDismisser?.(dismiss);
+ 
+ 			this.editorContainer.clear();
+ 			this.editorContainer.addChild(this.extensionSelector);
+@@ -2372,27 +2401,25 @@ export class InteractiveMode {
+ 				return;
+ 			}
+ 
+-			const onAbort = () => {
++			let settled = false;
++			let onAbort = () => {};
++			const dismiss = () => finish(undefined);
++			const finish = (value: string | undefined) => {
++				if (settled) return;
++				settled = true;
++				opts?.signal?.removeEventListener("abort", onAbort);
++				this.activeCustomSurfaceDismissers?.delete(dismiss);
+ 				this.hideExtensionInput();
+-				resolve(undefined);
++				resolve(value);
+ 			};
++			onAbort = dismiss;
+ 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+ 
+-			this.extensionInput = new ExtensionInputComponent(
+-				title,
+-				placeholder,
+-				(value) => {
+-					opts?.signal?.removeEventListener("abort", onAbort);
+-					this.hideExtensionInput();
+-					resolve(value);
+-				},
+-				() => {
+-					opts?.signal?.removeEventListener("abort", onAbort);
+-					this.hideExtensionInput();
+-					resolve(undefined);
+-				},
+-				{ tui: this.ui, timeout: opts?.timeout },
+-			);
++			this.extensionInput = new ExtensionInputComponent(title, placeholder, (value) => finish(value), dismiss, {
++				tui: this.ui,
++				timeout: opts?.timeout,
++			});
++			this.trackDeferredSurfaceDismisser?.(dismiss);
+ 
+ 			this.editorContainer.clear();
+ 			this.editorContainer.addChild(this.extensionInput);
+@@ -2418,22 +2445,26 @@ export class InteractiveMode {
+ 	 */
+ 	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
+ 		return new Promise((resolve) => {
++			let settled = false;
++			const dismiss = () => finish(undefined);
++			const finish = (value: string | undefined) => {
++				if (settled) return;
++				settled = true;
++				this.activeCustomSurfaceDismissers?.delete(dismiss);
++				this.hideExtensionEditor();
++				resolve(value);
++			};
+ 			this.extensionEditor = new ExtensionEditorComponent(
+ 				this.ui,
+ 				this.keybindings,
+ 				title,
+ 				prefill,
+-				(value) => {
+-					this.hideExtensionEditor();
+-					resolve(value);
+-				},
+-				() => {
+-					this.hideExtensionEditor();
+-					resolve(undefined);
+-				},
++				(value) => finish(value),
++				dismiss,
+ 				undefined,
+ 				this.settingsManager.getExternalEditorCommand(),
+ 			);
++			this.trackDeferredSurfaceDismisser?.(dismiss);
+ 
+ 			this.editorContainer.clear();
+ 			this.editorContainer.addChild(this.extensionEditor);
+@@ -2546,6 +2577,7 @@ export class InteractiveMode {
+ 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+ 		options?: {
+ 			overlay?: boolean;
++			deferredBatch?: boolean;
+ 			overlayOptions?: OverlayOptions | (() => OverlayOptions);
+ 			onHandle?: (handle: OverlayHandle) => void;
+ 		},
+@@ -2561,25 +2593,34 @@ export class InteractiveMode {
+ 			this.ui.requestRender();
+ 		};
+ 
++		const nestedDeferredSurface = options?.deferredBatch ?? false;
++		if (nestedDeferredSurface) this.deferredPresentation?.surfaceOpened(true);
+ 		return new Promise((resolve, reject) => {
+ 			let component: Component & { dispose?(): void };
+ 			let closed = false;
++			let dismiss = () => {};
+ 
+ 			const close = (result: T) => {
+ 				if (closed) return;
+ 				closed = true;
++				this.activeCustomSurfaceDismissers?.delete(dismiss);
+ 				if (isOverlay) this.ui.hideOverlay();
+ 				else restoreEditor();
+ 				// Note: both branches above already call requestRender
+ 				resolve(result);
++				// Let the extension persist any result before deferred presentation is refreshed.
++				if (nestedDeferredSurface) setTimeout(() => void this.deferredPresentation?.surfaceClosed(), 0);
+ 				try {
+ 					component?.dispose?.();
+ 				} catch {
+ 					/* ignore dispose errors */
+ 				}
+ 			};
++			dismiss = () => close(undefined as T);
++			this.trackDeferredSurfaceDismisser?.(dismiss);
+ 
+-			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
++			Promise.resolve()
++				.then(() => factory(this.ui, theme, this.keybindings, close))
+ 				.then((c) => {
+ 					if (closed) return;
+ 					component = c;
+@@ -2609,12 +2650,22 @@ export class InteractiveMode {
+ 				})
+ 				.catch((err) => {
+ 					if (closed) return;
++					this.activeCustomSurfaceDismissers?.delete(dismiss);
+ 					if (!isOverlay) restoreEditor();
++					if (nestedDeferredSurface) void this.deferredPresentation?.surfaceClosed();
+ 					reject(err);
+ 				});
+ 		});
+ 	}
+ 
++	private trackDeferredSurfaceDismisser(dismiss: () => void): boolean {
++		if (!this.deferredPresentation?.hasActiveSurface()) return false;
++		this.activeCustomSurfaceDismissers ??= new Set();
++		if (this.deferredPresentation.shouldRetireActiveSurface()) queueMicrotask(dismiss);
++		else this.activeCustomSurfaceDismissers.add(dismiss);
++		return true;
++	}
++
+ 	/**
+ 	 * Show an extension error in the UI.
+ 	 */
+@@ -2842,9 +2893,16 @@ export class InteractiveMode {
+ 				await this.handleReloadCommand();
+ 				return;
+ 			}
+-			if (text === "/deferred") {
++			if (text === "/deferred" || text.startsWith("/deferred ")) {
+ 				this.editor.setText("");
+-				await this.showDeferredInspector();
++				const action = parseDeferredCommand(text);
++				if (action === "inspect") {
++					await this.deferredPresentation.inspect();
++				} else if (action === "present") {
++					await this.presentDeferredBatch({ force: true });
++				} else {
++					this.showError("Usage: /deferred [inspect]");
++				}
+ 				return;
+ 			}
+ 			if (text === "/debug") {
+@@ -3156,6 +3214,11 @@ export class InteractiveMode {
+ 				this.ui.requestRender();
+ 				break;
+ 
++			case "deferred_batch_changed":
++				if (!event.deferredBatch) this.pendingTools.clear();
++				await this.deferredPresentation.stateChanged();
++				break;
++
+ 			case "agent_settled":
+ 				await this.presentDeferredBatch();
+ 				await this.checkShutdownRequested();
+@@ -4837,7 +4900,7 @@ export class InteractiveMode {
+ 						// Update UI
+ 						this.chatContainer.clear();
+ 						this.renderInitialMessages();
+-						this.presentedDeferredKey = undefined;
++						this.deferredPresentation.reset();
+ 						await this.presentDeferredBatch();
+ 						if (result.editorText && !this.editor.getText().trim()) {
+ 							this.editor.setText(result.editorText);
+@@ -5524,7 +5587,7 @@ export class InteractiveMode {
+ 			);
+ 			dismissReloadBox(this.editor as Component);
+ 			reloadBoxDismissed = true;
+-			this.presentedDeferredKey = undefined;
++			this.deferredPresentation.reset();
+ 			await this.presentDeferredBatch();
+ 		} catch (error) {
+ 			if (!reloadBoxDismissed) {
+diff --git a/packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts b/packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts
+index 53f437c2..b5c8268e 100644
+--- a/packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts
++++ b/packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts
+@@ -1,7 +1,7 @@
+ import { Text, type TUI } from "@earendil-works/pi-tui";
+ import { Type } from "typebox";
+ import { beforeAll, describe, expect, it, vi } from "vitest";
+-import type { DeferredBatch, ExtensionContext, ToolDefinition } from "../../../src/index.ts";
++import type { DeferredBatch, ToolDefinition } from "../../../src/index.ts";
+ import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+ import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
+@@ -21,62 +21,12 @@ const SNAPSHOT: DeferredBatch = {
+ 	availability: { status: "available" },
+ };
+ 
+-type PresentationContext = {
+-	session: {
+-		deferredBatch: DeferredBatch | undefined;
+-		getToolDefinition(name: string): ToolDefinition | undefined;
+-		extensionRunner: { createContext(): ExtensionContext };
+-	};
+-	sessionManager: { getLeafId(): string | null };
+-	presentedDeferredKey?: string;
+-	showDeferredInspector: ReturnType<typeof vi.fn<() => Promise<void>>>;
+-	showExtensionError: ReturnType<typeof vi.fn<(path: string, error: string) => void>>;
+-};
+-
+-type PresentDeferredBatch = (this: PresentationContext, options?: { force?: boolean }) => Promise<void>;
+-
+ const interactiveModePrototype = InteractiveMode.prototype as unknown as {
+-	presentDeferredBatch: PresentDeferredBatch;
+ 	applyDeferredToolRows(this: {
+ 		session: { deferredBatch: DeferredBatch | undefined };
+ 		pendingTools: Map<string, ToolExecutionComponent>;
+ 	}): void;
+ };
+-const presentDeferredBatch = interactiveModePrototype.presentDeferredBatch;
+-
+-function contextFor(
+-	presenter?: ToolDefinition["deferral"] extends infer _T
+-		? (snapshot: DeferredBatch, ctx: ExtensionContext) => Promise<void> | void
+-		: never,
+-): PresentationContext {
+-	const extensionContext = {} as ExtensionContext;
+-	return {
+-		session: {
+-			deferredBatch: SNAPSHOT,
+-			getToolDefinition: () =>
+-				({
+-					name: "question",
+-					label: "Question",
+-					description: "Question",
+-					parameters: {} as never,
+-					deferral: presenter
+-						? {
+-								handlerId: "dev.example.question",
+-								handlerVersion: 1,
+-								resumableHandlerVersions: [1],
+-								resolve: async () => ({ status: "deferred", correlationId: "request-21" }),
+-								presenter,
+-							}
+-						: undefined,
+-					execute: async () => ({ content: [], details: {} }),
+-				}) as ToolDefinition,
+-			extensionRunner: { createContext: () => extensionContext },
+-		},
+-		sessionManager: { getLeafId: () => "leaf-21" },
+-		showDeferredInspector: vi.fn(async () => {}),
+-		showExtensionError: vi.fn(),
+-	};
+-}
+ 
+ describe("regression #21: interactive deferred presenter selection", () => {
+ 	beforeAll(() => initTheme("dark"));
+@@ -107,35 +57,4 @@ describe("regression #21: interactive deferred presenter selection", () => {
+ 		expect(stripAnsi(owner.render(100).join("\n"))).toContain("Package waiting");
+ 		expect(stripAnsi(sibling.render(100).join("\n"))).toContain("Held—not executed");
+ 	});
+-
+-	it("opens a compatible package presenter once for reconstructed waiting state", async () => {
+-		const presenter = vi.fn(async () => {});
+-		const context = contextFor(presenter);
+-
+-		await presentDeferredBatch.call(context);
+-		await presentDeferredBatch.call(context);
+-
+-		expect(presenter).toHaveBeenCalledTimes(1);
+-		expect(presenter).toHaveBeenCalledWith(SNAPSHOT, expect.any(Object));
+-		expect(context.showDeferredInspector).not.toHaveBeenCalled();
+-
+-		context.session.deferredBatch = undefined;
+-		await presentDeferredBatch.call(context);
+-		context.session.deferredBatch = SNAPSHOT;
+-		await presentDeferredBatch.call(context);
+-		expect(presenter).toHaveBeenCalledTimes(2);
+-	});
+-
+-	it("falls back to the generic inspector when presentation is missing or fails", async () => {
+-		const missing = contextFor();
+-		await presentDeferredBatch.call(missing);
+-		expect(missing.showDeferredInspector).toHaveBeenCalledTimes(1);
+-
+-		const failure = contextFor(async () => {
+-			throw new Error("presenter failed");
+-		});
+-		await presentDeferredBatch.call(failure);
+-		expect(failure.showExtensionError).toHaveBeenCalledWith("question", "presenter failed");
+-		expect(failure.showDeferredInspector).toHaveBeenCalledTimes(1);
+-	});
+ });
+diff --git a/packages/coding-agent/test/suite/regressions/22-deferred-tool-registration.test.ts b/packages/coding-agent/test/suite/regressions/22-deferred-tool-registration.test.ts
+index 211bfef5..ba6d67c4 100644
+--- a/packages/coding-agent/test/suite/regressions/22-deferred-tool-registration.test.ts
++++ b/packages/coding-agent/test/suite/regressions/22-deferred-tool-registration.test.ts
+@@ -77,6 +77,10 @@ describe("deferred tool registration", () => {
+ 			`{ handlerId: "dev.example.wait", handlerVersion: 1, resumableHandlerVersions: [1], presenter: {}, resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
+ 			"deferral.presenter must be a function",
+ 		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 1, resumableHandlerVersions: [1], summary: "waiting", resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.summary must be a function",
++		],
+ 	])("rejects invalid capability %s", async (deferralSource, expectedMessage) => {
+ 		const result = await loadWithDeferral(deferralSource);
+ 
+@@ -133,6 +137,7 @@ describe("deferred tool registration", () => {
+ 			inspectAvailability: () => ({ status: "available" }),
+ 			resolve: async () => ({ status: "deferred", correlationId: "1" }),
+ 			presenter: async () => {},
++			summary: async () => "Waiting for a durable response",
+ 		}`);
+ 
+ 		expect(result.errors).toEqual([]);
+diff --git a/packages/coding-agent/test/suite/regressions/49-deferred-presentation.test.ts b/packages/coding-agent/test/suite/regressions/49-deferred-presentation.test.ts
+new file mode 100644
+index 00000000..545e9678
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/49-deferred-presentation.test.ts
+@@ -0,0 +1,389 @@
++import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
++import type {
++	DeferredBatch,
++	DeferredToolPresenter,
++	DeferredToolSummary,
++	ExtensionContext,
++	ToolDefinition,
++} from "../../../src/index.ts";
++import type {
++	DeferredAffordance,
++	DeferredPresentationHost,
++} from "../../../src/modes/interactive/deferred-presentation.ts";
++import {
++	DeferredPresentationController,
++	parseDeferredCommand,
++} from "../../../src/modes/interactive/deferred-presentation.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++let agentHarness: Harness;
++
++beforeAll(async () => {
++	agentHarness = await createHarness();
++});
++
++afterAll(() => agentHarness.cleanup());
++
++function snapshot(id: string, availability: DeferredBatch["availability"] = { status: "available" }): DeferredBatch {
++	return {
++		kind: "batch",
++		sessionId: "session-49",
++		assistantEntryId: `assistant-${id}`,
++		ownerCallId: `call-${id}`,
++		calls: [{ toolCallId: `call-${id}`, toolName: "question", result: "missing" }],
++		phase: "deferred",
++		correlationId: `request-${id}`,
++		availability,
++	};
++}
++
++function tool(presenter?: DeferredToolPresenter, summary?: DeferredToolSummary): ToolDefinition {
++	return {
++		name: "question",
++		label: "Question",
++		description: "Question",
++		parameters: {} as never,
++		deferral: {
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++			resumableHandlerVersions: [1],
++			resolve: async () => ({ status: "deferred", correlationId: "request" }),
++			presenter,
++			summary,
++		},
++		execute: async () => ({ content: [], details: {} }),
++	};
++}
++
++function harness(
++	options: {
++		initial?: DeferredBatch;
++		presenter?: DeferredToolPresenter;
++		summary?: DeferredToolSummary;
++		definition?: ToolDefinition;
++	} = {},
++) {
++	let current = options.initial ?? snapshot("one");
++	const affordances: Array<DeferredAffordance | undefined> = [];
++	const host: DeferredPresentationHost = {
++		getSnapshot: () => current,
++		getPresentationKey: (value) =>
++			value.kind === "batch" ? `${value.assistantEntryId}:branch` : `${value.code}:branch`,
++		getToolDefinition: () => options.definition ?? tool(options.presenter, options.summary),
++		createPresenterContext: () => agentHarness.session.extensionRunner.createContext() as ExtensionContext,
++		createSummaryContext: () => ({
++			cwd: agentHarness.tempDir,
++			sessionManager: agentHarness.sessionManager,
++		}),
++		setAffordance: (affordance) => affordances.push(affordance),
++		dismissFullSurfaces: vi.fn(),
++		showInspector: vi.fn(async () => {}),
++		showNoDeferred: vi.fn(),
++		showError: vi.fn(),
++	};
++	const controller = new DeferredPresentationController(host);
++	return {
++		controller,
++		host,
++		affordances,
++		setSnapshot(value: DeferredBatch | undefined) {
++			current = value as DeferredBatch;
++		},
++	};
++}
++
++function latestAffordance(values: Array<DeferredAffordance | undefined>): DeferredAffordance | undefined {
++	return values.at(-1);
++}
++
++describe("deferred presentation controller", () => {
++	it("routes /deferred to package presentation and /deferred inspect to core inspection", () => {
++		expect(parseDeferredCommand("/deferred")).toBe("present");
++		expect(parseDeferredCommand("/deferred inspect")).toBe("inspect");
++		expect(parseDeferredCommand("/deferred unknown")).toBeUndefined();
++	});
++
++	it("hides the affordance while the package presenter owns input and restores package text after dismissal", async () => {
++		let dismiss: (() => void) | undefined;
++		const presenter = vi.fn(
++			() =>
++				new Promise<void>((resolve) => {
++					dismiss = resolve;
++				}),
++		);
++		const summary = vi.fn(() => "Two questions need Responses");
++		const state = harness({ presenter, summary });
++
++		await state.controller.stateChanged();
++		expect(latestAffordance(state.affordances)).toEqual({
++			kind: "package",
++			text: "Two questions need Responses",
++		});
++
++		const opening = state.controller.present();
++		await vi.waitFor(() => expect(presenter).toHaveBeenCalledOnce());
++		expect(latestAffordance(state.affordances)).toBeUndefined();
++
++		dismiss?.();
++		await opening;
++		expect(latestAffordance(state.affordances)).toEqual({
++			kind: "package",
++			text: "Two questions need Responses",
++		});
++		expect(state.host.showInspector).not.toHaveBeenCalled();
++	});
++
++	it("routes normal opening to the package presenter and explicit inspection to core", async () => {
++		const presenter = vi.fn(async () => {});
++		const state = harness({ presenter, summary: () => "Question waiting" });
++
++		await state.controller.present();
++		await state.controller.inspect();
++
++		expect(presenter).toHaveBeenCalledOnce();
++		expect(state.host.showInspector).toHaveBeenCalledOnce();
++	});
++
++	it.each([
++		["missing", undefined],
++		[
++			"unavailable",
++			tool(
++				vi.fn(async () => {}),
++				() => "Hidden",
++			),
++		],
++	])("uses the core inspector and generic affordance when the presenter is %s", async (kind, definition) => {
++		const initial =
++			kind === "unavailable"
++				? snapshot("one", {
++						status: "unavailable",
++						reasons: [{ code: "tool_unavailable", message: "Unavailable" }],
++					})
++				: snapshot("one");
++		const state = harness({
++			initial,
++			definition: definition ?? tool(undefined, () => "Hidden"),
++		});
++
++		await state.controller.present();
++
++		expect(state.host.showInspector).toHaveBeenCalledOnce();
++		expect(latestAffordance(state.affordances)).toEqual({ kind: "generic", snapshot: initial });
++	});
++
++	it("falls back to the core inspector and generic affordance after a presenter throws", async () => {
++		const presenter = vi.fn(async () => {
++			throw new Error("presenter failed");
++		});
++		const state = harness({ presenter, summary: () => "Must not render" });
++
++		await state.controller.present();
++		await state.controller.present({ force: true });
++
++		expect(presenter).toHaveBeenCalledOnce();
++		expect(state.host.showInspector).toHaveBeenCalledTimes(2);
++		expect(state.host.showError).toHaveBeenCalledWith("question", "presenter failed");
++		expect(latestAffordance(state.affordances)).toEqual({
++			kind: "generic",
++			snapshot: snapshot("one"),
++		});
++
++		state.controller.reset();
++		await state.controller.present({ force: true });
++		expect(presenter).toHaveBeenCalledTimes(2);
++	});
++
++	it("does not open a fallback inspector for a presenter failure from a replaced batch", async () => {
++		let rejectFirst: ((error: Error) => void) | undefined;
++		const presenter = vi.fn((value: DeferredBatch) => {
++			if (value.correlationId !== "request-one") return Promise.resolve();
++			return new Promise<void>((_resolve, reject) => {
++				rejectFirst = reject;
++			});
++		});
++		const state = harness({ presenter, summary: (value) => `${value.correlationId} waiting` });
++
++		const firstOpening = state.controller.present();
++		await vi.waitFor(() => expect(presenter).toHaveBeenCalledOnce());
++		state.setSnapshot(snapshot("two"));
++		await state.controller.stateChanged();
++		rejectFirst?.(new Error("stale presenter failed"));
++		await firstOpening;
++
++		expect(state.host.showInspector).not.toHaveBeenCalled();
++		await state.controller.present();
++		expect(presenter).toHaveBeenCalledTimes(2);
++	});
++
++	it("dismisses an open surface when core deferred state disappears", async () => {
++		let dismiss: (() => void) | undefined;
++		const state = harness({
++			presenter: () =>
++				new Promise<void>((resolve) => {
++					dismiss = resolve;
++				}),
++		});
++
++		const opening = state.controller.present();
++		await vi.waitFor(() => expect(dismiss).toBeTypeOf("function"));
++		state.setSnapshot(undefined);
++		await state.controller.stateChanged();
++
++		expect(state.host.dismissFullSurfaces).toHaveBeenCalledOnce();
++		expect(latestAffordance(state.affordances)).toBeUndefined();
++		dismiss?.();
++		await opening;
++	});
++
++	it("tracks shortcut-opened deferred surfaces against core state", async () => {
++		const state = harness();
++		state.controller.surfaceOpened(true);
++		state.setSnapshot(undefined);
++
++		await state.controller.stateChanged();
++
++		expect(state.host.dismissFullSurfaces).toHaveBeenCalledOnce();
++		await state.controller.surfaceClosed();
++	});
++
++	it("uses generic text when package summary is absent, malformed, or throws", async () => {
++		const absent = harness({ presenter: async () => {} });
++		await absent.controller.stateChanged();
++		expect(latestAffordance(absent.affordances)).toEqual({ kind: "generic", snapshot: snapshot("one") });
++
++		const malformed = harness({ presenter: async () => {}, summary: (() => 42) as never });
++		await malformed.controller.stateChanged();
++		expect(latestAffordance(malformed.affordances)).toEqual({ kind: "generic", snapshot: snapshot("one") });
++
++		const failure = harness({
++			presenter: async () => {},
++			summary: () => {
++				throw new Error("summary failed");
++			},
++		});
++		await failure.controller.stateChanged();
++		expect(failure.host.showError).toHaveBeenCalledWith("question", "summary failed");
++		expect(latestAffordance(failure.affordances)).toEqual({ kind: "generic", snapshot: snapshot("one") });
++	});
++
++	it("keeps the affordance hidden until nested consecutive-batch surfaces both close", async () => {
++		const state = harness({ presenter: async () => {}, summary: () => "Question waiting" });
++		await state.controller.stateChanged();
++
++		state.controller.surfaceOpened();
++		state.controller.surfaceOpened();
++		expect(latestAffordance(state.affordances)).toBeUndefined();
++
++		await state.controller.surfaceClosed();
++		expect(latestAffordance(state.affordances)).toBeUndefined();
++
++		await state.controller.surfaceClosed();
++		expect(latestAffordance(state.affordances)).toEqual({ kind: "package", text: "Question waiting" });
++	});
++
++	it("replaces an open presenter with a consecutive batch without overlapping surfaces", async () => {
++		const dismissals: Array<() => void> = [];
++		let activePresenters = 0;
++		let maximumActivePresenters = 0;
++		const presenter = vi.fn(async () => {
++			activePresenters += 1;
++			maximumActivePresenters = Math.max(maximumActivePresenters, activePresenters);
++			await new Promise<void>((resolve) => {
++				dismissals.push(resolve);
++			});
++			activePresenters -= 1;
++		});
++		const state = harness({ presenter, summary: (value) => `${value.correlationId} waiting` });
++
++		const opening = state.controller.present();
++		await vi.waitFor(() => expect(presenter).toHaveBeenCalledTimes(1));
++		state.setSnapshot(snapshot("two"));
++		await state.controller.stateChanged();
++
++		expect(state.host.dismissFullSurfaces).toHaveBeenCalledOnce();
++		expect(presenter).toHaveBeenCalledTimes(1);
++		expect(latestAffordance(state.affordances)).toBeUndefined();
++		dismissals[0]?.();
++		await vi.waitFor(() => expect(presenter).toHaveBeenCalledTimes(2));
++		expect(maximumActivePresenters).toBe(1);
++		expect(latestAffordance(state.affordances)).toBeUndefined();
++		dismissals[1]?.();
++		await opening;
++		expect(latestAffordance(state.affordances)).toEqual({
++			kind: "package",
++			text: "request-two waiting",
++		});
++	});
++
++	it.each(["response", "interruption", "cancellation", "abandonment"])(
++		"clears the affordance when %s removes the core Deferred Tool Batch",
++		async () => {
++			const state = harness({ presenter: async () => {}, summary: () => "Question waiting" });
++			await state.controller.stateChanged();
++			state.setSnapshot(undefined);
++
++			await state.controller.stateChanged();
++
++			expect(latestAffordance(state.affordances)).toBeUndefined();
++		},
++	);
++
++	it("clears from core state and ignores a stale summary from the previous batch", async () => {
++		let resolveFirst: ((text: string) => void) | undefined;
++		const summary = vi.fn((value: DeferredBatch) => {
++			if (value.correlationId === "request-one") {
++				return new Promise<string>((resolve) => {
++					resolveFirst = resolve;
++				});
++			}
++			return "Second question waiting";
++		});
++		const state = harness({ presenter: async () => {}, summary });
++
++		const firstRefresh = state.controller.stateChanged();
++		expect(latestAffordance(state.affordances)).toEqual({ kind: "generic", snapshot: snapshot("one") });
++		state.setSnapshot(snapshot("two"));
++		await state.controller.stateChanged();
++		expect(latestAffordance(state.affordances)).toEqual({
++			kind: "package",
++			text: "Second question waiting",
++		});
++
++		resolveFirst?.("Stale first question");
++		await firstRefresh;
++		expect(latestAffordance(state.affordances)).toEqual({
++			kind: "package",
++			text: "Second question waiting",
++		});
++
++		state.setSnapshot(undefined);
++		await state.controller.stateChanged();
++		expect(latestAffordance(state.affordances)).toBeUndefined();
++	});
++
++	it("does not report a summary failure from a replaced batch", async () => {
++		let rejectFirst: ((error: Error) => void) | undefined;
++		const summary = vi.fn((value: DeferredBatch) => {
++			if (value.correlationId === "request-one") {
++				return new Promise<string>((_resolve, reject) => {
++					rejectFirst = reject;
++				});
++			}
++			return "Second question waiting";
++		});
++		const state = harness({ presenter: async () => {}, summary });
++
++		const firstRefresh = state.controller.stateChanged();
++		state.setSnapshot(snapshot("two"));
++		await state.controller.stateChanged();
++		rejectFirst?.(new Error("stale summary failed"));
++		await firstRefresh;
++
++		expect(state.host.showError).not.toHaveBeenCalled();
++		expect(latestAffordance(state.affordances)).toEqual({
++			kind: "package",
++			text: "Second question waiting",
++		});
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/49-deferred-surface-lifecycle.test.ts b/packages/coding-agent/test/suite/regressions/49-deferred-surface-lifecycle.test.ts
+new file mode 100644
+index 00000000..796f53e3
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/49-deferred-surface-lifecycle.test.ts
+@@ -0,0 +1,117 @@
++import { afterAll, beforeAll, expect, test, vi } from "vitest";
++import { Container } from "../../../../tui/src/tui.ts";
++import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
++import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++let agentHarness: Harness;
++
++beforeAll(async () => {
++	agentHarness = await createHarness();
++	initTheme("dark");
++});
++
++afterAll(() => agentHarness.cleanup());
++
++function customSurfaceFixture(onSurfaceClosed: () => void = () => {}) {
++	const dismissers = new Set<() => void>();
++	const editor = {
++		focused: false,
++		getText: () => "draft",
++		setText: vi.fn(),
++		render: () => ["EDITOR"],
++		invalidate: () => {},
++	};
++	return {
++		session: agentHarness.session,
++		activeCustomSurfaceDismissers: dismissers,
++		trackDeferredSurfaceDismisser: (dismiss: () => void) => {
++			dismissers.add(dismiss);
++			return true;
++		},
++		deferredPresentation: {
++			hasActiveSurface: () => true,
++			shouldRetireActiveSurface: () => false,
++			surfaceOpened: vi.fn(),
++			surfaceClosed: vi.fn(async () => onSurfaceClosed()),
++		},
++		editor,
++		editorContainer: new Container(),
++		keybindings: {},
++		ui: { setFocus: vi.fn(), requestRender: vi.fn(), hideOverlay: vi.fn() },
++	};
++}
++
++test("restores deferred affordance ownership when a custom factory throws synchronously", async () => {
++	const fakeThis = customSurfaceFixture();
++	type ShowExtensionCustom = (
++		this: typeof fakeThis,
++		factory: () => never,
++		options?: { deferredBatch?: boolean },
++	) => Promise<unknown>;
++	const showExtensionCustom = (
++		InteractiveMode as unknown as { prototype: { showExtensionCustom: ShowExtensionCustom } }
++	).prototype.showExtensionCustom;
++
++	const result = showExtensionCustom.call(
++		fakeThis,
++		() => {
++			throw new Error("factory failed");
++		},
++		{ deferredBatch: true },
++	);
++
++	await expect(result).rejects.toThrow("factory failed");
++	expect(fakeThis.deferredPresentation.surfaceOpened).toHaveBeenCalledOnce();
++	expect(fakeThis.deferredPresentation.surfaceClosed).toHaveBeenCalledOnce();
++});
++
++test("refreshes deferred presentation after the extension consumes a dismissal", async () => {
++	const order: string[] = [];
++	const fakeThis = customSurfaceFixture(() => order.push("surface closed"));
++	type ShowExtensionCustom = <T>(
++		this: typeof fakeThis,
++		factory: (tui: unknown, theme: unknown, keybindings: unknown, done: (result: T) => void) => unknown,
++		options?: { deferredBatch?: boolean },
++	) => Promise<T>;
++	const showExtensionCustom = (
++		InteractiveMode as unknown as { prototype: { showExtensionCustom: ShowExtensionCustom } }
++	).prototype.showExtensionCustom;
++
++	const result = showExtensionCustom.call(
++		fakeThis,
++		(_tui, _theme, _keybindings, done: (result: undefined) => void) => {
++			done(undefined);
++			return { render: () => ["FORM"], invalidate: () => {} };
++		},
++		{ deferredBatch: true },
++	);
++	const dismissal = await result;
++	order.push("extension consumed dismissal");
++	await vi.waitFor(() => expect(fakeThis.deferredPresentation.surfaceClosed).toHaveBeenCalledOnce());
++
++	expect(dismissal).toBeUndefined();
++	expect(order).toEqual(["extension consumed dismissal", "surface closed"]);
++});
++
++test("core dismissal retires the active custom surface", async () => {
++	const fakeThis = customSurfaceFixture();
++	type ShowExtensionCustom = (
++		this: typeof fakeThis,
++		factory: () => unknown,
++		options?: { deferredBatch?: boolean },
++	) => Promise<unknown>;
++	const showExtensionCustom = (
++		InteractiveMode as unknown as { prototype: { showExtensionCustom: ShowExtensionCustom } }
++	).prototype.showExtensionCustom;
++
++	const result = showExtensionCustom.call(fakeThis, () => ({ render: () => ["FORM"], invalidate: () => {} }), {
++		deferredBatch: true,
++	});
++	await vi.waitFor(() => expect(fakeThis.activeCustomSurfaceDismissers.size).toBe(1));
++	for (const dismiss of [...fakeThis.activeCustomSurfaceDismissers]) dismiss();
++
++	await expect(result).resolves.toBeUndefined();
++	await vi.waitFor(() => expect(fakeThis.deferredPresentation.surfaceClosed).toHaveBeenCalledOnce());
++	expect(fakeThis.activeCustomSurfaceDismissers.size).toBe(0);
++});
+-- 
+2.50.1 (Apple Git-155)
+
