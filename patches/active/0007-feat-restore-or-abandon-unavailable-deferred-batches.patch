@@ -1,0 +1,1770 @@
+From 3e1b1fbce50e5fe99a92a1a294ed537952c7d760 Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Tue, 21 Jul 2026 20:45:01 -0400
+Subject: [PATCH] feat: recover or abandon unavailable deferred batches
+
+---
+ packages/agent/src/agent-loop.ts              | 196 ++++++---
+ packages/agent/src/types.ts                   |  28 +-
+ packages/agent/test/agent-loop.test.ts        |   2 +
+ .../coding-agent/src/core/agent-session.ts    |  81 +++-
+ .../coding-agent/src/core/deferred-batch.ts   | 156 +++++++-
+ .../src/core/extensions/runner.ts             |   5 +
+ .../coding-agent/src/core/extensions/types.ts |  11 +-
+ packages/coding-agent/src/core/index.ts       |   5 +-
+ .../coding-agent/src/core/session-manager.ts  |  99 ++++-
+ .../src/core/tools/tool-definition-wrapper.ts |   6 +
+ packages/coding-agent/src/index.ts            |   7 +-
+ .../src/modes/interactive/interactive-mode.ts |   1 +
+ .../test/suite/agent-session-deferred.test.ts |   1 +
+ .../test/suite/deferred-tool-batch-fixture.ts |  39 +-
+ .../15-atomic-tool-batches.test.ts            |   5 +-
+ .../16-idempotent-deferred-recovery.test.ts   |  14 +
+ .../17-unavailable-deferred-recovery.test.ts  | 375 ++++++++++++++++++
+ .../18-deferred-branches-compaction.test.ts   |   1 +
+ .../test/trigger-compact-extension.test.ts    |   2 +
+ 19 files changed, 919 insertions(+), 115 deletions(-)
+ create mode 100644 packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts
+
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index 74cd6f0c..12751b5f 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -197,66 +197,103 @@ export async function runAgentLoopResume(
+ 		: undefined;
+ 	const capability = ownerTool?.deferral;
+ 	const isPersisted = deferred.correlationId !== undefined;
+-	if (
+-		!ownerCall ||
+-		!ownerTool ||
+-		!capability ||
+-		(isPersisted &&
+-			(capability.handlerId !== deferred.handlerId ||
+-				!capability.resumableHandlerVersions.includes(deferred.handlerVersion)))
+-	) {
++	const compatibleOwner =
++		ownerCall !== undefined &&
++		ownerTool !== undefined &&
++		capability !== undefined &&
++		(!isPersisted ||
++			(deferred.protocolVersion === TOOL_DEFERRAL_PROTOCOL_VERSION &&
++				capability.handlerId === deferred.handlerId &&
++				capability.resumableHandlerVersions.includes(deferred.handlerVersion)));
++	if (!compatibleOwner && !deferred.abandonment) {
+ 		throw new Error(`Deferred owner call ${deferred.ownerCallId} is unavailable`);
+ 	}
+ 
+-	const ownerPreparation = prevalidateToolCall(currentContext, ownerCall);
++	let ownerPreparation: PreparedToolCall | undefined;
++	if (compatibleOwner) {
++		try {
++			ownerPreparation = prevalidateToolCall(currentContext, ownerCall);
++		} catch (error) {
++			if (!deferred.abandonment) throw error;
++		}
++	}
+ 
+ 	await emit({ type: "agent_start" });
+-	const resolution = await invokeToolDeferralResolver(
+-		capability,
+-		deferred.interruption
+-			? {
+-					operation: "interrupt",
+-					provenance: deferred.interruption.provenance,
+-					toolCallId: ownerCall.id,
+-					params: ownerPreparation.args,
+-					persistedHandlerVersion: deferred.handlerVersion,
+-				}
+-			: {
+-					operation: "evaluate",
+-					toolCallId: ownerCall.id,
+-					params: ownerPreparation.args,
+-					persistedHandlerVersion: isPersisted ? deferred.handlerVersion : undefined,
+-				},
+-		signal,
+-	);
+-	if (resolution.status === "deferred") {
+-		if (isPersisted && resolution.correlationId !== deferred.correlationId) {
+-			throw new ToolDeferralResolverError(
+-				`Deferred owner call ${deferred.ownerCallId} returned a conflicting correlation`,
++	let resolution: ToolDeferralResolution | undefined;
++	if (capability && ownerCall && ownerPreparation) {
++		try {
++			resolution = await invokeToolDeferralResolver(
++				capability,
++				deferred.abandonment
++					? {
++							operation: "cancel",
++							reason: deferred.abandonment.reason,
++							toolCallId: ownerCall.id,
++							params: ownerPreparation.args,
++							persistedHandlerVersion: isPersisted ? deferred.handlerVersion : undefined,
++						}
++					: deferred.interruption
++						? {
++								operation: "interrupt",
++								provenance: deferred.interruption.provenance,
++								toolCallId: ownerCall.id,
++								params: ownerPreparation.args,
++								persistedHandlerVersion: deferred.handlerVersion,
++							}
++						: {
++								operation: "evaluate",
++								toolCallId: ownerCall.id,
++								params: ownerPreparation.args,
++								persistedHandlerVersion: isPersisted ? deferred.handlerVersion : undefined,
++							},
++				signal,
+ 			);
++		} catch (error) {
++			if (!deferred.abandonment) throw error;
+ 		}
+-		if (!isPersisted) {
+-			await emit({
+-				type: "tool_batch_deferred",
+-				ownerCallId: deferred.ownerCallId,
+-				heldCallIds: [...deferred.heldCallIds],
+-				correlationId: resolution.correlationId,
+-				protocolVersion: TOOL_DEFERRAL_PROTOCOL_VERSION,
+-				handlerId: capability.handlerId,
+-				handlerVersion: capability.handlerVersion,
+-			});
++	}
++	if (resolution?.status === "deferred") {
++		if (deferred.abandonment) {
++			resolution = undefined;
++		} else {
++			if (isPersisted && resolution.correlationId !== deferred.correlationId) {
++				throw new ToolDeferralResolverError(
++					`Deferred owner call ${deferred.ownerCallId} returned a conflicting correlation`,
++				);
++			}
++			if (!isPersisted) {
++				if (!capability) throw new Error(`Deferred owner call ${deferred.ownerCallId} is unavailable`);
++				await emit({
++					type: "tool_batch_deferred",
++					ownerCallId: deferred.ownerCallId,
++					heldCallIds: [...deferred.heldCallIds],
++					correlationId: resolution.correlationId,
++					protocolVersion: TOOL_DEFERRAL_PROTOCOL_VERSION,
++					handlerId: capability.handlerId,
++					handlerVersion: capability.handlerVersion,
++				});
++			}
++			await emit({ type: "agent_end", messages: newMessages });
++			return "still_deferred";
+ 		}
+-		await emit({ type: "agent_end", messages: newMessages });
+-		return "still_deferred";
+ 	}
+-	if (resolution.status === "unavailable") throw new Error(resolution.reason);
++	if (resolution?.status === "unavailable") {
++		if (!deferred.abandonment) throw new Error(resolution.reason);
++		resolution = undefined;
++	}
+ 	let executed: Extract<ExecutedToolCallBatch, { status: "completed" }>;
+-	if (resolution.disposition === "complete_owner") {
+-		if (!deferred.interruption) {
++	if (!resolution) {
++		if (!deferred.abandonment) throw new Error(`Deferred owner call ${deferred.ownerCallId} is unavailable`);
++		executed = await completeAbandonedToolBatchFallback(missingToolCalls, emit);
++	} else if (resolution.disposition === "complete_owner") {
++		if (!deferred.interruption && !deferred.abandonment) {
+ 			throw new ToolDeferralResolverError(
+-				`Deferred owner call ${deferred.ownerCallId} cannot complete without an Interruption`,
++				`Deferred owner call ${deferred.ownerCallId} cannot complete without an Interruption or Cancellation`,
+ 			);
+ 		}
++		if (!ownerCall || !ownerPreparation) {
++			throw new Error(`Deferred owner call ${deferred.ownerCallId} is unavailable`);
++		}
+ 		executed = await completeInterruptedToolBatch(
+ 			currentContext,
+ 			assistantMessage,
+@@ -266,23 +303,35 @@ export async function runAgentLoopResume(
+ 			config,
+ 			signal,
+ 			emit,
++			deferred.abandonment ? "abandoned" : "interrupted",
+ 		);
+ 	} else {
+-		const preparations = missingToolCalls.map((toolCall) => prevalidateToolCall(currentContext, toolCall));
+-		// Recovery advances one durable append boundary at a time. A persisted
+-		// result must settle before a later call may begin, regardless of the
+-		// ordinary live-batch execution mode.
+-		const batchExecution = await executeToolCallsSequential(
+-			currentContext,
+-			assistantMessage,
+-			missingToolCalls,
+-			config,
+-			signal,
+-			emit,
+-			preparations,
+-		);
+-		if (batchExecution.status !== "completed") throw new Error("Deferred tool batch unexpectedly deferred again");
+-		executed = batchExecution;
++		let preparations: PreparedToolCall[] | undefined;
++		try {
++			preparations = missingToolCalls.map((toolCall) => prevalidateToolCall(currentContext, toolCall));
++		} catch (error) {
++			if (!deferred.abandonment) throw error;
++		}
++		if (!preparations) {
++			executed = await completeAbandonedToolBatchFallback(missingToolCalls, emit);
++		} else {
++			// Recovery advances one durable append boundary at a time. A persisted
++			// result must settle before a later call may begin, regardless of the
++			// ordinary live-batch execution mode.
++			const batchExecution = await executeToolCallsSequential(
++				currentContext,
++				assistantMessage,
++				missingToolCalls,
++				config,
++				signal,
++				emit,
++				preparations,
++			);
++			if (batchExecution.status !== "completed") {
++				throw new Error("Deferred tool batch unexpectedly deferred again");
++			}
++			executed = batchExecution;
++		}
+ 	}
+ 	for (const result of executed.messages) {
+ 		currentContext.messages.push(result);
+@@ -921,6 +970,7 @@ async function completeInterruptedToolBatch(
+ 	config: AgentLoopConfig,
+ 	signal: AbortSignal | undefined,
+ 	emit: AgentEventSink,
++	disposition: "interrupted" | "abandoned" = "interrupted",
+ ): Promise<Extract<ExecutedToolCallBatch, { status: "completed" }>> {
+ 	const messages: ToolResultMessage[] = [];
+ 	for (const toolCall of missingToolCalls) {
+@@ -958,7 +1008,7 @@ async function completeInterruptedToolBatch(
+ 			finalized = {
+ 				toolCall,
+ 				result: createErrorToolResult(
+-					`Tool call "${toolCall.name}" was not executed because the deferred interaction was interrupted.`,
++					`Tool call "${toolCall.name}" was not executed because the deferred interaction was ${disposition}.`,
+ 				),
+ 				isError: true,
+ 			};
+@@ -970,6 +1020,26 @@ async function completeInterruptedToolBatch(
+ 	return { status: "completed", messages, terminate: false };
+ }
+ 
++async function completeAbandonedToolBatchFallback(
++	missingToolCalls: AgentToolCall[],
++	emit: AgentEventSink,
++): Promise<Extract<ExecutedToolCallBatch, { status: "completed" }>> {
++	const messages: ToolResultMessage[] = [];
++	for (const toolCall of missingToolCalls) {
++		const finalized: FinalizedToolCallOutcome = {
++			toolCall,
++			result: createErrorToolResult(
++				`Tool call "${toolCall.name}" was not executed because the deferred interaction was abandoned while compatible package code was unavailable.`,
++			),
++			isError: true,
++		};
++		const message = createToolResultMessage(finalized);
++		await emitToolResultMessage(message, emit);
++		messages.push(message);
++	}
++	return { status: "completed", messages, terminate: false };
++}
++
+ async function executeToolCallsSequential(
+ 	currentContext: AgentContext,
+ 	assistantMessage: AssistantMessage,
+diff --git a/packages/agent/src/types.ts b/packages/agent/src/types.ts
+index 0e38814c..eb5e030f 100644
+--- a/packages/agent/src/types.ts
++++ b/packages/agent/src/types.ts
+@@ -109,9 +109,18 @@ export interface InterruptToolDeferralRequest<TParams = unknown> {
+ 	persistedHandlerVersion: number | undefined;
+ }
+ 
++export interface CancelToolDeferralRequest<TParams = unknown> {
++	operation: "cancel";
++	reason: "abandoned" | "tool_unavailable";
++	toolCallId: string;
++	params: TParams;
++	persistedHandlerVersion: number | undefined;
++}
++
+ export type ToolDeferralRequest<TParams = unknown> =
+ 	| EvaluateToolDeferralRequest<TParams>
+-	| InterruptToolDeferralRequest<TParams>;
++	| InterruptToolDeferralRequest<TParams>
++	| CancelToolDeferralRequest<TParams>;
+ 
+ /** Result of evaluating whether a tool call should execute or defer durably. */
+ export type ToolDeferralResolution =
+@@ -125,29 +134,46 @@ export type DeferredToolBatchResume =
+ 			ownerCallId: string;
+ 			heldCallIds: readonly string[];
+ 			correlationId?: undefined;
++			protocolVersion?: undefined;
+ 			handlerId?: undefined;
+ 			handlerVersion?: undefined;
+ 			interruption?: undefined;
++			abandonment?: { reason: "abandoned" | "tool_unavailable" };
+ 	  }
+ 	| {
+ 			ownerCallId: string;
+ 			heldCallIds: readonly string[];
+ 			correlationId: string;
++			protocolVersion: number;
+ 			handlerId: string;
+ 			handlerVersion: number;
+ 			interruption?: {
+ 				provenance: "new_user_prompt" | "preexisting_user_input";
+ 				messages: readonly AgentMessage[];
+ 			};
++			abandonment?: { reason: "abandoned" | "tool_unavailable" };
+ 	  };
+ 
+ export type DeferredToolBatchResumeStatus = "still_deferred" | "advanced";
+ 
++export interface InspectToolDeferralRequest<TParams = unknown> {
++	toolCallId: string;
++	params: TParams;
++	correlationId: string;
++	persistedHandlerVersion: number;
++}
++
++export type ToolDeferralAvailability =
++	| { status: "available" }
++	| { status: "unavailable"; message: string; details?: Record<string, unknown> };
++
+ /** Versioned capability owned by the tool that may durably defer its call. */
+ export interface AgentToolDeferral<TParams = unknown> {
+ 	handlerId: string;
+ 	handlerVersion: number;
+ 	resumableHandlerVersions: readonly number[];
++	/** Side-effect-free package compatibility check used while reconstructing persisted state. */
++	inspectAvailability?(request: InspectToolDeferralRequest<TParams>): ToolDeferralAvailability;
+ 	resolve(request: ToolDeferralRequest<TParams>, signal?: AbortSignal): Promise<ToolDeferralResolution>;
+ }
+ 
+diff --git a/packages/agent/test/agent-loop.test.ts b/packages/agent/test/agent-loop.test.ts
+index 0b45dad2..90d29d77 100644
+--- a/packages/agent/test/agent-loop.test.ts
++++ b/packages/agent/test/agent-loop.test.ts
+@@ -450,6 +450,7 @@ describe("agentLoop with AgentMessage", () => {
+ 				ownerCallId: "call-1",
+ 				heldCallIds: ["call-1", "call-2"],
+ 				correlationId: "request-1",
++				protocolVersion: 1,
+ 				handlerId: "dev.example.question",
+ 				handlerVersion: 1,
+ 			},
+@@ -554,6 +555,7 @@ describe("agentLoop with AgentMessage", () => {
+ 				ownerCallId: "call-1",
+ 				heldCallIds: ["call-0", "call-1", "call-2"],
+ 				correlationId: "request-1",
++				protocolVersion: 1,
+ 				handlerId: "dev.example.question",
+ 				handlerVersion: 1,
+ 			},
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index b0b50b75..59af4713 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -64,7 +64,12 @@ import {
+ } from "./compaction/index.ts";
+ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+ import {
++	type AbandonDeferredResult,
++	AGENT_SESSION_CAPABILITIES,
++	type AgentSessionCapabilities,
++	type DeferredBatch,
+ 	type DeferredBatchSnapshot,
++	type DeferredOperationResult,
+ 	InvalidDeferredHistoryError,
+ 	type ResumeDeferredResult,
+ 	reconstructDeferredBatch,
+@@ -418,7 +423,7 @@ export class AgentSession {
+ 		// Always subscribe to agent events for internal handling
+ 		// (session persistence, extensions, auto-compaction, retry logic)
+ 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
+-		this.agent.toolDeferralEnabled = this.sessionManager.isPersisted();
++		this.agent.toolDeferralEnabled = this.sessionManager.enableToolDeferralFormat();
+ 		this._installAgentToolHooks();
+ 		this._installAgentNextTurnRefresh();
+ 
+@@ -956,6 +961,11 @@ export class AgentSession {
+ 		return this.agent.state.systemPrompt;
+ 	}
+ 
++	/** Exact process-wide capabilities supported by this AgentSession implementation. */
++	get capabilities(): AgentSessionCapabilities {
++		return AGENT_SESSION_CAPABILITIES;
++	}
++
+ 	/** Neutral deferred tool-batch state reconstructed from the active session branch. */
+ 	get deferredBatch(): DeferredBatchSnapshot | undefined {
+ 		return reconstructDeferredBatch(this.sessionManager, this.agent.state.tools);
+@@ -968,12 +978,53 @@ export class AgentSession {
+ 		if (snapshot.kind === "invalid") throw new InvalidDeferredHistoryError(snapshot);
+ 		if (!this.isIdle)
+ 			throw new Error("Agent is already processing. Wait for completion before resuming deferred work.");
++		if (snapshot.availability.status === "unavailable") {
++			this._isAgentRunActive = true;
++			try {
++				await this._handleAgentEvent({ type: "agent_start" });
++				await this._handleAgentEvent({ type: "agent_end", messages: [] });
++			} finally {
++				await this._emitAgentSettled();
++			}
++			return { status: "unavailable", deferredBatch: this.deferredBatch };
++		}
++		return this._advanceDeferred(snapshot, "resume");
++	}
++
++	/** Explicitly end the active deferred interaction and advance its held batch safely. */
++	async abandonDeferred(): Promise<AbandonDeferredResult> {
++		const snapshot = this.deferredBatch;
++		if (!snapshot) return { status: "none", deferredBatch: undefined };
++		if (snapshot.kind === "invalid") throw new InvalidDeferredHistoryError(snapshot);
++		if (!this.isIdle)
++			throw new Error("Agent is already processing. Wait for completion before abandoning deferred work.");
++		return this._advanceDeferred(snapshot, "abandon");
++	}
++
++	private async _advanceDeferred(
++		snapshot: DeferredBatch,
++		operation: "resume" | "abandon",
++	): Promise<DeferredOperationResult> {
+ 		const marker = this.sessionManager
+ 			.getBranch()
+ 			.find((entry) => entry.type === "tool_batch_deferred" && entry.assistantEntryId === snapshot.assistantEntryId);
+ 		if (snapshot.phase !== "markerless" && (!marker || marker.type !== "tool_batch_deferred")) {
+ 			return { status: "still_deferred", deferredBatch: snapshot };
+ 		}
++		const batch =
++			marker && marker.type === "tool_batch_deferred"
++				? {
++						ownerCallId: marker.ownerCallId,
++						heldCallIds: marker.heldCallIds,
++						correlationId: marker.correlationId,
++						protocolVersion: marker.protocolVersion,
++						handlerId: marker.handlerId,
++						handlerVersion: marker.handlerVersion,
++					}
++				: {
++						ownerCallId: snapshot.ownerCallId,
++						heldCallIds: snapshot.calls.map((call) => call.toolCallId),
++					};
+ 
+ 		this._isAgentRunActive = true;
+ 		let status: "still_deferred" | "advanced";
+@@ -983,23 +1034,17 @@ export class AgentSession {
+ 				status = "advanced";
+ 			} else {
+ 				status = await this.agent.resumeDeferredToolBatch(
+-					marker && marker.type === "tool_batch_deferred"
+-						? {
+-								ownerCallId: marker.ownerCallId,
+-								heldCallIds: marker.heldCallIds,
+-								correlationId: marker.correlationId,
+-								handlerId: marker.handlerId,
+-								handlerVersion: marker.handlerVersion,
+-							}
++					operation === "resume"
++						? batch
+ 						: {
+-								ownerCallId: snapshot.ownerCallId,
+-								heldCallIds: snapshot.calls.map((call) => call.toolCallId),
++								...batch,
++								abandonment: {
++									reason: snapshot.availability.status === "unavailable" ? "tool_unavailable" : "abandoned",
++								},
+ 							},
+ 				);
+ 			}
+-			while (await this._handlePostAgentRun()) {
+-				await this.agent.continue();
+-			}
++			while (await this._handlePostAgentRun()) await this.agent.continue();
+ 		} finally {
+ 			this._systemPromptOverride = undefined;
+ 			this._flushPendingBashMessages();
+@@ -1200,6 +1245,7 @@ export class AgentSession {
+ 				ownerCallId: marker.ownerCallId,
+ 				heldCallIds: marker.heldCallIds,
+ 				correlationId: marker.correlationId,
++				protocolVersion: marker.protocolVersion,
+ 				handlerId: marker.handlerId,
+ 				handlerVersion: marker.handlerVersion,
+ 				interruption: { provenance: "new_user_prompt", messages },
+@@ -1407,7 +1453,12 @@ export class AgentSession {
+ 			preflightResult?.(false);
+ 			throw new InvalidDeferredHistoryError(deferred);
+ 		}
+-		if (deferred?.availability.status === "unavailable") {
++		if (
++			deferred?.availability.status === "unavailable" &&
++			deferred.availability.reasons.some(
++				(reason) => reason.callId === undefined || reason.callId === deferred.ownerCallId,
++			)
++		) {
+ 			preflightResult?.(false);
+ 			throw new AgentSessionError(
+ 				"deferred_unavailable",
+diff --git a/packages/coding-agent/src/core/deferred-batch.ts b/packages/coding-agent/src/core/deferred-batch.ts
+index a92ec92d..2dd1001d 100644
+--- a/packages/coding-agent/src/core/deferred-batch.ts
++++ b/packages/coding-agent/src/core/deferred-batch.ts
+@@ -1,6 +1,21 @@
+ import { type AgentTool, TOOL_DEFERRAL_PROTOCOL_VERSION } from "@earendil-works/pi-agent-core";
+-import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
+-import type { SessionEntry, SessionManager, ToolBatchDeferredEntry } from "./session-manager.ts";
++import { type AssistantMessage, type ToolResultMessage, validateToolArguments } from "@earendil-works/pi-ai";
++import {
++	DEFERRED_SESSION_TYPE,
++	DEFERRED_SESSION_VERSION,
++	type SessionEntry,
++	type SessionManager,
++	type ToolBatchDeferredEntry,
++} from "./session-manager.ts";
++
++export const AGENT_SESSION_CAPABILITIES = Object.freeze({
++	deferredToolBatches: Object.freeze({
++		protocolVersions: Object.freeze([TOOL_DEFERRAL_PROTOCOL_VERSION] as const),
++		operations: Object.freeze(["resume", "abandon"] as const),
++	}),
++});
++
++export type AgentSessionCapabilities = typeof AGENT_SESSION_CAPABILITIES;
+ 
+ export interface DeferredBatchCallSnapshot {
+ 	toolCallId: string;
+@@ -9,10 +24,19 @@ export interface DeferredBatchCallSnapshot {
+ }
+ 
+ export interface DeferredBatchUnavailableReason {
+-	code: "owner_unavailable" | "unsupported_protocol" | "incompatible_handler";
++	code:
++		| "unsupported_session_format"
++		| "owner_unavailable"
++		| "tool_unavailable"
++		| "schema_incompatible"
++		| "unsupported_protocol"
++		| "incompatible_handler"
++		| "package_incompatible"
++		| "policy_blocked";
+ 	message: string;
+ 	callId?: string;
+ 	toolName?: string;
++	details?: Record<string, unknown>;
+ }
+ 
+ export interface DeferredBatch {
+@@ -53,11 +77,14 @@ export class InvalidDeferredHistoryError extends Error {
+ 	}
+ }
+ 
+-export interface ResumeDeferredResult {
++export interface DeferredOperationResult {
+ 	status: "none" | "still_deferred" | "unavailable" | "advanced";
+ 	deferredBatch: DeferredBatchSnapshot | undefined;
+ }
+ 
++export type ResumeDeferredResult = DeferredOperationResult;
++export type AbandonDeferredResult = DeferredOperationResult;
++
+ type AssistantBatch = {
+ 	entryId: string;
+ 	entryIndex: number;
+@@ -235,14 +262,39 @@ function snapshot(
+ 	marker?: ToolBatchDeferredEntry,
+ ): DeferredBatch {
+ 	const recordedCount = batch.calls.filter((call) => results.has(call.id)).length;
+-	let availability: DeferredBatch["availability"] = { status: "available" };
+-	if (marker) {
++	let availability: DeferredBatch["availability"] = sessionManager.supportsToolDeferral()
++		? { status: "available" }
++		: {
++				status: "unavailable",
++				reasons: [
++					{
++						code: "unsupported_session_format",
++						message: "Durable deferral requires the downstream fail-closed session format.",
++						details: {
++							requiredType: DEFERRED_SESSION_TYPE,
++							requiredVersion: DEFERRED_SESSION_VERSION,
++							remedies: ["restore_compatible_session", "abandon"],
++						},
++					},
++				],
++			};
++	if (marker && availability.status === "available") {
+ 		const ownerCall = batch.calls.find((call) => call.id === marker.ownerCallId);
+ 		const owner = ownerCall ? tools.find((tool) => tool.name === ownerCall.name) : undefined;
+ 		if (marker.protocolVersion !== TOOL_DEFERRAL_PROTOCOL_VERSION) {
+ 			availability = {
+ 				status: "unavailable",
+-				reasons: [{ code: "unsupported_protocol", message: "The deferred protocol is not supported." }],
++				reasons: [
++					{
++						code: "unsupported_protocol",
++						message: "The deferred protocol is not supported.",
++						details: {
++							requiredProtocolVersion: marker.protocolVersion,
++							supportedProtocolVersions: [TOOL_DEFERRAL_PROTOCOL_VERSION],
++							remedies: ["restore_compatible_pi", "abandon"],
++						},
++					},
++				],
+ 			};
+ 		} else if (!ownerCall || !owner?.deferral) {
+ 			availability = {
+@@ -253,6 +305,11 @@ function snapshot(
+ 						message: "The tool that owns this deferred interaction is unavailable.",
+ 						callId: marker.ownerCallId,
+ 						...(ownerCall ? { toolName: ownerCall.name } : {}),
++						details: {
++							requiredHandlerId: marker.handlerId,
++							requiredHandlerVersion: marker.handlerVersion,
++							remedies: ["restore_compatible_tool", "abandon"],
++						},
+ 					},
+ 				],
+ 			};
+@@ -268,10 +325,95 @@ function snapshot(
+ 						message: "The deferred interaction handler is incompatible with the persisted request.",
+ 						callId: marker.ownerCallId,
+ 						toolName: ownerCall.name,
++						details: {
++							requiredHandlerId: marker.handlerId,
++							requiredHandlerVersion: marker.handlerVersion,
++							supportedHandlerId: owner.deferral.handlerId,
++							supportedHandlerVersions: [...owner.deferral.resumableHandlerVersions],
++							remedies: ["restore_compatible_handler", "abandon"],
++						},
+ 					},
+ 				],
+ 			};
+ 		}
++		if (availability.status === "available") {
++			const unavailableCalls: DeferredBatchUnavailableReason[] = [];
++			for (const call of batch.calls) {
++				if (results.has(call.id)) continue;
++				const tool = tools.find((candidate) => candidate.name === call.name);
++				if (!tool) {
++					if (call.id !== marker.ownerCallId) {
++						unavailableCalls.push({
++							code: "tool_unavailable",
++							message: `Held tool ${call.name} is not currently active.`,
++							callId: call.id,
++							toolName: call.name,
++							details: { remedies: ["restore_compatible_tool", "abandon"] },
++						});
++					}
++					continue;
++				}
++				try {
++					const preparedArguments = tool.prepareArguments ? tool.prepareArguments(call.arguments) : call.arguments;
++					validateToolArguments(tool, {
++						...call,
++						arguments: preparedArguments as Record<string, unknown>,
++					});
++				} catch {
++					unavailableCalls.push({
++						code: "schema_incompatible",
++						message: `Held tool ${call.name} no longer accepts the persisted call arguments.`,
++						callId: call.id,
++						toolName: call.name,
++						details: { remedies: ["restore_compatible_tool_schema", "abandon"] },
++					});
++				}
++			}
++			if (unavailableCalls.length > 0) {
++				availability = { status: "unavailable", reasons: unavailableCalls };
++			}
++		}
++		const inspectPackageAvailability = owner?.deferral?.inspectAvailability;
++		if (availability.status === "available" && ownerCall && owner && inspectPackageAvailability) {
++			try {
++				const params = owner.prepareArguments ? owner.prepareArguments(ownerCall.arguments) : ownerCall.arguments;
++				const packageAvailability = inspectPackageAvailability({
++					toolCallId: ownerCall.id,
++					params,
++					correlationId: marker.correlationId,
++					persistedHandlerVersion: marker.handlerVersion,
++				});
++				if (packageAvailability.status === "unavailable") {
++					availability = {
++						status: "unavailable",
++						reasons: [
++							{
++								code: "package_incompatible",
++								message: packageAvailability.message,
++								callId: ownerCall.id,
++								toolName: ownerCall.name,
++								details: {
++									...packageAvailability.details,
++									remedies: ["restore_compatible_package", "abandon"],
++								},
++							},
++						],
++					};
++				}
++			} catch {
++				availability = {
++					status: "unavailable",
++					reasons: [
++						{
++							code: "package_incompatible",
++							message: "The deferred package could not inspect its persisted request.",
++							callId: ownerCall.id,
++							toolName: ownerCall.name,
++						},
++					],
++				};
++			}
++		}
+ 	}
+ 	return {
+ 		kind: "batch",
+diff --git a/packages/coding-agent/src/core/extensions/runner.ts b/packages/coding-agent/src/core/extensions/runner.ts
+index 3c320e14..4be53e8f 100644
+--- a/packages/coding-agent/src/core/extensions/runner.ts
++++ b/packages/coding-agent/src/core/extensions/runner.ts
+@@ -6,6 +6,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
+ import type { ImageContent, Model, Provider, ProviderHeaders } from "@earendil-works/pi-ai";
+ import type { KeyId } from "@earendil-works/pi-tui";
+ import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
++import { AGENT_SESSION_CAPABILITIES } from "../deferred-batch.ts";
+ import type { ResourceDiagnostic } from "../diagnostics.ts";
+ import type { KeybindingsConfig } from "../keybindings.ts";
+ import type { ModelRegistry } from "../model-registry.ts";
+@@ -682,6 +683,10 @@ export class ExtensionRunner {
+ 				runner.assertActive();
+ 				return runner.cwd;
+ 			},
++			get capabilities() {
++				runner.assertActive();
++				return AGENT_SESSION_CAPABILITIES;
++			},
+ 			get sessionManager() {
+ 				runner.assertActive();
+ 				return runner.sessionManager;
+diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
+index 3e420b88..6aa97599 100644
+--- a/packages/coding-agent/src/core/extensions/types.ts
++++ b/packages/coding-agent/src/core/extensions/types.ts
+@@ -13,7 +13,9 @@ import type {
+ 	AgentToolDeferral,
+ 	AgentToolResult,
+ 	AgentToolUpdateCallback,
++	InspectToolDeferralRequest,
+ 	ThinkingLevel,
++	ToolDeferralAvailability,
+ 	ToolDeferralRequest,
+ 	ToolDeferralResolution,
+ 	ToolExecutionMode,
+@@ -50,6 +52,7 @@ import type { Static, TSchema } from "typebox";
+ import type { Theme } from "../../modes/interactive/theme/theme.ts";
+ import type { BashResult } from "../bash-executor.ts";
+ import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
++import type { AgentSessionCapabilities } from "../deferred-batch.ts";
+ import type { EventBus } from "../event-bus.ts";
+ import type { ExecOptions, ExecResult } from "../exec.ts";
+ import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
+@@ -314,6 +317,8 @@ export interface ExtensionContext {
+ 	hasUI: boolean;
+ 	/** Current working directory */
+ 	cwd: string;
++	/** Exact deferred-tool-batch protocols and operations supported by this Pi. */
++	capabilities: AgentSessionCapabilities;
+ 	/** Session manager (read-only) */
+ 	sessionManager: ReadonlySessionManager;
+ 	/** Model registry for API key resolution */
+@@ -438,7 +443,11 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
+ }
+ 
+ export interface ToolDeferralDefinition<TParams extends TSchema = TSchema>
+-	extends Omit<AgentToolDeferral<Static<TParams>>, "resolve"> {
++	extends Omit<AgentToolDeferral<Static<TParams>>, "resolve" | "inspectAvailability"> {
++	inspectAvailability?(
++		request: InspectToolDeferralRequest<Static<TParams>>,
++		ctx: ExtensionContext,
++	): ToolDeferralAvailability;
+ 	resolve(
+ 		request: ToolDeferralRequest<Static<TParams>>,
+ 		signal: AbortSignal | undefined,
+diff --git a/packages/coding-agent/src/core/index.ts b/packages/coding-agent/src/core/index.ts
+index d6486606..3566ece0 100644
+--- a/packages/coding-agent/src/core/index.ts
++++ b/packages/coding-agent/src/core/index.ts
+@@ -29,14 +29,17 @@ export {
+ export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+ export type { CompactionResult } from "./compaction/index.ts";
+ export type {
++	AbandonDeferredResult,
++	AgentSessionCapabilities,
+ 	DeferredBatch,
+ 	DeferredBatchCallSnapshot,
+ 	DeferredBatchSnapshot,
+ 	DeferredBatchUnavailableReason,
++	DeferredOperationResult,
+ 	InvalidDeferredBatch,
+ 	ResumeDeferredResult,
+ } from "./deferred-batch.ts";
+-export { InvalidDeferredHistoryError } from "./deferred-batch.ts";
++export { AGENT_SESSION_CAPABILITIES, InvalidDeferredHistoryError } from "./deferred-batch.ts";
+ export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
+ export { areExperimentalFeaturesEnabled } from "./experimental.ts";
+ // Extensions system
+diff --git a/packages/coding-agent/src/core/session-manager.ts b/packages/coding-agent/src/core/session-manager.ts
+index cdc2296d..f5f3c34a 100644
+--- a/packages/coding-agent/src/core/session-manager.ts
++++ b/packages/coding-agent/src/core/session-manager.ts
+@@ -28,16 +28,47 @@ import {
+ } from "./messages.ts";
+ 
+ export const CURRENT_SESSION_VERSION = 3;
++export const DEFERRED_SESSION_TYPE = "dev.taylorrowser.pi-wait-for-user/session" as const;
++export const DEFERRED_SESSION_VERSION = 1;
+ 
+ export interface SessionHeader {
+-	type: "session";
+-	version?: number; // v1 sessions don't have this
++	type: "session" | typeof DEFERRED_SESSION_TYPE;
++	version?: number; // Official v1 sessions don't have this
++	basedOnPiSessionVersion?: number;
+ 	id: string;
+ 	timestamp: string;
+ 	cwd: string;
+ 	parentSession?: string;
+ }
+ 
++function isSessionHeader(entry: { type: string }): entry is SessionHeader {
++	return entry.type === "session" || entry.type === DEFERRED_SESSION_TYPE;
++}
++
++function sessionFormat(header?: SessionHeader): Pick<SessionHeader, "type" | "version" | "basedOnPiSessionVersion"> {
++	return header?.type === DEFERRED_SESSION_TYPE
++		? {
++				type: DEFERRED_SESSION_TYPE,
++				version: DEFERRED_SESSION_VERSION,
++				basedOnPiSessionVersion: CURRENT_SESSION_VERSION,
++			}
++		: { type: "session", version: CURRENT_SESSION_VERSION, basedOnPiSessionVersion: undefined };
++}
++
++function assertSupportedSessionHeader(header: SessionHeader): void {
++	if (header.type === DEFERRED_SESSION_TYPE) {
++		if (header.version !== DEFERRED_SESSION_VERSION || header.basedOnPiSessionVersion !== CURRENT_SESSION_VERSION) {
++			throw new Error(
++				`Unsupported session format ${header.type} version ${String(header.version)} based on Pi session version ${String(header.basedOnPiSessionVersion)}`,
++			);
++		}
++		return;
++	}
++	if ((header.version ?? 1) > CURRENT_SESSION_VERSION) {
++		throw new Error(`Unsupported session version ${String(header.version)}`);
++	}
++}
++
+ export interface NewSessionOptions {
+ 	id?: string;
+ 	parentSession?: string;
+@@ -247,7 +278,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
+ 	let prevId: string | null = null;
+ 
+ 	for (const entry of entries) {
+-		if (entry.type === "session") {
++		if (isSessionHeader(entry)) {
+ 			entry.version = 2;
+ 			continue;
+ 		}
+@@ -261,7 +292,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
+ 			const comp = entry as CompactionEntry & { firstKeptEntryIndex?: number };
+ 			if (typeof comp.firstKeptEntryIndex === "number") {
+ 				const targetEntry = entries[comp.firstKeptEntryIndex];
+-				if (targetEntry && targetEntry.type !== "session") {
++				if (targetEntry && !isSessionHeader(targetEntry)) {
+ 					comp.firstKeptEntryId = targetEntry.id;
+ 				}
+ 				delete comp.firstKeptEntryIndex;
+@@ -273,7 +304,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
+ /** Migrate v2 → v3: rename hookMessage role to custom. Mutates in place. */
+ function migrateV2ToV3(entries: FileEntry[]): void {
+ 	for (const entry of entries) {
+-		if (entry.type === "session") {
++		if (isSessionHeader(entry)) {
+ 			entry.version = 3;
+ 			continue;
+ 		}
+@@ -294,7 +325,8 @@ function migrateV2ToV3(entries: FileEntry[]): void {
+  */
+ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
+ 	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
+-	const version = header?.version ?? 1;
++	if (!header) return false;
++	const version = header.version ?? 1;
+ 
+ 	if (version >= CURRENT_SESSION_VERSION) return false;
+ 
+@@ -562,9 +594,10 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
+ 	// Validate session header
+ 	if (entries.length === 0) return entries;
+ 	const header = entries[0];
+-	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
++	if (!isSessionHeader(header) || typeof (header as { id?: unknown }).id !== "string") {
+ 		return [];
+ 	}
++	assertSupportedSessionHeader(header);
+ 
+ 	return entries;
+ }
+@@ -578,7 +611,8 @@ function parseSessionHeaderCandidate(line: string): SessionHeader | null | undef
+ 	if (!line.trim()) return undefined;
+ 	const entry = parseSessionEntryLine(line);
+ 	if (!entry) return undefined;
+-	if (entry.type !== "session" || typeof (entry as { id?: unknown }).id !== "string") return null;
++	if (!isSessionHeader(entry) || typeof (entry as { id?: unknown }).id !== "string") return null;
++	assertSupportedSessionHeader(entry);
+ 	return entry;
+ }
+ 
+@@ -718,7 +752,8 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
+ 			if (!entry) continue;
+ 
+ 			if (!header) {
+-				if (entry.type !== "session") return null;
++				if (!isSessionHeader(entry)) return null;
++				assertSupportedSessionHeader(entry);
+ 				header = entry;
+ 				continue;
+ 			}
+@@ -925,8 +960,10 @@ export class SessionManager {
+ 				return;
+ 			}
+ 
+-			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
+-			this.sessionId = header?.id ?? createSessionId();
++			const header = this.fileEntries.find(isSessionHeader);
++			if (!header) throw new Error(`Session file is not a valid pi session: ${this.sessionFile}`);
++			assertSupportedSessionHeader(header);
++			this.sessionId = header.id;
+ 
+ 			if (migrateToCurrentVersion(this.fileEntries)) {
+ 				this._rewriteFile();
+@@ -969,13 +1006,34 @@ export class SessionManager {
+ 		return this.sessionFile;
+ 	}
+ 
++	/** Whether this session uses the fail-closed experimental deferred-session format. */
++	supportsToolDeferral(): boolean {
++		return this.fileEntries.find(isSessionHeader)?.type === DEFERRED_SESSION_TYPE;
++	}
++
++	/** Enable the fail-closed experimental format before this session's first append. */
++	enableToolDeferralFormat(): boolean {
++		if (!this.persist) return false;
++		const header = this.fileEntries.find(isSessionHeader);
++		if (!header) return false;
++		if (header.type === DEFERRED_SESSION_TYPE) {
++			assertSupportedSessionHeader(header);
++			return true;
++		}
++		if (this.flushed) return false;
++		header.type = DEFERRED_SESSION_TYPE;
++		header.version = DEFERRED_SESSION_VERSION;
++		header.basedOnPiSessionVersion = CURRENT_SESSION_VERSION;
++		return true;
++	}
++
+ 	private _buildIndex(): void {
+ 		this.byId.clear();
+ 		this.labelsById.clear();
+ 		this.labelTimestampsById.clear();
+ 		this.leafId = null;
+ 		for (const entry of this.fileEntries) {
+-			if (entry.type === "session") continue;
++			if (isSessionHeader(entry)) continue;
+ 			this.byId.set(entry.id, entry);
+ 			this.leafId = entry.id;
+ 			if (entry.type === "label") {
+@@ -1316,8 +1374,7 @@ export class SessionManager {
+ 	 * Get session header.
+ 	 */
+ 	getHeader(): SessionHeader | null {
+-		const h = this.fileEntries.find((e) => e.type === "session");
+-		return h ? (h as SessionHeader) : null;
++		return this.fileEntries.find(isSessionHeader) ?? null;
+ 	}
+ 
+ 	/**
+@@ -1326,7 +1383,7 @@ export class SessionManager {
+ 	 * change the leaf pointer. Entries cannot be modified or deleted.
+ 	 */
+ 	getEntries(): SessionEntry[] {
+-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
++		return this.fileEntries.filter((e): e is SessionEntry => !isSessionHeader(e));
+ 	}
+ 
+ 	/**
+@@ -1460,8 +1517,7 @@ export class SessionManager {
+ 		const newSessionFile = join(this.getSessionDir(), `${fileTimestamp}_${newSessionId}.jsonl`);
+ 
+ 		const header: SessionHeader = {
+-			type: "session",
+-			version: CURRENT_SESSION_VERSION,
++			...sessionFormat(this.getHeader() ?? undefined),
+ 			id: newSessionId,
+ 			timestamp,
+ 			cwd: this.cwd,
+@@ -1567,7 +1623,7 @@ export class SessionManager {
+ 				// authoritative for legacy files with very large headers or prefixes.
+ 				preloadedFileEntries = loadEntriesFromFile(resolvedPath);
+ 				const firstEntry = preloadedFileEntries[0];
+-				header = firstEntry?.type === "session" ? firstEntry : null;
++				header = firstEntry && isSessionHeader(firstEntry) ? firstEntry : null;
+ 			}
+ 		}
+ 		const cwd = cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd();
+@@ -1616,7 +1672,7 @@ export class SessionManager {
+ 			throw new Error(`Cannot fork: source session file is empty or invalid: ${resolvedSourcePath}`);
+ 		}
+ 
+-		const sourceHeader = sourceEntries.find((e) => e.type === "session") as SessionHeader | undefined;
++		const sourceHeader = sourceEntries.find(isSessionHeader);
+ 		if (!sourceHeader) {
+ 			throw new Error(`Cannot fork: source session has no header: ${resolvedSourcePath}`);
+ 		}
+@@ -1637,8 +1693,7 @@ export class SessionManager {
+ 
+ 		// Write new header pointing to source as parent, with updated cwd
+ 		const newHeader: SessionHeader = {
+-			type: "session",
+-			version: CURRENT_SESSION_VERSION,
++			...sessionFormat(sourceHeader),
+ 			id: newSessionId,
+ 			timestamp,
+ 			cwd: resolvedTargetCwd,
+@@ -1648,7 +1703,7 @@ export class SessionManager {
+ 
+ 		// Copy all non-header entries from source
+ 		for (const entry of sourceEntries) {
+-			if (entry.type !== "session") {
++			if (!isSessionHeader(entry)) {
+ 				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+ 			}
+ 		}
+diff --git a/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts b/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts
+index cc14f8ff..8cb2df80 100644
+--- a/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts
++++ b/packages/coding-agent/src/core/tools/tool-definition-wrapper.ts
+@@ -18,6 +18,9 @@ export function wrapToolDefinition<TDetails = unknown>(
+ 					handlerId: definition.deferral.handlerId,
+ 					handlerVersion: definition.deferral.handlerVersion,
+ 					resumableHandlerVersions: definition.deferral.resumableHandlerVersions,
++					inspectAvailability: definition.deferral.inspectAvailability
++						? (request) => definition.deferral!.inspectAvailability!(request, ctxFactory?.() as ExtensionContext)
++						: undefined,
+ 					resolve: (request, signal) =>
+ 						definition.deferral!.resolve(request, signal, ctxFactory?.() as ExtensionContext),
+ 				}
+@@ -54,6 +57,9 @@ export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDef
+ 					handlerId: tool.deferral.handlerId,
+ 					handlerVersion: tool.deferral.handlerVersion,
+ 					resumableHandlerVersions: tool.deferral.resumableHandlerVersions,
++					inspectAvailability: tool.deferral.inspectAvailability
++						? (request) => tool.deferral!.inspectAvailability!(request)
++						: undefined,
+ 					resolve: (request, signal) => tool.deferral!.resolve(request, signal),
+ 				}
+ 			: undefined,
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index 0ed94523..43f681a2 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -50,14 +50,17 @@ export {
+ 	shouldCompact,
+ } from "./core/compaction/index.ts";
+ export type {
++	AbandonDeferredResult,
++	AgentSessionCapabilities,
+ 	DeferredBatch,
+ 	DeferredBatchCallSnapshot,
+ 	DeferredBatchSnapshot,
+ 	DeferredBatchUnavailableReason,
++	DeferredOperationResult,
+ 	InvalidDeferredBatch,
+ 	ResumeDeferredResult,
+ } from "./core/deferred-batch.ts";
+-export { InvalidDeferredHistoryError } from "./core/deferred-batch.ts";
++export { AGENT_SESSION_CAPABILITIES, InvalidDeferredHistoryError } from "./core/deferred-batch.ts";
+ export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
+ // Extension system
+ export type {
+@@ -238,6 +241,8 @@ export {
+ 	CURRENT_SESSION_VERSION,
+ 	type CustomEntry,
+ 	type CustomMessageEntry,
++	DEFERRED_SESSION_TYPE,
++	DEFERRED_SESSION_VERSION,
+ 	type FileEntry,
+ 	getLatestCompactionEntry,
+ 	type ModelChangeEntry,
+diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+index 7a31aa84..54bf831a 100644
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -1771,6 +1771,7 @@ export class InteractiveMode {
+ 			mode: "tui",
+ 			hasUI: true,
+ 			cwd: this.sessionManager.getCwd(),
++			capabilities: this.session.capabilities,
+ 			sessionManager: this.sessionManager,
+ 			modelRegistry: extensionRunner.getModelRegistry(),
+ 			model: this.session.model,
+diff --git a/packages/coding-agent/test/suite/agent-session-deferred.test.ts b/packages/coding-agent/test/suite/agent-session-deferred.test.ts
+index 45e54c53..0aae204b 100644
+--- a/packages/coding-agent/test/suite/agent-session-deferred.test.ts
++++ b/packages/coding-agent/test/suite/agent-session-deferred.test.ts
+@@ -217,6 +217,7 @@ describe("durable tool-batch deferral", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-markerless-session-"));
+ 		roots.push(root);
+ 		const sessionManager = SessionManager.create(root, join(root, "sessions"));
++		sessionManager.enableToolDeferralFormat();
+ 		sessionManager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		const assistantEntryId = sessionManager.appendMessage(
+ 			fauxAssistantMessage(fauxToolCall("question", { question: "Ship?" }, { id: "call-1" }), {
+diff --git a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+index 1bd19d1b..98aa6f27 100644
+--- a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
++++ b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+@@ -19,7 +19,8 @@ type QuestionOutcome = {
+ 	requestId: string;
+ 	outcome:
+ 		| { type: "response"; value: string }
+-		| { type: "interruption"; provenance: "new_user_prompt" | "preexisting_user_input" };
++		| { type: "interruption"; provenance: "new_user_prompt" | "preexisting_user_input" }
++		| { type: "cancellation"; reason: "abandoned" | "tool_unavailable" };
+ };
+ 
+ type RecordResponseResult =
+@@ -65,6 +66,7 @@ export function questionExtension(
+ 		includeOrdinary?: boolean;
+ 		beforeInitialDeferral?: () => Promise<void>;
+ 		onFirstAgentEnd?: () => Promise<void>;
++		supportedPackageVersions?: readonly number[];
+ 	} = {},
+ ): ExtensionFactory {
+ 	return (pi) => {
+@@ -119,6 +121,24 @@ export function questionExtension(
+ 				handlerId: "dev.example.question",
+ 				handlerVersion: 1,
+ 				resumableHandlerVersions: [1],
++				inspectAvailability: ({ correlationId }, ctx) => {
++					const supportedPackageVersions = options.supportedPackageVersions ?? [1];
++					const branch = ctx.sessionManager.getBranch();
++					const request = branch
++						.map((entry) => customData<QuestionInteractionRequest>(entry, requestType))
++						.find((entry) => entry?.requestId === correlationId);
++					const outcome = branch
++						.map((entry) => customData<QuestionOutcome>(entry, outcomeType))
++						.find((entry) => entry?.requestId === correlationId);
++					const requiredPackageVersion = request?.version ?? outcome?.version;
++					return requiredPackageVersion !== undefined && supportedPackageVersions.includes(requiredPackageVersion)
++						? { status: "available" }
++						: {
++								status: "unavailable",
++								message: "The Question package schema is incompatible with the persisted request.",
++								details: { requiredPackageVersion, supportedPackageVersions: [...supportedPackageVersions] },
++							};
++				},
+ 				resolve: async (request, _signal, ctx) => {
+ 					currentBranch = () => ctx.sessionManager.getBranch();
+ 					const branch = currentBranch();
+@@ -169,7 +189,7 @@ export function questionExtension(
+ 					if (outcome?.outcome.type === "response") {
+ 						return { status: "ready", disposition: "execute_batch" };
+ 					}
+-					if (outcome?.outcome.type === "interruption") {
++					if (outcome?.outcome.type === "interruption" || outcome?.outcome.type === "cancellation") {
+ 						return { status: "ready", disposition: "complete_owner" };
+ 					}
+ 					if (!existingInteractionRequest) {
+@@ -192,6 +212,14 @@ export function questionExtension(
+ 						} satisfies QuestionOutcome);
+ 						return { status: "ready", disposition: "complete_owner" };
+ 					}
++					if (request.operation === "cancel") {
++						pi.appendEntry(outcomeType, {
++							version: 1,
++							requestId,
++							outcome: { type: "cancellation", reason: request.reason },
++						} satisfies QuestionOutcome);
++						return { status: "ready", disposition: "complete_owner" };
++					}
+ 					return { status: "deferred", correlationId: requestId };
+ 				},
+ 			},
+@@ -203,7 +231,12 @@ export function questionExtension(
+ 					content: [
+ 						{
+ 							type: "text",
+-							text: outcome.outcome.type === "response" ? outcome.outcome.value : "Left unanswered",
++							text:
++								outcome.outcome.type === "response"
++									? outcome.outcome.value
++									: outcome.outcome.type === "cancellation"
++										? `Cancelled: ${outcome.outcome.reason}`
++										: "Left unanswered",
+ 						},
+ 					],
+ 					details: {},
+diff --git a/packages/coding-agent/test/suite/regressions/15-atomic-tool-batches.test.ts b/packages/coding-agent/test/suite/regressions/15-atomic-tool-batches.test.ts
+index 2d8d6fef..4f6cad8d 100644
+--- a/packages/coding-agent/test/suite/regressions/15-atomic-tool-batches.test.ts
++++ b/packages/coding-agent/test/suite/regressions/15-atomic-tool-batches.test.ts
+@@ -100,7 +100,10 @@ describe("regression #15: atomic deferred tool batches", () => {
+ 		});
+ 		harnesses.push(reopened);
+ 
+-		await expect(reopened.session.resumeDeferred()).rejects.toThrow(/Tool ordinary not found/);
++		expect(await reopened.session.resumeDeferred()).toMatchObject({
++			status: "unavailable",
++			deferredBatch: { availability: { status: "unavailable" } },
++		});
+ 
+ 		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBeforeResume);
+ 		expect(reopened.session.deferredBatch?.phase).toBe("deferred");
+diff --git a/packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts b/packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts
+index bb951e26..f74ea2a0 100644
+--- a/packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts
++++ b/packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts
+@@ -43,6 +43,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-deferred-boundary-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		const assistantEntryId = manager.appendMessage(deferredToolBatchMessage());
+ 		manager.appendCustomEntry("dev.example.question/request", {
+@@ -94,6 +95,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-result-append-failure-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		const executions: string[] = [];
+ 		const controller: InteractionRequestTestController = {};
+ 		const initial = await createHarness({
+@@ -145,6 +147,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-interruption-result-append-failure-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		const executions: string[] = [];
+ 		const harness = await createHarness({
+ 			sessionManager: manager,
+@@ -174,6 +177,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-continuation-append-failure-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		const executions: string[] = [];
+ 		const controller: InteractionRequestTestController = {};
+ 		const initial = await createHarness({
+@@ -223,6 +227,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-interrupted-continuation-failure-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		const executions: string[] = [];
+ 		const initial = await createHarness({
+ 			sessionManager: manager,
+@@ -294,6 +299,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-orphaned-marker-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		manager.appendToolBatchDeferred({
+ 			assistantEntryId: "missing-assistant",
+@@ -320,6 +326,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-conflicting-correlation-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		const firstAssistantId = manager.appendMessage(
+ 			fauxAssistantMessage(fauxToolCall("question", { question: "First?" }, { id: "call-a" }), {
+@@ -367,6 +374,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-multiple-markerless-owners-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		manager.appendMessage(
+ 			fauxAssistantMessage(
+@@ -393,6 +401,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-multiple-markerless-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		for (const callId of ["call-a", "call-b"]) {
+ 			manager.appendMessage(
+@@ -417,6 +426,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-multiple-deferred-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		for (const [callId, requestId] of [
+ 			["call-a", "request-a"],
+@@ -473,6 +483,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-ordinary-duplicate-result-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Run", timestamp: Date.now() });
+ 		manager.appendMessage(
+ 			fauxAssistantMessage(fauxToolCall("ordinary", { question: "Run?" }, { id: "ordinary-call" }), {
+@@ -515,6 +526,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-marker-append-failure-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		const appendMarker = manager.appendToolBatchDeferred.bind(manager);
+ 		manager.appendToolBatchDeferred = () => {
+ 			throw new Error("simulated marker append failure");
+@@ -554,6 +566,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-request-only-recovery-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		const assistantEntryId = manager.appendMessage(deferredToolBatchMessage());
+ 		manager.appendCustomEntry("dev.example.question/request", {
+@@ -584,6 +597,7 @@ describe("regression #16: idempotent deferred recovery", () => {
+ 		const root = mkdtempSync(join(tmpdir(), "pi-markerless-recovery-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.enableToolDeferralFormat();
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		const assistantEntryId = manager.appendMessage(deferredToolBatchMessage());
+ 		const harness = await createHarness({
+diff --git a/packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts b/packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts
+new file mode 100644
+index 00000000..90655b19
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts
+@@ -0,0 +1,375 @@
++import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage } from "@earendil-works/pi-ai";
++import { Type } from "typebox";
++import { afterEach, describe, expect, it } from "vitest";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import {
++	deferredToolBatchMessage,
++	type InteractionRequestTestController,
++	outcomeType,
++	questionExtension,
++} from "../deferred-tool-batch-fixture.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++describe("unavailable deferred-batch recovery", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	it("advertises exact deferred protocol and operation capabilities", async () => {
++		let extensionCapabilities: unknown;
++		const harness = await createHarness({
++			extensionFactories: [
++				(pi) => {
++					pi.on("before_agent_start", (_event, ctx) => {
++						extensionCapabilities = ctx.capabilities;
++					});
++				},
++			],
++		});
++		harnesses.push(harness);
++		harness.setResponses([fauxAssistantMessage("Done")]);
++		await harness.session.prompt("Inspect capabilities");
++		const expected = {
++			deferredToolBatches: { protocolVersions: [1], operations: ["resume", "abandon"] },
++		};
++
++		expect(harness.session.capabilities).toEqual(expected);
++		expect(extensionCapabilities).toEqual(expected);
++	});
++
++	it("writes deferred work under the fail-closed downstream session identity", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-downstream-session-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++
++		await harness.session.prompt("Ask before shipping");
++
++		const [headerLine] = readFileSync(manager.getSessionFile()!, "utf8").split("\n");
++		expect(JSON.parse(headerLine)).toMatchObject({
++			type: "dev.taylorrowser.pi-wait-for-user/session",
++			version: 1,
++			basedOnPiSessionVersion: 3,
++			id: manager.getSessionId(),
++		});
++	});
++
++	it("rejects unsupported downstream and future official session versions before mutation", () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-unsupported-session-"));
++		roots.push(root);
++		for (const [name, header] of [
++			[
++				"downstream",
++				{
++					type: "dev.taylorrowser.pi-wait-for-user/session",
++					version: 2,
++					basedOnPiSessionVersion: 3,
++					id: "unsupported-downstream",
++					timestamp: "2026-01-01T00:00:00.000Z",
++					cwd: root,
++				},
++			],
++			[
++				"official",
++				{
++					type: "session",
++					version: 999,
++					id: "unsupported-official",
++					timestamp: "2026-01-01T00:00:00.000Z",
++					cwd: root,
++				},
++			],
++		] as const) {
++			const sessionFile = join(root, `${name}.jsonl`);
++			const bytes = `${JSON.stringify(header)}\n`;
++			writeFileSync(sessionFile, bytes);
++			expect(() => SessionManager.open(sessionFile)).toThrow(/unsupported session/i);
++			expect(readFileSync(sessionFile, "utf8")).toBe(bytes);
++		}
++	});
++
++	it("keeps the whole batch unavailable when a held sibling is disabled", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-disabled-held-tool-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		harness.session.setActiveToolsByName(["question"]);
++		const bytesBefore = readFileSync(manager.getSessionFile()!, "utf8");
++
++		const snapshot = harness.session.deferredBatch;
++		harness.events.length = 0;
++		expect(snapshot).toMatchObject({
++			kind: "batch",
++			availability: {
++				status: "unavailable",
++				reasons: [
++					{ code: "tool_unavailable", callId: "call-0", toolName: "ordinary" },
++					{ code: "tool_unavailable", callId: "call-2", toolName: "ordinary" },
++				],
++			},
++		});
++		expect(await harness.session.resumeDeferred()).toEqual({ status: "unavailable", deferredBatch: snapshot });
++		expect(harness.events.map((event) => event.type)).toEqual(["agent_start", "agent_end", "agent_settled"]);
++		expect(executions).toEqual([]);
++		expect(harness.getPendingResponseCount()).toBe(0);
++		expect(readFileSync(manager.getSessionFile()!, "utf8")).toBe(bytesBefore);
++
++		harness.session.setActiveToolsByName(["ordinary", "question"]);
++		expect(harness.session.deferredBatch).toMatchObject({ availability: { status: "available" } });
++		expect(readFileSync(manager.getSessionFile()!, "utf8")).toBe(bytesBefore);
++	});
++
++	it("reclassifies package-schema availability after compatible code is restored", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-package-schema-recovery-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const initial = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(initial);
++		initial.setResponses([deferredToolBatchMessage()]);
++		await initial.session.prompt("Ask before shipping");
++		const sessionFile = manager.getSessionFile()!;
++		const bytesBefore = readFileSync(sessionFile, "utf8");
++		initial.cleanup();
++		harnesses.pop();
++
++		const incompatible = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension([], undefined, { supportedPackageVersions: [2] })],
++		});
++		harnesses.push(incompatible);
++		expect(incompatible.session.deferredBatch).toMatchObject({
++			kind: "batch",
++			availability: {
++				status: "unavailable",
++				reasons: [
++					{
++						code: "package_incompatible",
++						details: { requiredPackageVersion: 1, supportedPackageVersions: [2] },
++					},
++				],
++			},
++		});
++		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBefore);
++		incompatible.cleanup();
++		harnesses.pop();
++
++		const restored = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension([], undefined, { supportedPackageVersions: [1] })],
++		});
++		harnesses.push(restored);
++		expect(restored.session.deferredBatch).toMatchObject({ availability: { status: "available" } });
++		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBefore);
++	});
++
++	it("reports changed held-tool schemas without executing or mutating the batch", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-changed-held-schema-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		const question = harness.session.agent.state.tools.find((tool) => tool.name === "question")!;
++		question.parameters = Type.Object({ question: Type.Number() });
++		const bytesBefore = readFileSync(manager.getSessionFile()!, "utf8");
++
++		const snapshot = harness.session.deferredBatch;
++		expect(snapshot).toMatchObject({
++			kind: "batch",
++			availability: {
++				status: "unavailable",
++				reasons: [{ code: "schema_incompatible", callId: "call-1", toolName: "question" }],
++			},
++		});
++		expect(await harness.session.resumeDeferred()).toEqual({ status: "unavailable", deferredBatch: snapshot });
++		expect(readFileSync(manager.getSessionFile()!, "utf8")).toBe(bytesBefore);
++	});
++
++	it("records package Cancellation before completing the owner and abandoning held siblings", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-compatible-abandonment-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		harness.setResponses([fauxAssistantMessage("Continued after abandonment")]);
++
++		expect(await harness.session.abandonDeferred()).toEqual({ status: "advanced", deferredBatch: undefined });
++		expect(await harness.session.abandonDeferred()).toEqual({ status: "none", deferredBatch: undefined });
++		expect(executions).toEqual(["Ship?"]);
++		const branch = manager.getBranch();
++		const cancellationIndex = branch.findIndex(
++			(entry) =>
++				entry.type === "custom" &&
++				entry.customType === outcomeType &&
++				(entry.data as { outcome?: { type?: string } }).outcome?.type === "cancellation",
++		);
++		const results = branch.flatMap((entry, index) =>
++			entry.type === "message" && entry.message.role === "toolResult" ? [{ index, message: entry.message }] : [],
++		);
++		expect(cancellationIndex).toBeGreaterThan(-1);
++		expect(results.map(({ message }) => message.toolCallId)).toEqual(["call-0", "call-1", "call-2"]);
++		expect(results.every(({ index }) => index > cancellationIndex)).toBe(true);
++		expect(results[0].message).toMatchObject({ isError: true });
++		expect(results[1].message).toMatchObject({
++			isError: false,
++			content: [{ type: "text", text: "Cancelled: abandoned" }],
++		});
++		expect(results[2].message).toMatchObject({ isError: true });
++	});
++
++	it("does not overwrite a Response that wins before abandonment", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-response-wins-abandonment-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const controller: InteractionRequestTestController = {};
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions, controller)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		expect(controller.recordResponse?.("Yes")).toMatchObject({ status: "recorded" });
++		harness.session.setActiveToolsByName(["question"]);
++		harness.setResponses([fauxAssistantMessage("Continued with the Response")]);
++
++		expect(await harness.session.abandonDeferred()).toEqual({ status: "advanced", deferredBatch: undefined });
++		expect(executions).toEqual([]);
++		const outcomes = manager
++			.getBranch()
++			.flatMap((entry) =>
++				entry.type === "custom" && entry.customType === outcomeType
++					? [(entry.data as { outcome: { type: string } }).outcome.type]
++					: [],
++			);
++		expect(outcomes).toEqual(["response"]);
++	});
++
++	it("uses core fallback without invoking package cancellation for an unsupported protocol", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-unsupported-protocol-abandonment-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const initial = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(initial);
++		initial.setResponses([deferredToolBatchMessage()]);
++		await initial.session.prompt("Ask before shipping");
++		const sessionFile = manager.getSessionFile()!;
++		initial.cleanup();
++		harnesses.pop();
++		const rewritten = readFileSync(sessionFile, "utf8")
++			.trimEnd()
++			.split("\n")
++			.map((line) => {
++				const entry = JSON.parse(line) as { type: string; protocolVersion?: number };
++				if (entry.type === "tool_batch_deferred") entry.protocolVersion = 99;
++				return JSON.stringify(entry);
++			})
++			.join("\n");
++		writeFileSync(sessionFile, `${rewritten}\n`);
++		const reopened = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(reopened);
++		reopened.setResponses([fauxAssistantMessage("Continued after protocol fallback")]);
++		expect(reopened.session.deferredBatch).toMatchObject({
++			availability: {
++				status: "unavailable",
++				reasons: [
++					{
++						code: "unsupported_protocol",
++						details: { requiredProtocolVersion: 99, supportedProtocolVersions: [1] },
++					},
++				],
++			},
++		});
++
++		expect(await reopened.session.abandonDeferred()).toEqual({ status: "advanced", deferredBatch: undefined });
++		expect(
++			reopened.sessionManager
++				.getBranch()
++				.some(
++					(entry) =>
++						entry.type === "custom" &&
++						entry.customType === outcomeType &&
++						(entry.data as { outcome?: { type?: string } }).outcome?.type === "cancellation",
++				),
++		).toBe(false);
++	});
++
++	it("uses core fallback abandonment when compatible package code is unavailable", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-fallback-abandonment-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const executions: string[] = [];
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension(executions)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		harness.session.setActiveToolsByName([]);
++		harness.setResponses([fauxAssistantMessage("Continued after fallback")]);
++
++		expect(await harness.session.abandonDeferred()).toEqual({ status: "advanced", deferredBatch: undefined });
++		expect(executions).toEqual([]);
++		expect(
++			manager
++				.getBranch()
++				.some(
++					(entry) =>
++						entry.type === "custom" &&
++						entry.customType === outcomeType &&
++						(entry.data as { outcome?: { type?: string } }).outcome?.type === "cancellation",
++				),
++		).toBe(false);
++		const results = manager
++			.getBranch()
++			.flatMap((entry) => (entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : []));
++		expect(results.map((message) => message.toolCallId)).toEqual(["call-0", "call-1", "call-2"]);
++		expect(results.every((message) => message.isError)).toBe(true);
++		expect(results[1].content).toEqual([
++			{
++				type: "text",
++				text: 'Tool call "question" was not executed because the deferred interaction was abandoned while compatible package code was unavailable.',
++			},
++		]);
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts b/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
+index 3c81f0f8..4380e19c 100644
+--- a/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
++++ b/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
+@@ -302,6 +302,7 @@ describe("regression #18: deferred lifecycle through branches and compaction", (
+ 		const root = mkdtempSync(join(tmpdir(), "pi-deferred-branch-request-reuse-"));
+ 		roots.push(root);
+ 		const manager = SessionManager.create(root, join(root, "sessions"));
++		expect(manager.enableToolDeferralFormat()).toBe(true);
+ 		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
+ 		const assistantEntryId = manager.appendMessage(deferredToolBatchMessage());
+ 		manager.appendCustomEntry(requestType, {
+diff --git a/packages/coding-agent/test/trigger-compact-extension.test.ts b/packages/coding-agent/test/trigger-compact-extension.test.ts
+index 80f3d46c..b0d130f9 100644
+--- a/packages/coding-agent/test/trigger-compact-extension.test.ts
++++ b/packages/coding-agent/test/trigger-compact-extension.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, test, vi } from "vitest";
+ import triggerCompactExtension from "../examples/extensions/trigger-compact.ts";
++import { AGENT_SESSION_CAPABILITIES } from "../src/core/deferred-batch.ts";
+ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "../src/core/extensions/index.ts";
+ 
+ function createContext(tokens: number | null, compact = vi.fn()): ExtensionContext {
+@@ -8,6 +9,7 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
+ 		hasUI: false,
+ 		ui: {} as ExtensionContext["ui"],
+ 		cwd: process.cwd(),
++		capabilities: AGENT_SESSION_CAPABILITIES,
+ 		sessionManager: {} as ExtensionContext["sessionManager"],
+ 		modelRegistry: {} as ExtensionContext["modelRegistry"],
+ 		model: undefined,
+-- 
+2.50.1 (Apple Git-155)
+
