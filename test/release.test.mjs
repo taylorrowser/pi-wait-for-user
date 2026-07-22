@@ -33,7 +33,14 @@ after(() => {
 function copyReleaseFixture() {
   const root = mkdtempSync(join(tmpdir(), "pi-release-test-"));
   temporaryRoots.push(root);
-  for (const path of ["releases", "upstream", "patches", "packages/question-tool/package.json"]) {
+  for (const path of [
+    "releases",
+    "upstream",
+    "patches",
+    "packages/question-tool/package.json",
+    "scripts/bootstrap.sh",
+    "scripts/install-binary.sh",
+  ]) {
     cpSync(join(repositoryRoot, path), join(root, path), { recursive: true });
   }
   return root;
@@ -200,6 +207,49 @@ test("bundling refuses a release-candidate report that did not pass", () => {
   assert.match(result.stderr, /has not passed/);
   assert.equal(existsSync(output), false);
 });
+
+for (const {
+  name,
+  script,
+  original,
+  replacement,
+  expectedError,
+} of [
+  {
+    name: "bootstrap release ID",
+    script: "bootstrap.sh",
+    original: `release_id="${activeReleaseId}"`,
+    replacement: `release_id="${activeReleaseId}-stale"`,
+    expectedError: /Bootstrap release ID/,
+  },
+  {
+    name: "binary installer release ID",
+    script: "install-binary.sh",
+    original: `release_id="${activeReleaseId}"`,
+    replacement: `release_id="${activeReleaseId}-stale"`,
+    expectedError: /Binary installer release ID/,
+  },
+  {
+    name: "binary installer Pi version",
+    script: "install-binary.sh",
+    original: `pi_version="${activeManifest.upstream.packageVersion}"`,
+    replacement: `pi_version="${activeManifest.upstream.packageVersion}-stale"`,
+    expectedError: /Binary installer Pi version/,
+  },
+]) {
+  test(`release verification rejects a mismatched ${name}`, () => {
+    const root = copyReleaseFixture();
+    const scriptPath = join(root, "scripts", script);
+    const contents = readFileSync(scriptPath, "utf8");
+    assert.equal(contents.includes(original), true);
+    writeFileSync(scriptPath, contents.replace(original, replacement));
+
+    const result = verify(root);
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, expectedError);
+  });
+}
 
 test("release verification rejects a changed patch", () => {
   const root = copyReleaseFixture();
