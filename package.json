@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test test/*.test.mjs",
+    "test:question-tool": "node --test packages/question-tool/test/*.test.mjs",
+    "typecheck:question-tool": ".work/pi-v0.81.1/node_modules/.bin/tsc -p packages/question-tool/tsconfig.json --noEmit"
   }
 }

@@ -16,6 +16,26 @@ The machine-readable pin is [`upstream/pi.lock.json`](upstream/pi.lock.json):
 The commit, tag, origin URL, package names, and package versions must all match.
 A tracked source change is also rejected before patching.
 
+## Durable Question Tool
+
+[`packages/question-tool`](packages/question-tool) is the first independently
+versioned consumer of the downstream capability. It records package-owned
+Interaction Requests, Responses, Interruptions, and Cancellations around Pi's
+neutral Deferred Tool Batch marker. Its accepted TUI
+supports supplied choices, one inline custom-answer row, multi-question review,
+dismissal, `/q` and `Alt+Q` reopening, and settled history rendering.
+
+The package is loaded separately from the patch:
+
+```bash
+.work/pi-v0.81.1/packages/coding-agent/dist/cli.js \
+  -e ./packages/question-tool
+```
+
+See the [Question Tool README](packages/question-tool/README.md) for its exact
+protocol/handler/schema contract, installation, programmatic SDK/RPC outcome
+seam, interaction behavior, and development commands.
+
 ## Prepare the downstream workspace
 
 Requires Git and Node.js 22.19 or newer.
@@ -39,6 +59,70 @@ To apply the same patch set to an existing clean checkout:
 A version, source, tag, commit, package, or cleanliness mismatch fails before
 any patch is applied. The full sequential series is preflighted away from the
 target, so a later bad patch cannot leave an earlier patch applied there.
+
+## Build and install the patched Pi CLI
+
+`prepare` and `apply` patch source; they do not replace the `pi` executable on
+your PATH. Build the prepared source and link its coding-agent package into the
+currently selected Node installation:
+
+```bash
+(
+  cd .work/pi-v0.81.1
+  npm ci --ignore-scripts
+  npm run hydrate:model-data
+  npm run build:offline
+  cd packages/coding-agent
+  npm link
+)
+
+pi --version
+pi conformance
+```
+
+The version must be `0.81.1`, and conformance must finish with `8/8` checks.
+`npm link` is intentionally a source-backed installation: the global `pi`
+command points into `.work/pi-v0.81.1`, so keep that workspace in place. Run it
+under the same Node installation or version-manager environment in which you
+want `pi` available.
+
+To restore the published unpatched package later:
+
+```bash
+npm unlink --global @earendil-works/pi-coding-agent
+npm install --global @earendil-works/pi-coding-agent@0.81.1
+```
+
+## Install the Question Tool
+
+From this repository root, persistently install the independently versioned
+package into the patched Pi:
+
+```bash
+pi install "$(pwd)/packages/question-tool"
+pi list
+```
+
+`pi list` must show the resolved `packages/question-tool` path. Start `pi`
+normally; the `question` tool is then available in every session. To try it
+without changing settings, use:
+
+```bash
+pi -e "$(pwd)/packages/question-tool"
+```
+
+Remove the persistent package with:
+
+```bash
+pi remove "$(pwd)/packages/question-tool"
+```
+
+The automated installation smoke test performs the link, conformance, package
+installation, discovery, and startup flow under isolated npm and Pi directories:
+
+```bash
+npm run test:question-tool
+```
 
 ## Verify the unmodified baseline
 
