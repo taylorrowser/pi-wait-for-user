@@ -35,9 +35,9 @@
   },
   "questionTool": {
     "name": "@taylorrowser/pi-question-tool",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "manifestPath": "packages/question-tool/package.json",
-    "manifestSha256": "cc3865e0e716c66d29ea2b25f71caaee038cad48d8cb23f3b3a7e1368ab987f8",
+    "manifestSha256": "e090a3e81d36f3e9308716546e9bf77d4c3904f34d3327e852a21983c7388739",
     "coreProtocolVersions": [1],
     "handlerId": "dev.taylorrowser.pi-question-tool.question",
     "handlerVersion": 1,

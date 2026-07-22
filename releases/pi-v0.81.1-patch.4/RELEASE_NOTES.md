@@ -7,6 +7,7 @@ Fail-closed resolver fix for durable human interactivity in Pi.
 - A well-formed `unavailable` result from a live tool-deferral resolver now raises the typed `resolver_error`
 - Live resolver unavailability no longer appends a synthetic assistant failure after an unresolved tool-call batch
 - The session file remains byte-identical after the resolver failure boundary
+- Question Tool `0.1.3` preserves answers submitted from custom input and scopes restored outcomes to the active request identity
 - Existing malformed, thrown, aborted, recovery, and abandonment behavior is unchanged
 - Fast, checksummed precompiled binaries remain available for macOS, Linux, and Windows on ARM64 and x64
 

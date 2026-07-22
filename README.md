@@ -6,7 +6,7 @@ The active release is **`pi-v0.81.1-patch.4`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 - the eleven ordered durable-deferral patches in [`patches/active`](patches/active); and
-- the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.2`.
+- the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.3`.
 
 ## Fast install
 
