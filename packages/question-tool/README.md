@@ -53,6 +53,7 @@ The `question` tool accepts one or more required questions. Each question has co
 - A set requires every answer and reaches an explicit **Review & Submit** screen.
 - Up/Down navigates choices; Left/Right navigates questions.
 - Selecting or typing in the custom row enters editing mode; Left/Right move within its text.
+- Backspace/Delete on a selected custom row enters editing without changing its retained draft; once editing, those keys edit normally.
 - Up leaves custom editing for the preceding supplied choice without deleting the draft.
 - Escape leaves custom editing without deleting its draft.
 - Escape outside editing dismisses presentation without changing lifecycle state.
