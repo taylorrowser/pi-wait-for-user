@@ -1,0 +1,593 @@
+From 1ee793e27a4afe7d7dc79059d2b244b054134f3a Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Tue, 21 Jul 2026 20:30:41 -0400
+Subject: [PATCH] feat(coding-agent): preserve deferred lifecycle across
+ branches
+
+---
+ .../coding-agent/src/core/agent-session.ts    |  38 +-
+ .../coding-agent/src/core/deferred-batch.ts   |  20 +
+ .../test/suite/deferred-tool-batch-fixture.ts |  18 +-
+ .../18-deferred-branches-compaction.test.ts   | 413 ++++++++++++++++++
+ 4 files changed, 486 insertions(+), 3 deletions(-)
+ create mode 100644 packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
+
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index b7986134..b0b50b75 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -110,7 +110,12 @@ import type {
+ 	SessionManager,
+ 	ToolBatchDeferredEntry,
+ } from "./session-manager.ts";
+-import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
++import {
++	CURRENT_SESSION_VERSION,
++	getLatestCompactionEntry,
++	type SessionHeader,
++	sessionEntryToContextMessages,
++} from "./session-manager.ts";
+ import type { SettingsManager } from "./settings-manager.ts";
+ import type { SlashCommandInfo } from "./slash-commands.ts";
+ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+@@ -1951,6 +1956,33 @@ export class AgentSession {
+ 	// Compaction
+ 	// =========================================================================
+ 
++	private _getCompactionPinnedEntryId(): string | undefined {
++		const deferred = this.deferredBatch;
++		return deferred?.kind === "batch" && deferred.phase !== "continuation" ? deferred.assistantEntryId : undefined;
++	}
++
++	private _assertCompactionPinnedTailFits(pathEntries: SessionEntry[], keepRecentTokens: number): void {
++		const pinnedEntryId = this._getCompactionPinnedEntryId();
++		if (!pinnedEntryId) return;
++		const pinnedIndex = pathEntries.findIndex((entry) => entry.id === pinnedEntryId);
++		if (pinnedIndex < 0) return;
++		const pinnedTokens = pathEntries
++			.slice(pinnedIndex)
++			.flatMap(sessionEntryToContextMessages)
++			.reduce((total, message) => total + estimateTokens(message), 0);
++		if (pinnedTokens > keepRecentTokens) {
++			throw new Error("Cannot compact while deferred: the pinned tool batch exceeds the retained context budget");
++		}
++	}
++
++	private _clampCompactionFirstKeptEntryId(pathEntries: SessionEntry[], firstKeptEntryId: string): string {
++		const pinnedEntryId = this._getCompactionPinnedEntryId();
++		if (!pinnedEntryId) return firstKeptEntryId;
++		const ownerIndex = pathEntries.findIndex((entry) => entry.id === pinnedEntryId);
++		const proposedIndex = pathEntries.findIndex((entry) => entry.id === firstKeptEntryId);
++		return ownerIndex >= 0 && (proposedIndex < 0 || proposedIndex > ownerIndex) ? pinnedEntryId : firstKeptEntryId;
++	}
++
+ 	/**
+ 	 * Manually compact the session context.
+ 	 * Aborts current agent operation first.
+@@ -1971,6 +2003,7 @@ export class AgentSession {
+ 
+ 			const pathEntries = this.sessionManager.getBranch();
+ 			const settings = this.settingsManager.getCompactionSettings();
++			this._assertCompactionPinnedTailFits(pathEntries, settings.keepRecentTokens);
+ 
+ 			const preparation = prepareCompaction(pathEntries, settings);
+ 			if (!preparation) {
+@@ -2045,6 +2078,7 @@ export class AgentSession {
+ 				throw new Error("Compaction cancelled");
+ 			}
+ 
++			firstKeptEntryId = this._clampCompactionFirstKeptEntryId(pathEntries, firstKeptEntryId);
+ 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+ 			const newEntries = this.sessionManager.getEntries();
+ 			const sessionContext = this.sessionManager.buildSessionContext();
+@@ -2243,6 +2277,7 @@ export class AgentSession {
+ 			}
+ 
+ 			const pathEntries = this.sessionManager.getBranch();
++			this._assertCompactionPinnedTailFits(pathEntries, settings.keepRecentTokens);
+ 
+ 			const preparation = prepareCompaction(pathEntries, settings);
+ 			if (!preparation) {
+@@ -2330,6 +2365,7 @@ export class AgentSession {
+ 				return false;
+ 			}
+ 
++			firstKeptEntryId = this._clampCompactionFirstKeptEntryId(pathEntries, firstKeptEntryId);
+ 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+ 			const newEntries = this.sessionManager.getEntries();
+ 			const sessionContext = this.sessionManager.buildSessionContext();
+diff --git a/packages/coding-agent/src/core/deferred-batch.ts b/packages/coding-agent/src/core/deferred-batch.ts
+index 939d32ff..a92ec92d 100644
+--- a/packages/coding-agent/src/core/deferred-batch.ts
++++ b/packages/coding-agent/src/core/deferred-batch.ts
+@@ -78,6 +78,24 @@ function invalid(code: InvalidDeferredBatch["code"], message: string): InvalidDe
+ 	return { kind: "invalid", code, message };
+ }
+ 
++function inspectGlobalCorrelations(entries: SessionEntry[]): InvalidDeferredBatch | undefined {
++	const correlationByProvenance = new Map<string, string>();
++	for (const entry of entries) {
++		if (entry.type !== "tool_batch_deferred") continue;
++		const provenance = `${entry.assistantEntryId}\u0000${entry.ownerCallId}`;
++		const correlation = `${entry.handlerId}\u0000${entry.correlationId}`;
++		const existingCorrelation = correlationByProvenance.get(provenance);
++		if (existingCorrelation !== undefined && existingCorrelation !== correlation) {
++			return invalid(
++				"conflicting_correlation",
++				`Deferred owner ${entry.ownerCallId} has a conflicting request mapping in this session`,
++			);
++		}
++		correlationByProvenance.set(provenance, correlation);
++	}
++	return undefined;
++}
++
+ function assistantBatches(branch: SessionEntry[]): Map<string, AssistantBatch> {
+ 	const batches = new Map<string, AssistantBatch>();
+ 	for (let entryIndex = 0; entryIndex < branch.length; entryIndex++) {
+@@ -281,6 +299,8 @@ export function reconstructDeferredBatch(
+ 	sessionManager: SessionManager,
+ 	tools: readonly AgentTool[],
+ ): DeferredBatchSnapshot | undefined {
++	const correlationConflict = inspectGlobalCorrelations(sessionManager.getEntries());
++	if (correlationConflict) return correlationConflict;
+ 	const branch = sessionManager.getBranch();
+ 	const batches = assistantBatches(branch);
+ 	const results = recordedResults(branch);
+diff --git a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+index 25f7f6d2..1bd19d1b 100644
+--- a/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
++++ b/packages/coding-agent/test/suite/deferred-tool-batch-fixture.ts
+@@ -137,14 +137,28 @@ export function questionExtension(
+ 						}
+ 					}
+ 					if (!assistantEntry) throw new Error("owning assistant entry not found");
++					const allMatchingRequests = ctx.sessionManager
++						.getEntries()
++						.map((entry) => customData<QuestionInteractionRequest>(entry, requestType))
++						.filter(
++							(entry): entry is QuestionInteractionRequest =>
++								entry?.assistantEntryId === assistantEntry.id && entry.ownerCallId === request.toolCallId,
++						);
++					if (new Set(allMatchingRequests.map((entry) => entry.requestId)).size > 1) {
++						throw invalidDeferredHistory(`Conflicting Interaction Requests map to owner ${request.toolCallId}`);
++					}
+ 					const matchingRequests = branch
+ 						.map((entry) => customData<QuestionInteractionRequest>(entry, requestType))
+-						.filter((entry) => entry?.ownerCallId === request.toolCallId);
++						.filter(
++							(entry): entry is QuestionInteractionRequest =>
++								entry?.assistantEntryId === assistantEntry.id && entry.ownerCallId === request.toolCallId,
++						);
+ 					if (matchingRequests.length > 1) {
+ 						throw invalidDeferredHistory(`Multiple Interaction Requests map to owner ${request.toolCallId}`);
+ 					}
+ 					const existingInteractionRequest = matchingRequests[0];
+-					const requestId = existingInteractionRequest?.requestId ?? "request-1";
++					const requestId =
++						existingInteractionRequest?.requestId ?? allMatchingRequests[0]?.requestId ?? "request-1";
+ 					const outcomes = branch
+ 						.map((entry) => customData<QuestionOutcome>(entry, outcomeType))
+ 						.filter((entry) => entry?.requestId === requestId);
+diff --git a/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts b/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
+new file mode 100644
+index 00000000..3c81f0f8
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
+@@ -0,0 +1,413 @@
++import { mkdtempSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage, fauxToolCall, type ToolResultMessage } from "@earendil-works/pi-ai";
++import { afterEach, describe, expect, it } from "vitest";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import {
++	deferredToolBatchMessage,
++	type InteractionRequestTestController,
++	outcomeType,
++	questionExtension,
++	requestType,
++} from "../deferred-tool-batch-fixture.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++function toolResult(toolCallId: string, toolName: string): ToolResultMessage {
++	return {
++		role: "toolResult",
++		toolCallId,
++		toolName,
++		content: [{ type: "text", text: `result:${toolCallId}` }],
++		isError: false,
++		timestamp: Date.now(),
++	};
++}
++
++describe("regression #18: deferred lifecycle through branches and compaction", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	it("clamps extension compaction to the unresolved owning assistant entry", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-compaction-pin-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const controller: InteractionRequestTestController = {};
++		const harness = await createHarness({
++			sessionManager: manager,
++			settings: { compaction: { keepRecentTokens: 100 } },
++			extensionFactories: [
++				questionExtension([], controller),
++				(pi) => {
++					pi.on("session_before_compact", ({ preparation }) => ({
++						compaction: {
++							summary: "Compacted before deferred work",
++							firstKeptEntryId: "missing-cut-point",
++							tokensBefore: preparation.tokensBefore,
++						},
++					}));
++				},
++			],
++		});
++		harnesses.push(harness);
++		harness.setResponses([fauxAssistantMessage("Old response ".repeat(200)), deferredToolBatchMessage()]);
++		await harness.session.prompt("Old request");
++		await harness.session.prompt("Ask before shipping");
++		const deferred = harness.session.deferredBatch;
++		expect(deferred?.kind).toBe("batch");
++		if (!deferred || deferred.kind !== "batch") throw new Error("Expected a Deferred Tool Batch");
++
++		const result = await harness.session.compact();
++
++		expect(result.firstKeptEntryId).toBe(deferred.assistantEntryId);
++		expect(manager.getBranch().at(-1)).toMatchObject({
++			type: "compaction",
++			firstKeptEntryId: deferred.assistantEntryId,
++		});
++		expect(
++			harness.session.messages.some((message) => message.role === "assistant" && message.stopReason === "toolUse"),
++		).toBe(true);
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "batch",
++			assistantEntryId: deferred.assistantEntryId,
++			phase: "deferred",
++		});
++
++		controller.recordResponse?.("Yes");
++		harness.setResponses([fauxAssistantMessage("Continued after compaction")]);
++		expect(await harness.session.resumeDeferred()).toEqual({ status: "advanced", deferredBatch: undefined });
++		expect(harness.session.messages.map((message) => message.role)).toEqual([
++			"compactionSummary",
++			"assistant",
++			"toolResult",
++			"toolResult",
++			"toolResult",
++			"assistant",
++		]);
++		expect(harness.session.messages[1]).toMatchObject({ role: "assistant", stopReason: "toolUse" });
++	});
++
++	it("keeps the unresolved owner when using built-in compaction", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-built-in-compaction-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			settings: { compaction: { keepRecentTokens: 100 } },
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		harness.setResponses([fauxAssistantMessage("Old response ".repeat(200)), deferredToolBatchMessage()]);
++		await harness.session.prompt("Old request");
++		await harness.session.prompt("Ask before shipping");
++		const deferred = harness.session.deferredBatch;
++		expect(deferred?.kind).toBe("batch");
++		if (!deferred || deferred.kind !== "batch") throw new Error("Expected a Deferred Tool Batch");
++		harness.setResponses([fauxAssistantMessage("Built-in summary")]);
++
++		const result = await harness.session.compact();
++
++		const compactedBranch = manager.getBranch();
++		expect(compactedBranch.findIndex((entry) => entry.id === result.firstKeptEntryId)).toBeLessThanOrEqual(
++			compactedBranch.findIndex((entry) => entry.id === deferred.assistantEntryId),
++		);
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "batch",
++			assistantEntryId: deferred.assistantEntryId,
++			phase: "deferred",
++		});
++		expect(
++			harness.session.messages.some((message) => message.role === "assistant" && message.stopReason === "toolUse"),
++		).toBe(true);
++	});
++
++	it("follows active-leaf ancestry without making bare tree navigation durable", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-tree-navigation-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		const deferred = harness.session.deferredBatch;
++		expect(deferred?.kind).toBe("batch");
++		if (!deferred || deferred.kind !== "batch") throw new Error("Expected a Deferred Tool Batch");
++		const branch = manager.getBranch();
++		const rootUser = branch.find((entry) => entry.type === "message" && entry.message.role === "user");
++		const marker = branch.find((entry) => entry.type === "tool_batch_deferred");
++		if (!rootUser || !marker) throw new Error("Expected the persisted deferred branch");
++		const sessionFile = manager.getSessionFile()!;
++		const bytesBeforeNavigation = readFileSync(sessionFile, "utf8");
++
++		await harness.session.navigateTree(rootUser.id, { summarize: false });
++		expect(harness.session.deferredBatch).toBeUndefined();
++		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBeforeNavigation);
++
++		await harness.session.navigateTree(marker.id, { summarize: false });
++		expect(harness.session.deferredBatch).toEqual(deferred);
++		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBeforeNavigation);
++
++		await harness.session.navigateTree(rootUser.id, { summarize: false });
++		const reopened = await createHarness({
++			sessionManager: SessionManager.open(sessionFile),
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(reopened);
++		expect(reopened.session.deferredBatch).toEqual(deferred);
++		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBeforeNavigation);
++		expect(
++			manager
++				.getEntries()
++				.some((entry) => entry.type === "custom" && entry.customType === "dev.example.question/outcome"),
++		).toBe(false);
++	});
++
++	it("ignores a terminal outcome after navigating back to its pending ancestor", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-abandoned-outcome-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const controller: InteractionRequestTestController = {};
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([], controller)],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		const marker = manager.getBranch().find((entry) => entry.type === "tool_batch_deferred");
++		if (!marker) throw new Error("Expected a deferred marker");
++		controller.recordResponse?.("Yes");
++		harness.setResponses([fauxAssistantMessage("Continued")]);
++		await harness.session.resumeDeferred();
++		const completedLeafId = manager.getLeafId()!;
++		expect(harness.session.deferredBatch).toBeUndefined();
++
++		await harness.session.navigateTree(marker.id, { summarize: false });
++		expect(harness.session.deferredBatch).toMatchObject({ kind: "batch", phase: "deferred" });
++		const entriesBeforeResume = manager.getEntries();
++		expect(await harness.session.resumeDeferred()).toMatchObject({
++			status: "still_deferred",
++			deferredBatch: { kind: "batch", phase: "deferred" },
++		});
++		expect(manager.getEntries()).toEqual(entriesBeforeResume);
++
++		await harness.session.navigateTree(completedLeafId, { summarize: false });
++		expect(harness.session.deferredBatch).toBeUndefined();
++	});
++
++	it("copies each deferred boundary verbatim into an independent session namespace", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-copy-boundaries-"));
++		roots.push(root);
++		const sessionsDir = join(root, "sessions");
++		const source = SessionManager.create(root, sessionsDir);
++		const userEntryId = source.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		const assistantEntryId = source.appendMessage(deferredToolBatchMessage());
++		source.appendCustomEntry(requestType, {
++			version: 1,
++			requestId: "request-1",
++			assistantEntryId,
++			ownerCallId: "call-1",
++			payload: { question: "Ship?" },
++		});
++		const markerEntryId = source.appendToolBatchDeferred({
++			assistantEntryId,
++			ownerCallId: "call-1",
++			heldCallIds: ["call-0", "call-1", "call-2"],
++			correlationId: "request-1",
++			protocolVersion: 1,
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++		});
++		const outcomeEntryId = source.appendCustomEntry(outcomeType, {
++			version: 1,
++			requestId: "request-1",
++			outcome: { type: "response", value: "Yes" },
++		});
++		const firstResultEntryId = source.appendMessage(toolResult("call-0", "ordinary"));
++		source.appendMessage(toolResult("call-1", "question"));
++		const finalResultEntryId = source.appendMessage(toolResult("call-2", "ordinary"));
++		const continuationEntryId = source.appendMessage(fauxAssistantMessage("Continued"));
++		const sourceFile = source.getSessionFile()!;
++		const sourceSessionId = source.getSessionId();
++		const sourceBytes = readFileSync(sourceFile, "utf8");
++
++		const boundaries: Array<{
++			entryId: string;
++			expected: undefined | { phase: "markerless" | "deferred" | "partial" | "continuation" };
++		}> = [
++			{ entryId: assistantEntryId, expected: { phase: "markerless" } },
++			{ entryId: markerEntryId, expected: { phase: "deferred" } },
++			{ entryId: outcomeEntryId, expected: { phase: "deferred" } },
++			{ entryId: firstResultEntryId, expected: { phase: "partial" } },
++			{ entryId: finalResultEntryId, expected: { phase: "continuation" } },
++			{ entryId: continuationEntryId, expected: undefined },
++		];
++		for (const boundary of boundaries) {
++			const copiedManager = SessionManager.open(sourceFile, sessionsDir);
++			const copiedFile = copiedManager.createBranchedSession(boundary.entryId);
++			expect(copiedFile).toBeDefined();
++			expect(copiedManager.getSessionId()).not.toBe(sourceSessionId);
++			expect(copiedManager.getEntry(boundary.entryId)?.id).toBe(boundary.entryId);
++			const copied = await createHarness({
++				sessionManager: SessionManager.open(copiedFile!),
++				extensionFactories: [questionExtension([])],
++			});
++			harnesses.push(copied);
++			if (boundary.expected) {
++				expect(copied.session.deferredBatch).toMatchObject({
++					kind: "batch",
++					sessionId: copiedManager.getSessionId(),
++					assistantEntryId,
++					ownerCallId: "call-1",
++					...(boundary.expected.phase === "markerless" ? {} : { correlationId: "request-1" }),
++					phase: boundary.expected.phase,
++				});
++			} else {
++				expect(copied.session.deferredBatch).toBeUndefined();
++			}
++		}
++
++		const beforeOwner = SessionManager.open(sourceFile, sessionsDir);
++		beforeOwner.createBranchedSession(userEntryId);
++		expect(beforeOwner.getSessionId()).not.toBe(sourceSessionId);
++		const beforeOwnerHarness = await createHarness({
++			sessionManager: beforeOwner,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(beforeOwnerHarness);
++		expect(beforeOwnerHarness.session.deferredBatch).toBeUndefined();
++
++		const freshManager = SessionManager.open(sourceFile, sessionsDir);
++		freshManager.newSession();
++		const fresh = await createHarness({
++			sessionManager: freshManager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(fresh);
++		expect(freshManager.getSessionId()).not.toBe(sourceSessionId);
++		expect(freshManager.getEntries()).toEqual([]);
++		expect(fresh.session.deferredBatch).toBeUndefined();
++		expect(readFileSync(sourceFile, "utf8")).toBe(sourceBytes);
++	});
++
++	it("reuses the session-local request identity during markerless recovery on another branch", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-branch-request-reuse-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		manager.appendMessage({ role: "user", content: "Ask", timestamp: Date.now() });
++		const assistantEntryId = manager.appendMessage(deferredToolBatchMessage());
++		manager.appendCustomEntry(requestType, {
++			version: 1,
++			requestId: "established-request",
++			assistantEntryId,
++			ownerCallId: "call-1",
++			payload: { question: "Ship?" },
++		});
++		manager.appendToolBatchDeferred({
++			assistantEntryId,
++			ownerCallId: "call-1",
++			heldCallIds: ["call-0", "call-1", "call-2"],
++			correlationId: "established-request",
++			protocolVersion: 1,
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++		});
++		manager.branch(assistantEntryId);
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		expect(harness.session.deferredBatch).toMatchObject({ kind: "batch", phase: "markerless" });
++
++		expect(await harness.session.resumeDeferred()).toMatchObject({
++			status: "still_deferred",
++			deferredBatch: { kind: "batch", phase: "deferred", correlationId: "established-request" },
++		});
++		const activeRequests = manager
++			.getBranch()
++			.filter((entry) => entry.type === "custom" && entry.customType === requestType);
++		expect(activeRequests).toHaveLength(1);
++		expect(activeRequests[0]).toMatchObject({ data: { requestId: "established-request" } });
++	});
++
++	it("reports conflicting owner-to-request mappings across disjoint branches", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-branch-identity-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			extensionFactories: [questionExtension([])],
++		});
++		harnesses.push(harness);
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		const deferred = harness.session.deferredBatch;
++		expect(deferred?.kind).toBe("batch");
++		if (!deferred || deferred.kind !== "batch") throw new Error("Expected a Deferred Tool Batch");
++
++		manager.branch(deferred.assistantEntryId);
++		manager.appendToolBatchDeferred({
++			assistantEntryId: deferred.assistantEntryId,
++			ownerCallId: deferred.ownerCallId,
++			heldCallIds: deferred.calls.map((call) => call.toolCallId),
++			correlationId: "request-2",
++			protocolVersion: 1,
++			handlerId: "dev.example.question",
++			handlerVersion: 1,
++		});
++
++		expect(harness.session.deferredBatch).toMatchObject({
++			kind: "invalid",
++			code: "conflicting_correlation",
++		});
++	});
++
++	it("rejects compaction without mutation when the pinned tail exceeds the retained context budget", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-deferred-compaction-oversized-"));
++		roots.push(root);
++		const manager = SessionManager.create(root, join(root, "sessions"));
++		const harness = await createHarness({
++			sessionManager: manager,
++			settings: { compaction: { keepRecentTokens: 100 } },
++			extensionFactories: [
++				questionExtension([]),
++				(pi) => {
++					pi.on("session_before_compact", ({ preparation }) => ({
++						compaction: {
++							summary: "Must not be saved",
++							firstKeptEntryId: preparation.firstKeptEntryId,
++							tokensBefore: preparation.tokensBefore,
++						},
++					}));
++				},
++			],
++		});
++		harnesses.push(harness);
++		harness.setResponses([
++			fauxAssistantMessage("Old response ".repeat(200)),
++			fauxAssistantMessage(fauxToolCall("question", { question: "Ship? ".repeat(500) }, { id: "call-1" }), {
++				stopReason: "toolUse",
++			}),
++		]);
++		await harness.session.prompt("Old request");
++		await harness.session.prompt("Ask before shipping");
++		const entriesBefore = manager.getEntries();
++
++		await expect(harness.session.compact()).rejects.toThrow(
++			"Cannot compact while deferred: the pinned tool batch exceeds the retained context budget",
++		);
++
++		expect(manager.getEntries()).toEqual(entriesBefore);
++		expect(manager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
++		expect(harness.session.deferredBatch).toMatchObject({ kind: "batch", phase: "deferred" });
++	});
++});
+-- 
+2.50.1 (Apple Git-155)
+
