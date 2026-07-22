@@ -20,7 +20,7 @@ const codingAgentRoot = join(
 );
 
 test("the separately installable package declares its exact durable compatibility contract", () => {
-	assert.deepEqual(manifest.pi.extensions, ["./extensions/index.ts"]);
+	assert.deepEqual(manifest.pi.extensions, ["./extensions/question-tool.ts"]);
 	assert.deepEqual(manifest.piWaitForUser, {
 		upstreamPiVersion: "0.81.1",
 		coreProtocolVersions: [1],
@@ -113,7 +113,7 @@ test("npm pack contains the extension, public contracts, and documentation", () 
 	});
 	assert.equal(result.status, 0, result.stderr);
 	const files = JSON.parse(result.stdout)[0].files.map((file) => file.path);
-	assert.ok(files.includes("extensions/index.ts"));
+	assert.ok(files.includes("extensions/question-tool.ts"));
 	assert.ok(files.includes("src/index.ts"));
 	assert.ok(files.includes("README.md"));
 	assert.ok(files.includes("LICENSE"));

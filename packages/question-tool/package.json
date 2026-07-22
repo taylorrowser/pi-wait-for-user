@@ -1,6 +1,6 @@
 {
 	"name": "@taylorrowser/pi-question-tool",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "A durable Question Tool for the Pi coding agent",
 	"type": "module",
 	"license": "MIT",
@@ -22,7 +22,7 @@
 	],
 	"exports": {
 		".": "./src/index.ts",
-		"./extension": "./extensions/index.ts"
+		"./extension": "./extensions/question-tool.ts"
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*",
@@ -31,7 +31,7 @@
 	},
 	"pi": {
 		"extensions": [
-			"./extensions/index.ts"
+			"./extensions/question-tool.ts"
 		]
 	},
 	"piWaitForUser": {

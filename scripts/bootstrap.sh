@@ -1,25 +1,39 @@
 #!/bin/sh
 set -eu
 
-release_id="pi-v0.81.1-patch.1"
+release_id="pi-v0.81.1-patch.2"
 repository="taylorrowser/pi-wait-for-user"
-asset="pi-wait-for-user-${release_id}.tgz"
 base_url="https://github.com/${repository}/releases/download/${release_id}"
 
-for command in node npm git curl tar; do
+for command in curl tar uname; do
   if ! command -v "$command" >/dev/null 2>&1; then
     echo "pi-wait-for-user: required command not found: $command" >&2
     exit 1
   fi
 done
 
-major=$(node -p 'process.versions.node.split(".")[0]')
-minor=$(node -p 'process.versions.node.split(".")[1]')
-if [ "$major" -lt 22 ] || { [ "$major" -eq 22 ] && [ "$minor" -lt 19 ]; }; then
-  echo "pi-wait-for-user: Node.js 22.19 or newer is required" >&2
-  exit 1
+if [ -n "${PI_WAIT_FOR_USER_PLATFORM:-}" ]; then
+  platform=$PI_WAIT_FOR_USER_PLATFORM
+else
+  case "$(uname -s)" in
+    Darwin) os=darwin ;;
+    Linux) os=linux ;;
+    *) echo "pi-wait-for-user: prebuilt installation supports macOS and Linux" >&2; exit 1 ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) arch=arm64 ;;
+    x86_64|amd64) arch=x64 ;;
+    *) echo "pi-wait-for-user: unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  esac
+  platform="$os-$arch"
 fi
 
+case "$platform" in
+  darwin-arm64|darwin-x64|linux-arm64|linux-x64) ;;
+  *) echo "pi-wait-for-user: unsupported binary platform: $platform" >&2; exit 1 ;;
+esac
+
+asset="pi-wait-for-user-${platform}.tar.gz"
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/pi-wait-for-user.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
@@ -43,4 +57,4 @@ fi
 tar -xzf "$temporary/$asset" -C "$temporary"
 action=${1:-install}
 if [ "$#" -gt 0 ]; then shift; fi
-exec node "$temporary/package/scripts/install.mjs" "$action" "$@"
+exec sh "$temporary/pi-wait-for-user/install.sh" "$action" "$@"

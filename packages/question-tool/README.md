@@ -21,18 +21,18 @@ Handler and protocol compatibility is exact. Restoring this package to an unavai
 The supported release installer builds the exact patched Pi and places this exact Question Tool beside it:
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.1/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.2/install.sh | sh
 pi-wait-for-user --version
 ```
 
-The version must be `0.81.1`. The separate `pi-wait-for-user` launcher verifies the pinned Pi source and this package's compatibility metadata before every startup, then loads the Question Tool automatically. It does not replace an upstream `pi` command or alter existing Pi settings and sessions. See the repository [installation, verification, rollback, and uninstall guide](../../README.md#install).
+The version must be `0.81.1`. The separate `pi-wait-for-user` launcher loads the Question Tool automatically from the precompiled release. Startup identifies the extension as `question-tool.ts`; its model-facing tool name is `question`. The installer does not clone source, require Node/npm/Git, replace an upstream `pi` command, or alter existing Pi settings and sessions. See the repository [installation, verification, rollback, and uninstall guide](../../README.md#fast-install).
 
-The GitHub release also publishes `taylorrowser-pi-question-tool-0.1.0.tgz` as an independently checksummed package artifact. Hosts that already run the exact compatible patch can unpack it and use Pi's normal local-package workflow:
+The GitHub release also publishes `taylorrowser-pi-question-tool-0.1.1.tgz` as an independently checksummed package artifact. Hosts that already run the exact compatible patch can unpack it and use Pi's normal local-package workflow:
 
 ```bash
-mkdir pi-question-tool-0.1.0
-tar -xzf taylorrowser-pi-question-tool-0.1.0.tgz -C pi-question-tool-0.1.0
-pi install "$(pwd)/pi-question-tool-0.1.0/package"
+mkdir pi-question-tool-0.1.1
+tar -xzf taylorrowser-pi-question-tool-0.1.1.tgz -C pi-question-tool-0.1.1
+pi install "$(pwd)/pi-question-tool-0.1.1/package"
 ```
 
 Unpatched Pi lacks protocol v1; the extension detects that absence and does not register `question`.

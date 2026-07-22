@@ -16,6 +16,10 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const binaryPlatforms = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
+const binaryAssetNames = binaryPlatforms.map((platform) =>
+  `pi-wait-for-user-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`,
+);
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -56,6 +60,7 @@ function verifyRelease(root) {
   expectEqual(manifest.schemaVersion, 1, "Release manifest schema");
   expectEqual(manifest.releaseId, active.releaseId, "Active release ID");
   expectEqual(manifest.tag, active.releaseId, "Release tag");
+  expectEqual(JSON.stringify(manifest.binaryPlatforms), JSON.stringify(binaryPlatforms), "Binary platforms");
 
   const lock = readJson(join(root, "upstream", "pi.lock.json"));
   expectEqual(lock.repository, manifest.upstream.repository, "Upstream repository");
@@ -119,7 +124,7 @@ function pack(root, packageRoot, output) {
   return join(output, result.filename);
 }
 
-function bundleRelease(root, outputArgument) {
+function bundleRelease(root, outputArgument, binaryDirectoryArgument) {
   const manifest = verifyRelease(root);
   const reportPath = join(root, "releases", manifest.releaseId, "reports", "release-candidate.json");
   if (!existsSync(reportPath)) fail(`Release candidate ${manifest.releaseId} has not passed`);
@@ -140,6 +145,12 @@ function bundleRelease(root, outputArgument) {
   const requiredCategories = gate.categories.map((category) => category.name);
   expectEqual(JSON.stringify(reportedCategories), JSON.stringify(requiredCategories), "Release report fixture categories");
 
+  if (!binaryDirectoryArgument) fail("Binary assets are required for the active release");
+  const binaryDirectory = resolve(binaryDirectoryArgument);
+  for (const name of binaryAssetNames) {
+    if (!existsSync(join(binaryDirectory, name))) fail(`Missing required binary asset: ${name}`);
+  }
+
   const output = resolve(outputArgument);
   if (existsSync(output)) fail(`Bundle output already exists: ${output}`);
   mkdirSync(dirname(output), { recursive: true });
@@ -151,6 +162,7 @@ function bundleRelease(root, outputArgument) {
     const releaseAsset = join(temporary, `pi-wait-for-user-${manifest.releaseId}.tgz`);
     renameSync(releasePackage, releaseAsset);
 
+    for (const name of binaryAssetNames) copyFileSync(join(binaryDirectory, name), join(temporary, name));
     copyFileSync(join(root, "scripts", "bootstrap.sh"), join(temporary, "install.sh"));
     copyFileSync(join(root, "releases", manifest.releaseId, "manifest.json"), join(temporary, "release-manifest.json"));
     copyFileSync(join(root, manifest.fixtureGate.path), join(temporary, "fixture-gate.json"));
@@ -176,20 +188,21 @@ function bundleRelease(root, outputArgument) {
 }
 
 function usage() {
-  return "Usage: release.mjs <verify [release-root] | bundle <output-directory>>";
+  return "Usage: release.mjs <verify [release-root] | bundle <output-directory> <binary-directory>>";
 }
 
 try {
-  const [command, argument, extra] = process.argv.slice(2);
+  const [command, argument, binaryDirectory, extra] = process.argv.slice(2);
   if (extra) fail(usage());
   if (command === "verify") {
+    if (binaryDirectory) fail(usage());
     const root = resolve(argument ?? defaultRoot);
     const manifest = verifyRelease(root);
     console.log(
       `Verified ${manifest.releaseId}: Pi ${manifest.upstream.tag}, ${manifest.patches.length} patches, Question Tool ${manifest.questionTool.version}.`,
     );
   } else if (command === "bundle" && argument) {
-    bundleRelease(defaultRoot, argument);
+    bundleRelease(defaultRoot, argument, binaryDirectory);
   } else {
     fail(usage());
   }
