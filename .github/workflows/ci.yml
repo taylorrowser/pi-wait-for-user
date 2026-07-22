@@ -1,0 +1,32 @@
+name: Validate release tooling
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+
+      - name: Verify release identity and tooling tests
+        run: |
+          node scripts/release.mjs verify
+          npm test
+          node --check scripts/install.mjs
+          node --check scripts/launch.mjs
+          node --check scripts/release-gate.mjs
+          node --check scripts/release.mjs
+          node --check scripts/test-question-tool.mjs
+          sh -n scripts/bootstrap.sh
