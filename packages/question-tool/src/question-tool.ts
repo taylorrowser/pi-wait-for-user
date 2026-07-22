@@ -196,6 +196,14 @@ export function createQuestionToolExtension(
 		const isCurrentSession = (ctx: ExtensionContext): boolean =>
 			currentContext?.sessionManager.getSessionId() ===
 			ctx.sessionManager.getSessionId();
+		const isCurrentRequestBatch = (
+			ctx: ExtensionContext,
+			requestId: string,
+			batch = ctx.getDeferredBatch(),
+		): boolean =>
+			isCurrentSession(ctx) &&
+			batch?.kind === "batch" &&
+			batch.correlationId === requestId;
 
 		const closeSettledPresentation = (): void => {
 			activeRequestId = undefined;
@@ -269,11 +277,18 @@ export function createQuestionToolExtension(
 					void pi
 						.resumeDeferred()
 						.then((operation) => {
-							if (operation.deferredBatch && isCurrentSession(ctx))
+							if (
+								isCurrentRequestBatch(
+									ctx,
+									request.requestId,
+									operation.deferredBatch,
+								)
+							) {
 								showRecoveryIndicator(ctx, result.outcome);
+							}
 						})
 						.catch((error: unknown) => {
-							if (!isCurrentSession(ctx)) return;
+							if (!isCurrentRequestBatch(ctx, request.requestId)) return;
 							showRecoveryIndicator(ctx, result.outcome);
 							ctx.ui.notify(
 								error instanceof Error ? error.message : String(error),
