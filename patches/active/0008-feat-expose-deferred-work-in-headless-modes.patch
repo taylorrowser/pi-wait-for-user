@@ -1,0 +1,1129 @@
+From 26e9e25ecf497a9f09964674473588c1f4328796 Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Tue, 21 Jul 2026 21:57:12 -0400
+Subject: [PATCH] feat(coding-agent): expose deferred work in headless modes
+ (#20)
+
+---
+ .../coding-agent/src/core/agent-session.ts    |  19 ++
+ packages/coding-agent/src/index.ts            |   2 +
+ packages/coding-agent/src/modes/index.ts      |   9 +-
+ packages/coding-agent/src/modes/print-mode.ts |  34 ++-
+ .../coding-agent/src/modes/rpc/rpc-client.ts  |  65 +++++-
+ .../coding-agent/src/modes/rpc/rpc-mode.ts    |  65 +++++-
+ .../coding-agent/src/modes/rpc/rpc-types.ts   |  39 +++-
+ .../test/suite/agent-session-deferred.test.ts |  12 +
+ .../17-unavailable-deferred-recovery.test.ts  |  10 +
+ .../18-deferred-branches-compaction.test.ts   |   8 +
+ .../19-interrupt-waiting-state.test.ts        |   4 +
+ .../20-print-json-deferred-modes.test.ts      | 127 +++++++++++
+ .../20-rpc-client-deferred.test.ts            |  59 +++++
+ .../regressions/20-rpc-deferred-mode.test.ts  | 205 ++++++++++++++++++
+ .../5868-rpc-unknown-command-id.test.ts       |   2 +
+ 15 files changed, 636 insertions(+), 24 deletions(-)
+ create mode 100644 packages/coding-agent/test/suite/regressions/20-print-json-deferred-modes.test.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/20-rpc-client-deferred.test.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/20-rpc-deferred-mode.test.ts
+
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index 59af4713..0b6e8900 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -173,6 +173,7 @@ export type AgentSessionEvent =
+ 	  }
+ 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
+ 	| { type: "entry_appended"; entry: SessionEntry }
++	| { type: "deferred_batch_changed"; deferredBatch: DeferredBatchSnapshot | undefined }
+ 	| { type: "session_info_changed"; name: string | undefined }
+ 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+ 	| {
+@@ -342,6 +343,7 @@ export class AgentSession {
+ 	// Event subscription state
+ 	private _unsubscribeAgent?: () => void;
+ 	private _eventListeners: AgentSessionEventListener[] = [];
++	private _lastDeferredBatchSnapshot = "null";
+ 	private _isAgentRunActive = false;
+ 	private _idleWaitPromise: Promise<void> | undefined;
+ 	private _resolveIdleWait: (() => void) | undefined;
+@@ -431,6 +433,7 @@ export class AgentSession {
+ 			activeToolNames: this._initialActiveToolNames,
+ 			includeAllExtensionTools: true,
+ 		});
++		this._lastDeferredBatchSnapshot = JSON.stringify(this.deferredBatch ?? null);
+ 	}
+ 
+ 	get modelRuntime(): ModelRuntime {
+@@ -592,6 +595,17 @@ export class AgentSession {
+ 		});
+ 	}
+ 
++	private _emitDeferredBatchChanged(): void {
++		const deferredBatch = this.deferredBatch;
++		if (deferredBatch?.kind === "batch" && deferredBatch.phase === "markerless" && this._isAgentRunActive) {
++			return;
++		}
++		const serialized = JSON.stringify(deferredBatch ?? null);
++		if (serialized === this._lastDeferredBatchSnapshot) return;
++		this._lastDeferredBatchSnapshot = serialized;
++		this._emit({ type: "deferred_batch_changed", deferredBatch });
++	}
++
+ 	private _getIdleWaitPromise(): Promise<void> {
+ 		if (!this._idleWaitPromise) {
+ 			this._idleWaitPromise = new Promise((resolve) => {
+@@ -653,6 +667,7 @@ export class AgentSession {
+ 				handlerId: event.handlerId,
+ 				handlerVersion: event.handlerVersion,
+ 			});
++			this._emitDeferredBatchChanged();
+ 		} catch (error) {
+ 			throw Object.assign(new Error(error instanceof Error ? error.message : String(error), { cause: error }), {
+ 				code: "deferred_append_error" as const,
+@@ -715,6 +730,7 @@ export class AgentSession {
+ 				this.sessionManager.appendMessage(event.message);
+ 			}
+ 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
++			this._emitDeferredBatchChanged();
+ 
+ 			// Track assistant message for auto-compaction (checked on agent_end)
+ 			if (event.message.role === "assistant") {
+@@ -1104,6 +1120,7 @@ export class AgentSession {
+ 		// Rebuild base system prompt with new tool set
+ 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
+ 		this.agent.state.systemPrompt = this._systemPromptOverride ?? this._baseSystemPrompt;
++		this._emitDeferredBatchChanged();
+ 	}
+ 
+ 	/** Whether compaction or branch summarization is currently running */
+@@ -2647,6 +2664,7 @@ export class AgentSession {
+ 					if (entry) {
+ 						this._emit({ type: "entry_appended", entry });
+ 					}
++					this._emitDeferredBatchChanged();
+ 				},
+ 				setSessionName: (name) => {
+ 					this.setSessionName(name);
+@@ -3330,6 +3348,7 @@ export class AgentSession {
+ 				summaryEntry,
+ 				fromExtension: summaryText ? fromExtension : undefined,
+ 			});
++			this._emitDeferredBatchChanged();
+ 
+ 			// Emit to custom tools
+ 
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index 43f681a2..a9b5ba15 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -349,8 +349,10 @@ export {
+ 	type ModelInfo,
+ 	type PrintModeOptions,
+ 	RpcClient,
++	RpcClientError,
+ 	type RpcClientOptions,
+ 	type RpcCommand,
++	type RpcEvent,
+ 	type RpcEventListener,
+ 	type RpcExtensionUIRequest,
+ 	type RpcExtensionUIResponse,
+diff --git a/packages/coding-agent/src/modes/index.ts b/packages/coding-agent/src/modes/index.ts
+index 732aee55..21cb06a0 100644
+--- a/packages/coding-agent/src/modes/index.ts
++++ b/packages/coding-agent/src/modes/index.ts
+@@ -4,10 +4,17 @@
+ 
+ export { InteractiveMode, type InteractiveModeOptions } from "./interactive/interactive-mode.ts";
+ export { type PrintModeOptions, runPrintMode } from "./print-mode.ts";
+-export { type ModelInfo, RpcClient, type RpcClientOptions, type RpcEventListener } from "./rpc/rpc-client.ts";
++export {
++	type ModelInfo,
++	RpcClient,
++	RpcClientError,
++	type RpcClientOptions,
++	type RpcEventListener,
++} from "./rpc/rpc-client.ts";
+ export { runRpcMode } from "./rpc/rpc-mode.ts";
+ export type {
+ 	RpcCommand,
++	RpcEvent,
+ 	RpcExtensionUIRequest,
+ 	RpcExtensionUIResponse,
+ 	RpcResponse,
+diff --git a/packages/coding-agent/src/modes/print-mode.ts b/packages/coding-agent/src/modes/print-mode.ts
+index ca63157b..acfc0531 100644
+--- a/packages/coding-agent/src/modes/print-mode.ts
++++ b/packages/coding-agent/src/modes/print-mode.ts
+@@ -8,6 +8,7 @@
+ 
+ import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+ import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
++import type { DeferredBatchSnapshot } from "../core/deferred-batch.ts";
+ import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
+ import { killTrackedDetachedChildren } from "../utils/shell.ts";
+ 
+@@ -25,6 +26,21 @@ export interface PrintModeOptions {
+ 	initialImages?: ImageContent[];
+ }
+ 
++function formatDeferredBatch(deferredBatch: DeferredBatchSnapshot): string {
++	if (deferredBatch.kind === "invalid") {
++		return `Deferred work unavailable: ${deferredBatch.message}`;
++	}
++	const ownerName =
++		deferredBatch.calls.find((call) => call.toolCallId === deferredBatch.ownerCallId)?.toolName ??
++		deferredBatch.ownerCallId;
++	if (deferredBatch.availability.status === "unavailable") {
++		const reasons = [...new Set(deferredBatch.availability.reasons.map((reason) => reason.message))];
++		return `Waiting unavailable: ${reasons.join("; ")} (session ${deferredBatch.sessionId}).`;
++	}
++	const callCount = deferredBatch.calls.length;
++	return `Waiting: ${ownerName} in session ${deferredBatch.sessionId} (${callCount} call${callCount === 1 ? "" : "s"} held).`;
++}
++
+ /**
+  * Run in print (single-shot) mode.
+  * Sends prompts to the agent and outputs the result.
+@@ -103,7 +119,11 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
+ 		unsubscribe?.();
+ 		unsubscribe = session.subscribe((event) => {
+ 			if (mode === "json") {
+-				writeRawStdout(`${JSON.stringify(event)}\n`);
++				const outputEvent =
++					event.type === "deferred_batch_changed"
++						? { ...event, deferredBatch: event.deferredBatch ?? null }
++						: event;
++				writeRawStdout(`${JSON.stringify(outputEvent)}\n`);
+ 			}
+ 		});
+ 	};
+@@ -114,16 +134,25 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
+ 			if (header) {
+ 				writeRawStdout(`${JSON.stringify(header)}\n`);
+ 			}
++			if (session.deferredBatch) {
++				writeRawStdout(
++					`${JSON.stringify({ type: "deferred_batch_state", deferredBatch: session.deferredBatch })}\n`,
++				);
++			}
+ 		}
+ 
+ 		await rebindSession();
+ 
++		let reachedDeferredState = false;
+ 		if (initialMessage) {
+ 			await session.prompt(initialMessage, { images: initialImages });
++			reachedDeferredState = session.deferredBatch !== undefined;
+ 		}
+ 
+ 		for (const message of messages) {
++			if (reachedDeferredState) break;
+ 			await session.prompt(message);
++			reachedDeferredState = session.deferredBatch !== undefined;
+ 		}
+ 
+ 		if (mode === "text") {
+@@ -143,6 +172,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
+ 					}
+ 				}
+ 			}
++			if (session.deferredBatch) {
++				writeRawStdout(`${formatDeferredBatch(session.deferredBatch)}\n`);
++			}
+ 		}
+ 
+ 		return exitCode;
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-client.ts b/packages/coding-agent/src/modes/rpc/rpc-client.ts
+index 79cd7f2f..19295896 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-client.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-client.ts
+@@ -7,12 +7,17 @@
+ import { type ChildProcess, spawn } from "node:child_process";
+ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+ import type { ImageContent } from "@earendil-works/pi-ai";
+-import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
++import type { SessionStats } from "../../core/agent-session.ts";
+ import type { BashResult } from "../../core/bash-executor.ts";
+ import type { CompactionResult } from "../../core/compaction/index.ts";
++import type {
++	AgentSessionCapabilities,
++	DeferredBatchSnapshot,
++	DeferredOperationResult,
++} from "../../core/deferred-batch.ts";
+ import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+ import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
+-import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
++import type { RpcCommand, RpcEvent, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
+ 
+ // ============================================================================
+ // Types
+@@ -46,7 +51,19 @@ export interface ModelInfo {
+ 	reasoning: boolean;
+ }
+ 
+-export type RpcEventListener = (event: AgentSessionEvent) => void;
++export type RpcEventListener = (event: RpcEvent) => void;
++
++export class RpcClientError extends Error {
++	readonly errorCode: string;
++	readonly deferredBatch: DeferredBatchSnapshot | null;
++
++	constructor(message: string, errorCode: string, deferredBatch: DeferredBatchSnapshot | null) {
++		super(message);
++		this.name = "RpcClientError";
++		this.errorCode = errorCode;
++		this.deferredBatch = deferredBatch;
++	}
++}
+ 
+ // ============================================================================
+ // RPC Client
+@@ -237,6 +254,34 @@ export class RpcClient {
+ 		return this.getData(response);
+ 	}
+ 
++	/** Get exact process-wide deferred-tool capabilities. */
++	async getCapabilities(): Promise<AgentSessionCapabilities> {
++		const response = await this.send({ type: "get_capabilities" });
++		return this.getData(response);
++	}
++
++	/** Explicitly advance the active Deferred Tool Batch. */
++	async resumeDeferred(): Promise<DeferredOperationResult> {
++		const response = await this.send({ type: "resume_deferred" });
++		const result = this.getData<
++			Omit<DeferredOperationResult, "deferredBatch"> & {
++				deferredBatch: DeferredBatchSnapshot | null;
++			}
++		>(response);
++		return { ...result, deferredBatch: result.deferredBatch ?? undefined };
++	}
++
++	/** Explicitly abandon the active Deferred Tool Batch. */
++	async abandonDeferred(): Promise<DeferredOperationResult> {
++		const response = await this.send({ type: "abandon_deferred" });
++		const result = this.getData<
++			Omit<DeferredOperationResult, "deferredBatch"> & {
++				deferredBatch: DeferredBatchSnapshot | null;
++			}
++		>(response);
++		return { ...result, deferredBatch: result.deferredBatch ?? undefined };
++	}
++
+ 	/**
+ 	 * Set model by provider and ID.
+ 	 */
+@@ -472,9 +517,9 @@ export class RpcClient {
+ 	/**
+ 	 * Collect events until agent becomes idle.
+ 	 */
+-	collectEvents(timeout = 60000): Promise<AgentSessionEvent[]> {
++	collectEvents(timeout = 60000): Promise<RpcEvent[]> {
+ 		return new Promise((resolve, reject) => {
+-			const events: AgentSessionEvent[] = [];
++			const events: RpcEvent[] = [];
+ 			const timer = setTimeout(() => {
+ 				unsubscribe();
+ 				reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
+@@ -494,7 +539,7 @@ export class RpcClient {
+ 	/**
+ 	 * Send prompt and wait for completion, returning all events.
+ 	 */
+-	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentSessionEvent[]> {
++	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<RpcEvent[]> {
+ 		const eventsPromise = this.collectEvents(timeout);
+ 		await this.prompt(message, images);
+ 		return eventsPromise;
+@@ -518,7 +563,7 @@ export class RpcClient {
+ 
+ 			// Otherwise it's an event
+ 			for (const listener of this.eventListeners) {
+-				listener(data as AgentSessionEvent);
++				listener(data as RpcEvent);
+ 			}
+ 		} catch {
+ 			// Ignore non-JSON lines
+@@ -590,7 +635,11 @@ export class RpcClient {
+ 	private getData<T>(response: RpcResponse): T {
+ 		if (!response.success) {
+ 			const errorResponse = response as Extract<RpcResponse, { success: false }>;
+-			throw new Error(errorResponse.error);
++			throw new RpcClientError(
++				errorResponse.error,
++				errorResponse.errorCode ?? "command_failed",
++				errorResponse.data?.deferredBatch ?? null,
++			);
+ 		}
+ 		// Type assertion: we trust response.data matches T based on the command sent.
+ 		// This is safe because each public method specifies the correct T for its command.
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-mode.ts b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+index 06eadccb..b9f30277 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+@@ -13,6 +13,7 @@
+ 
+ import * as crypto from "node:crypto";
+ import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
++import type { DeferredBatchSnapshot } from "../../core/deferred-batch.ts";
+ import type {
+ 	ExtensionUIContext,
+ 	ExtensionUIDialogOptions,
+@@ -40,6 +41,7 @@ import type {
+ // Re-export types for consumers
+ export type {
+ 	RpcCommand,
++	RpcEvent,
+ 	RpcExtensionUIRequest,
+ 	RpcExtensionUIResponse,
+ 	RpcResponse,
+@@ -71,8 +73,35 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 		return { id, type: "response", command, success: true, data } as RpcResponse;
+ 	};
+ 
+-	const error = (id: string | undefined, command: string, message: string): RpcResponse => {
+-		return { id, type: "response", command, success: false, error: message };
++	const error = (
++		id: string | undefined,
++		command: string,
++		message: string,
++		errorCode = "command_failed",
++		deferredBatch = session.deferredBatch,
++	): RpcResponse => {
++		return {
++			id,
++			type: "response",
++			command,
++			success: false,
++			error: message,
++			errorCode,
++			data: { deferredBatch: deferredBatch ?? null },
++		};
++	};
++
++	const errorFromException = (id: string | undefined, command: string, cause: unknown): RpcResponse => {
++		const coded = cause as { code?: unknown; deferredBatch?: unknown };
++		return error(
++			id,
++			command,
++			cause instanceof Error ? cause.message : String(cause),
++			typeof coded?.code === "string" ? coded.code : "command_failed",
++			coded?.deferredBatch && typeof coded.deferredBatch === "object"
++				? (coded.deferredBatch as DeferredBatchSnapshot)
++				: session.deferredBatch,
++		);
+ 	};
+ 
+ 	// Pending extension UI requests waiting for response
+@@ -352,7 +381,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 		unsubscribe?.();
+ 		unsubscribeBackpressure?.();
+ 		unsubscribe = session.subscribe((event) => {
+-			output(event);
++			output(
++				event.type === "deferred_batch_changed" ? { ...event, deferredBatch: event.deferredBatch ?? null } : event,
++			);
+ 			if (event.type === "agent_settled") {
+ 				void checkShutdownRequested();
+ 			}
+@@ -408,7 +439,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 					})
+ 					.catch((e) => {
+ 						if (!preflightSucceeded) {
+-							output(error(id, "prompt", e.message));
++							output(errorFromException(id, "prompt", e));
+ 						}
+ 					});
+ 				return undefined;
+@@ -456,10 +487,25 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 					autoCompactionEnabled: session.autoCompactionEnabled,
+ 					messageCount: session.messages.length,
+ 					pendingMessageCount: session.pendingMessageCount,
++					deferredBatch: session.deferredBatch ?? null,
+ 				};
+ 				return success(id, "get_state", state);
+ 			}
+ 
++			case "get_capabilities": {
++				return success(id, "get_capabilities", session.capabilities);
++			}
++
++			case "resume_deferred": {
++				const result = await session.resumeDeferred();
++				return success(id, "resume_deferred", { ...result, deferredBatch: result.deferredBatch ?? null });
++			}
++
++			case "abandon_deferred": {
++				const result = await session.abandonDeferred();
++				return success(id, "abandon_deferred", { ...result, deferredBatch: result.deferredBatch ?? null });
++			}
++
+ 			// =================================================================
+ 			// Model
+ 			// =================================================================
+@@ -693,7 +739,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 
+ 			default: {
+ 				const unknownCommand = command as { type: string };
+-				return error(id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
++				return error(id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`, "unknown_command");
+ 			}
+ 		}
+ 	};
+@@ -738,6 +784,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 					undefined,
+ 					"parse",
+ 					`Failed to parse command: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
++					"parse_error",
+ 				),
+ 			);
+ 			await waitForRawStdoutBackpressure();
+@@ -769,13 +816,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 			}
+ 			await checkShutdownRequested();
+ 		} catch (commandError: unknown) {
+-			output(
+-				error(
+-					command.id,
+-					command.type,
+-					commandError instanceof Error ? commandError.message : String(commandError),
+-				),
+-			);
++			output(errorFromException(command.id, command.type, commandError));
+ 			await waitForRawStdoutBackpressure();
+ 		}
+ 	};
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-types.ts b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+index 5957eebc..680b4050 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-types.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+@@ -7,9 +7,14 @@
+ 
+ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+ import type { ImageContent, Model } from "@earendil-works/pi-ai";
+-import type { SessionStats } from "../../core/agent-session.ts";
++import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
+ import type { BashResult } from "../../core/bash-executor.ts";
+ import type { CompactionResult } from "../../core/compaction/index.ts";
++import type {
++	AgentSessionCapabilities,
++	DeferredBatchSnapshot,
++	DeferredOperationResult,
++} from "../../core/deferred-batch.ts";
+ import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+ import type { SourceInfo } from "../../core/source-info.ts";
+ 
+@@ -27,6 +32,9 @@ export type RpcCommand =
+ 
+ 	// State
+ 	| { id?: string; type: "get_state" }
++	| { id?: string; type: "get_capabilities" }
++	| { id?: string; type: "resume_deferred" }
++	| { id?: string; type: "abandon_deferred" }
+ 
+ 	// Model
+ 	| { id?: string; type: "set_model"; provider: string; modelId: string }
+@@ -92,6 +100,10 @@ export interface RpcSlashCommand {
+ // RPC State
+ // ============================================================================
+ 
++export type RpcEvent =
++	| Exclude<AgentSessionEvent, { type: "deferred_batch_changed" }>
++	| { type: "deferred_batch_changed"; deferredBatch: DeferredBatchSnapshot | null };
++
+ export interface RpcSessionState {
+ 	model?: Model<any>;
+ 	thinkingLevel: ThinkingLevel;
+@@ -105,6 +117,7 @@ export interface RpcSessionState {
+ 	autoCompactionEnabled: boolean;
+ 	messageCount: number;
+ 	pendingMessageCount: number;
++	deferredBatch: DeferredBatchSnapshot | null;
+ }
+ 
+ // ============================================================================
+@@ -122,6 +135,20 @@ export type RpcResponse =
+ 
+ 	// State
+ 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
++	| {
++			id?: string;
++			type: "response";
++			command: "get_capabilities";
++			success: true;
++			data: AgentSessionCapabilities;
++	  }
++	| {
++			id?: string;
++			type: "response";
++			command: "resume_deferred" | "abandon_deferred";
++			success: true;
++			data: Omit<DeferredOperationResult, "deferredBatch"> & { deferredBatch: DeferredBatchSnapshot | null };
++	  }
+ 
+ 	// Model
+ 	| {
+@@ -228,7 +255,15 @@ export type RpcResponse =
+ 	  }
+ 
+ 	// Error response (any command can fail)
+-	| { id?: string; type: "response"; command: string; success: false; error: string };
++	| {
++			id?: string;
++			type: "response";
++			command: string;
++			success: false;
++			error: string;
++			errorCode: string;
++			data: { deferredBatch: DeferredBatchSnapshot | null };
++	  };
+ 
+ // ============================================================================
+ // Extension UI Events (stdout)
+diff --git a/packages/coding-agent/test/suite/agent-session-deferred.test.ts b/packages/coding-agent/test/suite/agent-session-deferred.test.ts
+index 0aae204b..f1301cc1 100644
+--- a/packages/coding-agent/test/suite/agent-session-deferred.test.ts
++++ b/packages/coding-agent/test/suite/agent-session-deferred.test.ts
+@@ -77,6 +77,9 @@ describe("durable tool-batch deferral", () => {
+ 			availability: { status: "available" },
+ 		};
+ 		expect(harness.session.deferredBatch).toEqual(expectedSnapshot);
++		expect(harness.events.filter((event) => (event as { type: string }).type === "deferred_batch_changed")).toEqual([
++			{ type: "deferred_batch_changed", deferredBatch: expectedSnapshot },
++		]);
+ 
+ 		const sessionFile = sessionManager.getSessionFile();
+ 		expect(sessionFile).toBeDefined();
+@@ -189,24 +192,33 @@ describe("durable tool-batch deferral", () => {
+ 			content: [{ type: "text", text: "Yes" }],
+ 			isError: false,
+ 		});
++		expect(
++			reopened.events
++				.filter((event) => event.type === "deferred_batch_changed")
++				.map((event) => (event.deferredBatch?.kind === "batch" ? event.deferredBatch.phase : undefined)),
++		).toEqual(["partial", "partial", "continuation", undefined]);
+ 		expect(reopened.events.map((event) => event.type).filter((type) => type !== "message_update")).toEqual([
+ 			"agent_start",
+ 			"tool_execution_start",
+ 			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"deferred_batch_changed",
+ 			"tool_execution_start",
+ 			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"deferred_batch_changed",
+ 			"tool_execution_start",
+ 			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"deferred_batch_changed",
+ 			"turn_end",
+ 			"turn_start",
+ 			"message_start",
+ 			"message_end",
++			"deferred_batch_changed",
+ 			"turn_end",
+ 			"agent_end",
+ 			"agent_settled",
+diff --git a/packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts b/packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts
+index 90655b19..4168c449 100644
+--- a/packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts
++++ b/packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts
+@@ -133,8 +133,18 @@ describe("unavailable deferred-batch recovery", () => {
+ 		expect(harness.getPendingResponseCount()).toBe(0);
+ 		expect(readFileSync(manager.getSessionFile()!, "utf8")).toBe(bytesBefore);
+ 
++		harness.events.length = 0;
+ 		harness.session.setActiveToolsByName(["ordinary", "question"]);
+ 		expect(harness.session.deferredBatch).toMatchObject({ availability: { status: "available" } });
++		expect(harness.events).toEqual([
++			{
++				type: "deferred_batch_changed",
++				deferredBatch: expect.objectContaining({ availability: { status: "available" } }),
++			},
++		]);
++		harness.events.length = 0;
++		harness.session.setActiveToolsByName(["ordinary", "question"]);
++		expect(harness.events).toEqual([]);
+ 		expect(readFileSync(manager.getSessionFile()!, "utf8")).toBe(bytesBefore);
+ 	});
+ 
+diff --git a/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts b/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
+index 4380e19c..63b9d3d1 100644
+--- a/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
++++ b/packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts
+@@ -146,13 +146,21 @@ describe("regression #18: deferred lifecycle through branches and compaction", (
+ 		if (!rootUser || !marker) throw new Error("Expected the persisted deferred branch");
+ 		const sessionFile = manager.getSessionFile()!;
+ 		const bytesBeforeNavigation = readFileSync(sessionFile, "utf8");
++		harness.events.length = 0;
+ 
+ 		await harness.session.navigateTree(rootUser.id, { summarize: false });
+ 		expect(harness.session.deferredBatch).toBeUndefined();
++		expect(harness.eventsOfType("deferred_batch_changed")).toEqual([
++			{ type: "deferred_batch_changed", deferredBatch: undefined },
++		]);
+ 		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBeforeNavigation);
+ 
++		harness.events.length = 0;
+ 		await harness.session.navigateTree(marker.id, { summarize: false });
+ 		expect(harness.session.deferredBatch).toEqual(deferred);
++		expect(harness.eventsOfType("deferred_batch_changed")).toEqual([
++			{ type: "deferred_batch_changed", deferredBatch: deferred },
++		]);
+ 		expect(readFileSync(sessionFile, "utf8")).toBe(bytesBeforeNavigation);
+ 
+ 		await harness.session.navigateTree(rootUser.id, { summarize: false });
+diff --git a/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts b/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+index 86f6931e..e4719fa4 100644
+--- a/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
++++ b/packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts
+@@ -288,18 +288,22 @@ describe("regression #19: interrupt Waiting State", () => {
+ 			"entry_appended",
+ 			"message_start",
+ 			"message_end",
++			"deferred_batch_changed",
+ 			"tool_execution_start",
+ 			"tool_execution_end",
+ 			"message_start",
+ 			"message_end",
++			"deferred_batch_changed",
+ 			"message_start",
+ 			"message_end",
++			"deferred_batch_changed",
+ 			"turn_end",
+ 			"message_start",
+ 			"message_end",
+ 			"turn_start",
+ 			"message_start",
+ 			"message_end",
++			"deferred_batch_changed",
+ 			"turn_end",
+ 			"agent_end",
+ 			"agent_settled",
+diff --git a/packages/coding-agent/test/suite/regressions/20-print-json-deferred-modes.test.ts b/packages/coding-agent/test/suite/regressions/20-print-json-deferred-modes.test.ts
+new file mode 100644
+index 00000000..e5b8c6fa
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/20-print-json-deferred-modes.test.ts
+@@ -0,0 +1,127 @@
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import { runPrintMode } from "../../../src/modes/print-mode.ts";
++import { deferredToolBatchMessage, questionExtension } from "../deferred-tool-batch-fixture.ts";
++import { createHarness, getUserTexts, type Harness } from "../harness.ts";
++
++const stdout = vi.hoisted(() => ({ chunks: [] as string[] }));
++
++vi.mock("../../../src/core/output-guard.js", () => ({
++	flushRawStdout: vi.fn(async () => {}),
++	writeRawStdout: (chunk: string) => stdout.chunks.push(chunk),
++}));
++
++function runtimeFor(harness: Harness): AgentSessionRuntime {
++	return {
++		session: harness.session,
++		setRebindSession: vi.fn(),
++		newSession: vi.fn(async () => ({ cancelled: true })),
++		switchSession: vi.fn(async () => ({ cancelled: true })),
++		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
++		dispose: vi.fn(async () => {}),
++	} as unknown as AgentSessionRuntime;
++}
++
++describe("print modes with deferred work", () => {
++	let harness: Harness | undefined;
++	let root: string | undefined;
++
++	afterEach(() => {
++		harness?.cleanup();
++		if (root) rmSync(root, { recursive: true, force: true });
++		stdout.chunks = [];
++	});
++
++	it("preserves assistant text and prints a privacy-safe Waiting line", async () => {
++		root = mkdtempSync(join(tmpdir(), "pi-print-deferred-"));
++		harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension([])],
++		});
++		const response = deferredToolBatchMessage();
++		response.content.unshift({ type: "text", text: "I need confirmation." });
++		harness.setResponses([response]);
++		await harness.session.prompt("Ask before shipping");
++
++		const exitCode = await runPrintMode(runtimeFor(harness), { mode: "text" });
++
++		expect(exitCode).toBe(0);
++		expect(stdout.chunks.join("")).toBe(
++			`I need confirmation.\nWaiting: question in session ${harness.session.sessionId} (3 calls held).\n`,
++		);
++		expect(stdout.chunks.join("")).not.toContain("Ship?");
++		expect(stdout.chunks.join("")).not.toContain("request-1");
++	});
++
++	it("emits initial JSON deferred state immediately after the session header", async () => {
++		root = mkdtempSync(join(tmpdir(), "pi-json-deferred-"));
++		harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension([])],
++		});
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++
++		const exitCode = await runPrintMode(runtimeFor(harness), { mode: "json" });
++		const records = stdout.chunks.map((line) => JSON.parse(line) as Record<string, unknown>);
++
++		expect(exitCode).toBe(0);
++		expect(records[0]).toMatchObject({ type: "dev.taylorrowser.pi-wait-for-user/session" });
++		expect(records[1]).toMatchObject({
++			type: "deferred_batch_state",
++			deferredBatch: { kind: "batch", phase: "deferred", ownerCallId: "call-1" },
++		});
++	});
++
++	it("stops before later supplied prompts after reaching durable deferral", async () => {
++		root = mkdtempSync(join(tmpdir(), "pi-json-stop-prompts-"));
++		harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension([])],
++		});
++		harness.setResponses([deferredToolBatchMessage()]);
++
++		const exitCode = await runPrintMode(runtimeFor(harness), {
++			mode: "json",
++			initialMessage: "first",
++			messages: ["second", "third"],
++		});
++		const records = stdout.chunks.map((line) => JSON.parse(line) as Record<string, unknown>);
++
++		expect(exitCode).toBe(0);
++		expect(getUserTexts(harness)).toEqual(["first"]);
++		expect(records).toContainEqual(
++			expect.objectContaining({
++				type: "deferred_batch_changed",
++				deferredBatch: expect.objectContaining({ kind: "batch", phase: "deferred" }),
++			}),
++		);
++		expect(records.some((record) => record.type === "extension_ui_request")).toBe(false);
++	});
++
++	it("prints concise unavailable reasons and still exits successfully", async () => {
++		root = mkdtempSync(join(tmpdir(), "pi-print-unavailable-"));
++		harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension([])],
++		});
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		harness.session.setActiveToolsByName(["question"]);
++
++		const exitCode = await runPrintMode(runtimeFor(harness), { mode: "text" });
++		const output = stdout.chunks.join("");
++
++		expect(exitCode).toBe(0);
++		expect(output).toContain("Waiting unavailable:");
++		expect(output).toContain("Held tool ordinary is not currently active.");
++		expect(output.match(/Held tool ordinary is not currently active\./g)).toHaveLength(1);
++		expect(output).toContain(`session ${harness.session.sessionId}`);
++		expect(output).not.toContain("Prepare?");
++		expect(output).not.toContain("Deploy?");
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/20-rpc-client-deferred.test.ts b/packages/coding-agent/test/suite/regressions/20-rpc-client-deferred.test.ts
+new file mode 100644
+index 00000000..b3656c16
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/20-rpc-client-deferred.test.ts
+@@ -0,0 +1,59 @@
++import { describe, expect, it, vi } from "vitest";
++import { RpcClient, RpcClientError } from "../../../src/modes/rpc/rpc-client.ts";
++
++type RpcClientPrivate = {
++	send: (command: { type: string }) => Promise<unknown>;
++	getData: <T>(response: unknown) => T;
++};
++
++describe("RpcClient deferred work", () => {
++	it("exposes capability discovery and argument-free advancement", async () => {
++		const client = new RpcClient();
++		const privateClient = client as unknown as RpcClientPrivate;
++		const send = vi.fn(async (command: { type: string }) => ({
++			type: "response",
++			command: command.type,
++			success: true,
++			data:
++				command.type === "get_capabilities"
++					? { deferredToolBatches: { protocolVersions: [1], operations: ["resume", "abandon"] } }
++					: { status: "advanced", deferredBatch: null },
++		}));
++		privateClient.send = send;
++		privateClient.getData = <T>(response: unknown): T => (response as { data: T }).data;
++
++		await expect(client.getCapabilities()).resolves.toEqual({
++			deferredToolBatches: { protocolVersions: [1], operations: ["resume", "abandon"] },
++		});
++		await expect(client.resumeDeferred()).resolves.toEqual({ status: "advanced", deferredBatch: undefined });
++		await expect(client.abandonDeferred()).resolves.toEqual({ status: "advanced", deferredBatch: undefined });
++		expect(send).toHaveBeenNthCalledWith(1, { type: "get_capabilities" });
++		expect(send).toHaveBeenNthCalledWith(2, { type: "resume_deferred" });
++		expect(send).toHaveBeenNthCalledWith(3, { type: "abandon_deferred" });
++	});
++
++	it("preserves machine-readable failure details", () => {
++		const client = new RpcClient();
++		const privateClient = client as unknown as RpcClientPrivate;
++		let thrown: unknown;
++		try {
++			privateClient.getData({
++				type: "response",
++				command: "steer",
++				success: false,
++				error: "Agent is waiting",
++				errorCode: "agent_waiting",
++				data: { deferredBatch: { kind: "invalid", code: "marker_mismatch", message: "Invalid" } },
++			});
++		} catch (error) {
++			thrown = error;
++		}
++
++		expect(thrown).toBeInstanceOf(RpcClientError);
++		expect(thrown).toMatchObject({
++			message: "Agent is waiting",
++			errorCode: "agent_waiting",
++			deferredBatch: { kind: "invalid", code: "marker_mismatch" },
++		});
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/20-rpc-deferred-mode.test.ts b/packages/coding-agent/test/suite/regressions/20-rpc-deferred-mode.test.ts
+new file mode 100644
+index 00000000..16cc2adb
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/20-rpc-deferred-mode.test.ts
+@@ -0,0 +1,205 @@
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage } from "@earendil-works/pi-ai";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
++import {
++	deferredToolBatchMessage,
++	type InteractionRequestTestController,
++	questionExtension,
++} from "../deferred-tool-batch-fixture.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++const rpcIo = vi.hoisted(() => ({
++	outputLines: [] as string[],
++	lineHandler: undefined as ((line: string) => void) | undefined,
++}));
++
++vi.mock("../../../src/core/output-guard.js", () => ({
++	flushRawStdout: vi.fn(async () => {}),
++	takeOverStdout: vi.fn(),
++	waitForRawStdoutBackpressure: vi.fn(async () => {}),
++	writeRawStdout: (line: string) => rpcIo.outputLines.push(line),
++}));
++
++vi.mock("../../../src/modes/interactive/theme/theme.js", () => ({ theme: {} }));
++
++vi.mock("../../../src/modes/rpc/jsonl.js", () => ({
++	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
++		rpcIo.lineHandler = onLine;
++		return () => {};
++	}),
++	serializeJsonLine: (value: unknown) => `${JSON.stringify(value)}\n`,
++}));
++
++type NodeListener = Parameters<typeof process.on>[1];
++
++type ListenerSnapshot = {
++	stdinEnd: NodeListener[];
++	signals: Map<NodeJS.Signals, NodeListener[]>;
++};
++
++function takeListenerSnapshot(): ListenerSnapshot {
++	const signals: NodeJS.Signals[] = process.platform === "win32" ? ["SIGTERM"] : ["SIGTERM", "SIGHUP"];
++	return {
++		stdinEnd: process.stdin.listeners("end") as NodeListener[],
++		signals: new Map(signals.map((signal) => [signal, process.listeners(signal) as NodeListener[]])),
++	};
++}
++
++function restoreListeners(snapshot: ListenerSnapshot): void {
++	for (const listener of process.stdin.listeners("end") as NodeListener[]) {
++		if (!snapshot.stdinEnd.includes(listener)) process.stdin.off("end", listener);
++	}
++	for (const [signal, previousListeners] of snapshot.signals) {
++		for (const listener of process.listeners(signal) as NodeListener[]) {
++			if (!previousListeners.includes(listener)) process.off(signal, listener);
++		}
++	}
++}
++
++function outputRecords(): Array<Record<string, unknown>> {
++	return rpcIo.outputLines.map((line) => JSON.parse(line) as Record<string, unknown>);
++}
++
++async function send(command: Record<string, unknown>): Promise<Record<string, unknown>> {
++	rpcIo.lineHandler?.(JSON.stringify(command));
++	await vi.waitFor(() => {
++		expect(outputRecords().some((record) => record.type === "response" && record.id === command.id)).toBe(true);
++	});
++	return outputRecords().find((record) => record.type === "response" && record.id === command.id)!;
++}
++
++function runtimeFor(harness: Harness): AgentSessionRuntime {
++	return {
++		session: harness.session,
++		setRebindSession: vi.fn(),
++		newSession: vi.fn(async () => ({ cancelled: true })),
++		switchSession: vi.fn(async () => ({ cancelled: true })),
++		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
++		dispose: vi.fn(async () => {}),
++	} as unknown as AgentSessionRuntime;
++}
++
++describe("RPC deferred work", () => {
++	let harness: Harness | undefined;
++	let listenerSnapshot: ListenerSnapshot;
++	let root: string | undefined;
++
++	beforeEach(() => {
++		listenerSnapshot = takeListenerSnapshot();
++	});
++
++	afterEach(() => {
++		harness?.cleanup();
++		restoreListeners(listenerSnapshot);
++		if (root) rmSync(root, { recursive: true, force: true });
++		rpcIo.outputLines = [];
++		rpcIo.lineHandler = undefined;
++	});
++
++	it("reports the neutral deferred snapshot and exact process capabilities", async () => {
++		root = mkdtempSync(join(tmpdir(), "pi-rpc-deferred-"));
++		harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension([])],
++		});
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++
++		void runRpcMode(runtimeFor(harness));
++		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
++
++		const state = await send({ id: "state", type: "get_state" });
++		expect(state).toMatchObject({
++			success: true,
++			data: {
++				deferredBatch: {
++					kind: "batch",
++					phase: "deferred",
++					ownerCallId: "call-1",
++					correlationId: "request-1",
++				},
++			},
++		});
++
++		const capabilities = await send({ id: "capabilities", type: "get_capabilities" });
++		expect(capabilities).toEqual({
++			id: "capabilities",
++			type: "response",
++			command: "get_capabilities",
++			success: true,
++			data: {
++				deferredToolBatches: { protocolVersions: [1], operations: ["resume", "abandon"] },
++			},
++		});
++
++		const entriesBeforeAbort = harness.sessionManager.getEntries();
++		expect(await send({ id: "abort", type: "abort" })).toMatchObject({ success: true });
++		expect(harness.sessionManager.getEntries()).toEqual(entriesBeforeAbort);
++		expect(await send({ id: "state-after-abort", type: "get_state" })).toMatchObject({
++			success: true,
++			data: { deferredBatch: { kind: "batch", phase: "deferred" } },
++		});
++	});
++
++	it("responds after deferred advancement settles and emits explicit replacement state", async () => {
++		root = mkdtempSync(join(tmpdir(), "pi-rpc-resume-"));
++		const controller: InteractionRequestTestController = {};
++		harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension([], controller)],
++		});
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++		controller.recordResponse?.("Yes");
++		harness.setResponses([fauxAssistantMessage("Continued")]);
++
++		void runRpcMode(runtimeFor(harness));
++		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
++
++		const response = await send({ id: "resume", type: "resume_deferred" });
++		expect(response).toEqual({
++			id: "resume",
++			type: "response",
++			command: "resume_deferred",
++			success: true,
++			data: { status: "advanced", deferredBatch: null },
++		});
++		const records = outputRecords();
++		expect(records.filter((record) => record.type === "deferred_batch_changed").at(-1)).toEqual({
++			type: "deferred_batch_changed",
++			deferredBatch: null,
++		});
++		expect(records.findIndex((record) => record.type === "agent_settled")).toBeLessThan(
++			records.findIndex((record) => record.id === "resume"),
++		);
++	});
++
++	it("returns machine-readable Waiting State failures with the current snapshot", async () => {
++		root = mkdtempSync(join(tmpdir(), "pi-rpc-waiting-error-"));
++		harness = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [questionExtension([])],
++		});
++		harness.setResponses([deferredToolBatchMessage()]);
++		await harness.session.prompt("Ask before shipping");
++
++		void runRpcMode(runtimeFor(harness));
++		await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
++
++		const response = await send({ id: "steer", type: "steer", message: "Do something else" });
++		expect(response).toMatchObject({
++			id: "steer",
++			type: "response",
++			command: "steer",
++			success: false,
++			error: expect.any(String),
++			errorCode: "agent_waiting",
++			data: { deferredBatch: { kind: "batch", phase: "deferred", ownerCallId: "call-1" } },
++		});
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/5868-rpc-unknown-command-id.test.ts b/packages/coding-agent/test/suite/regressions/5868-rpc-unknown-command-id.test.ts
+index 7ee70261..0b694196 100644
+--- a/packages/coding-agent/test/suite/regressions/5868-rpc-unknown-command-id.test.ts
++++ b/packages/coding-agent/test/suite/regressions/5868-rpc-unknown-command-id.test.ts
+@@ -103,6 +103,8 @@ describe("RPC unknown command responses (#5868)", () => {
+ 					command: "foobar",
+ 					success: false,
+ 					error: "Unknown command: foobar",
++					errorCode: "unknown_command",
++					data: { deferredBatch: null },
+ 				});
+ 			});
+ 		} finally {
+-- 
+2.50.1 (Apple Git-155)
+
