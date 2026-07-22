@@ -7,7 +7,7 @@
     "commit": "20be4b18d4c57487f8993d2762bace129f0cf7c6",
     "packageVersion": "0.81.1"
   },
-  "startedAt": "2026-07-22T19:17:25.228Z",
+  "startedAt": "2026-07-22T19:20:09.920Z",
   "result": "passed",
   "fixtureCategories": [
     {
@@ -127,7 +127,7 @@
         "verify"
       ],
       "status": "passed",
-      "durationMs": 30
+      "durationMs": 29
     },
     {
       "name": "repository-tests",
@@ -136,7 +136,7 @@
         "test"
       ],
       "status": "passed",
-      "durationMs": 2836
+      "durationMs": 2900
     },
     {
       "name": "prepare-exact-patch",
@@ -147,7 +147,7 @@
         ".work/pi-v0.81.1"
       ],
       "status": "passed",
-      "durationMs": 3427
+      "durationMs": 3240
     },
     {
       "name": "install-dependencies",
@@ -157,7 +157,7 @@
         "--ignore-scripts"
       ],
       "status": "passed",
-      "durationMs": 3975
+      "durationMs": 4461
     },
     {
       "name": "typecheck",
@@ -167,7 +167,7 @@
         "check"
       ],
       "status": "passed",
-      "durationMs": 7304
+      "durationMs": 8668
     },
     {
       "name": "hydrate-model-data",
@@ -177,7 +177,7 @@
         "hydrate:model-data"
       ],
       "status": "passed",
-      "durationMs": 1257
+      "durationMs": 1148
     },
     {
       "name": "build",
@@ -187,7 +187,7 @@
         "build:offline"
       ],
       "status": "passed",
-      "durationMs": 4843
+      "durationMs": 5530
     },
     {
       "name": "legacy-compatibility",
@@ -196,7 +196,7 @@
         ".work/pi-v0.81.1/packages/coding-agent"
       ],
       "status": "passed",
-      "durationMs": 1323
+      "durationMs": 1356
     },
     {
       "name": "full-pi-suite",
@@ -204,7 +204,7 @@
         ".work/pi-v0.81.1/test.sh"
       ],
       "status": "passed",
-      "durationMs": 84833
+      "durationMs": 81434
     },
     {
       "name": "public-conformance",
@@ -214,7 +214,7 @@
         "conformance"
       ],
       "status": "passed",
-      "durationMs": 588,
+      "durationMs": 598,
       "result": {
         "passed": 8,
         "required": 8
@@ -228,7 +228,7 @@
         "typecheck:question-tool"
       ],
       "status": "passed",
-      "durationMs": 1593
+      "durationMs": 1657
     },
     {
       "name": "question-tool-suite",
@@ -238,8 +238,8 @@
         "test:question-tool"
       ],
       "status": "passed",
-      "durationMs": 5581
+      "durationMs": 5167
     }
   ],
-  "finishedAt": "2026-07-22T19:19:22.831Z"
+  "finishedAt": "2026-07-22T19:22:06.121Z"
 }
