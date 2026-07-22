@@ -500,9 +500,11 @@ try {
 		],
 	};
 
-	const reportsDir = join(dirname(fileURLToPath(import.meta.url)), "reports");
+	const reportsDir = process.env.PI_HARNESS_REPORT_DIR
+		? resolve(process.env.PI_HARNESS_REPORT_DIR)
+		: join(dirname(fileURLToPath(import.meta.url)), "reports");
 	mkdirSync(reportsDir, { recursive: true });
-	const reportPath = join(reportsDir, `pi-${packageJson.version}.json`);
+	const reportPath = join(reportsDir, process.env.PI_HARNESS_REPORT_NAME ?? `pi-${packageJson.version}.json`);
 	writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
 
 	for (const item of checks) console.log(`${item.pass ? "PASS" : "FAIL"} ${item.name}`);

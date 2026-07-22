@@ -1,10 +1,32 @@
 {
-  "name": "pi-wait-for-user-patch-workspace",
+  "name": "@taylorrowser/pi-wait-for-user-release",
+  "version": "0.81.1-patch.1",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "packages/question-tool/extensions",
+    "packages/question-tool/src",
+    "packages/question-tool/package.json",
+    "packages/question-tool/README.md",
+    "patches/active",
+    "releases/README.md",
+    "releases/active.json",
+    "releases/pi-v0.81.1-patch.1",
+    "scripts/bootstrap.sh",
+    "scripts/install.mjs",
+    "scripts/launch.mjs",
+    "scripts/pi-patch.mjs",
+    "scripts/release.mjs",
+    "upstream"
+  ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "test:question-tool": "node --test packages/question-tool/test/*.test.mjs",
+    "test:question-tool": "node scripts/test-question-tool.mjs",
     "typecheck:question-tool": ".work/pi-v0.81.1/node_modules/.bin/tsc -p packages/question-tool/tsconfig.json --noEmit"
   }
 }

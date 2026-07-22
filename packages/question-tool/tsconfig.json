@@ -1,7 +1,14 @@
 {
 	"extends": "../../.work/pi-v0.81.1/tsconfig.base.json",
 	"compilerOptions": {
-		"noEmit": true
+		"baseUrl": "../../.work/pi-v0.81.1",
+		"noEmit": true,
+		"paths": {
+			"@earendil-works/pi-coding-agent": ["packages/coding-agent/dist/index.d.ts"],
+			"@earendil-works/pi-tui": ["packages/tui/dist/index.d.ts"],
+			"typebox": ["node_modules/typebox/build/index.d.mts"]
+		},
+		"typeRoots": ["../../.work/pi-v0.81.1/node_modules/@types"]
 	},
 	"include": ["extensions/**/*.ts", "src/**/*.ts"]
 }

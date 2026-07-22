@@ -18,45 +18,31 @@ Handler and protocol compatibility is exact. Restoring this package to an unavai
 
 ## Install
 
-From the repository root, prepare, build, and source-link the active patched Pi:
+The supported release installer builds the exact patched Pi and places this exact Question Tool beside it:
 
 ```bash
-./scripts/pi-patch.mjs prepare .work/pi-v0.81.1
-(
-  cd .work/pi-v0.81.1
-  npm ci --ignore-scripts
-  npm run hydrate:model-data
-  npm run build:offline
-  cd packages/coding-agent
-  npm link
-)
-
-pi --version
-pi conformance
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.1/install.sh | sh
+pi-wait-for-user --version
 ```
 
-The version must be `0.81.1`, and conformance must pass `8/8`. The linked `pi` executable depends on the prepared workspace remaining at that path. See the repository [installation and rollback instructions](../../README.md#build-and-install-the-patched-pi-cli) for details.
+The version must be `0.81.1`. The separate `pi-wait-for-user` launcher verifies the pinned Pi source and this package's compatibility metadata before every startup, then loads the Question Tool automatically. It does not replace an upstream `pi` command or alter existing Pi settings and sessions. See the repository [installation, verification, rollback, and uninstall guide](../../README.md#install).
 
-Persistently install the Question Tool into that patched Pi:
+The GitHub release also publishes `taylorrowser-pi-question-tool-0.1.0.tgz` as an independently checksummed package artifact. Hosts that already run the exact compatible patch can unpack it and use Pi's normal local-package workflow:
 
 ```bash
-pi install "$(pwd)/packages/question-tool"
-pi list
+mkdir pi-question-tool-0.1.0
+tar -xzf taylorrowser-pi-question-tool-0.1.0.tgz -C pi-question-tool-0.1.0
+pi install "$(pwd)/pi-question-tool-0.1.0/package"
 ```
 
-`pi list` must show the resolved package path. Start `pi` normally after installation. For a one-off run that does not modify settings, use:
+Unpatched Pi lacks protocol v1; the extension detects that absence and does not register `question`.
+
+For development against a prepared repository workspace, load the source directly without changing settings:
 
 ```bash
-pi -e "$(pwd)/packages/question-tool"
+.work/pi-v0.81.1/packages/coding-agent/dist/cli.js \
+  -e "$(pwd)/packages/question-tool"
 ```
-
-Remove the persistent package with:
-
-```bash
-pi remove "$(pwd)/packages/question-tool"
-```
-
-The package can also be packed independently with `npm pack ./packages/question-tool`. Publishing and archive-ready release artifacts are handled by the subsequent release ticket.
 
 ## Interaction behavior
 
