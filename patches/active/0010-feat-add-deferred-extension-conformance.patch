@@ -1,0 +1,1556 @@
+From f8c1f88d125ce7770ce563e812adb6609f37998a Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Wed, 22 Jul 2026 08:39:33 -0400
+Subject: [PATCH] feat(coding-agent): add deferred extension conformance
+
+---
+ packages/coding-agent/docs/deferred-tools.md  | 182 ++++++++++++
+ packages/coding-agent/docs/docs.json          |   4 +
+ packages/coding-agent/docs/extensions.md      |  28 +-
+ packages/coding-agent/docs/json.md            |  13 +-
+ packages/coding-agent/docs/rpc.md             |  58 +++-
+ packages/coding-agent/docs/sdk.md             |  35 ++-
+ packages/coding-agent/docs/session-format.md  |  24 ++
+ packages/coding-agent/docs/usage.md           |   4 +
+ .../examples/extensions/README.md             |   5 +
+ .../examples/extensions/durable-deferral.ts   | 209 ++++++++++++++
+ packages/coding-agent/src/cli/args.ts         |   1 +
+ .../coding-agent/src/core/agent-session.ts    |   2 +
+ .../coding-agent/src/core/extensions/index.ts |   7 +
+ .../src/core/extensions/loader.ts             |   2 +
+ .../extensions/tool-deferral-validation.ts    |  47 ++++
+ .../coding-agent/src/core/extensions/types.ts |  16 +-
+ .../coding-agent/src/deferred-conformance.ts  | 261 ++++++++++++++++++
+ packages/coding-agent/src/index.ts            |   7 +
+ packages/coding-agent/src/main.ts             |  12 +
+ .../22-deferred-conformance-command.test.ts   |  61 ++++
+ .../22-deferred-tool-registration.test.ts     | 141 ++++++++++
+ 21 files changed, 1111 insertions(+), 8 deletions(-)
+ create mode 100644 packages/coding-agent/docs/deferred-tools.md
+ create mode 100644 packages/coding-agent/examples/extensions/durable-deferral.ts
+ create mode 100644 packages/coding-agent/src/core/extensions/tool-deferral-validation.ts
+ create mode 100644 packages/coding-agent/src/deferred-conformance.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/22-deferred-conformance-command.test.ts
+ create mode 100644 packages/coding-agent/test/suite/regressions/22-deferred-tool-registration.test.ts
+
+diff --git a/packages/coding-agent/docs/deferred-tools.md b/packages/coding-agent/docs/deferred-tools.md
+new file mode 100644
+index 00000000..ae77e8e0
+--- /dev/null
++++ b/packages/coding-agent/docs/deferred-tools.md
+@@ -0,0 +1,182 @@
++> Pi can help you add durable deferral to an extension. Start from the shipped [`durable-deferral.ts`](../examples/extensions/durable-deferral.ts) example.
++
++# Durable Tool Deferral
++
++Durable tool deferral lets one tool hold an entire assistant-issued tool batch before any call executes. Pi records the held batch in the session journal, settles the current run, and can continue after process teardown when the package records a typed outcome.
++
++Use this for an explicit Interaction Request that must survive restart. Do not use it as a replacement for ordinary `tool_call` allow/block interception. A permission gate that only applies to the current call should block normally and ask the model to invoke a dedicated deferring tool if durable human input is required.
++
++## Ownership
++
++Pi core owns mechanical Deferred Tool Batch behavior:
++
++- whole-batch preflight and atomic holding
++- the neutral `deferredBatch` snapshot
++- journal markers, branch reconstruction, compaction pinning, and missing-result advancement
++- argument-free `resumeDeferred()` and `abandonDeferred()` operations
++- SDK, RPC, JSON, print, and generic TUI projection
++
++The extension package owns its Interaction Request:
++
++- request and outcome custom-entry schemas
++- Response, Interruption, and Cancellation validation
++- the first-terminal-outcome race
++- package-specific tool results and presentation
++- compatibility checks for its persisted payload
++
++Pi never accepts an answer, tool arguments, call IDs, or fabricated tool results through its resume/abandon operations. The package durably appends its outcome first; Pi rebinds the original call from active session history.
++
++## Capability
++
++Add `deferral` next to a tool's normal `execute` function:
++
++```typescript
++pi.registerTool({
++  name: "durable_wait",
++  label: "Durable Wait",
++  description: "Wait for durable human input",
++  parameters: Type.Object({ prompt: Type.String() }),
++  deferral: {
++    handlerId: "com.example.my-package.durable-wait",
++    handlerVersion: 1,
++    resumableHandlerVersions: [1],
++    inspectAvailability(request, ctx) {
++      return { status: "available" };
++    },
++    async resolve(request, signal, ctx) {
++      // Reconstruct/upsert the package request from ctx.sessionManager.
++      // Return the disposition implied by the first package outcome.
++      return { status: "deferred", correlationId: "package-request-id" };
++    },
++    async presenter(snapshot, ctx) {
++      // Optional TUI-only package presentation.
++    },
++  },
++  async execute(toolCallId, params, signal, onUpdate, ctx) {
++    // Return the package-owned result for the recorded outcome.
++  },
++});
++```
++
++Public types include `ToolDeferralDefinition`, `ToolDeferralRequest`, `ToolDeferralResolution`, `ToolDeferralAvailability`, `DeferredToolPresenter`, `DeferredBatchSnapshot`, and `DeferredOperationResult`.
++
++### Registration validation
++
++Registration fails before the tool becomes active when:
++
++- `handlerId` is not a lowercase, dot-namespaced identifier such as `com.example.package.wait`
++- `handlerVersion` is not a positive integer
++- `resumableHandlerVersions` is empty, contains duplicates/non-positive integers, or omits the current `handlerVersion`
++- `resolve` is not a function
++- `inspectAvailability` or `presenter` is present but not a function
++
++Handler identity is independent of tool name and package version. Keep it stable across tool renames. Versions are exact positive integers, not semver ranges.
++
++## Resolver operations
++
++`resolve` receives validated current parameters, the original tool-call ID, the current signal/context, and one operation:
++
++| Operation | Meaning |
++|---|---|
++| `evaluate` | Create or reuse the package request and decide whether to defer. |
++| `interrupt` | Record Interruption because user input continued the Agent Thread. Provenance is `new_user_prompt` or `preexisting_user_input`. |
++| `cancel` | Record Cancellation for `abandoned` or `tool_unavailable`. |
++
++It returns exactly one result:
++
++| Result | Meaning |
++|---|---|
++| `{ status: "deferred", correlationId }` | Hold the whole batch and settle without tool results or provider continuation. |
++| `{ status: "ready", disposition: "execute_batch" }` | A Response exists; execute every still-missing call normally. |
++| `{ status: "ready", disposition: "complete_owner" }` | Interruption/Cancellation exists; execute only the owner result and mark missing siblings not executed. |
++| `{ status: "unavailable", reason }` | Package code cannot currently advance the request. |
++
++The resolver and request upsert must be idempotent. Pi may evaluate again after a markerless append boundary, branch copy, or restart.
++
++## Lifecycle and ordering
++
++Normal journal order is:
++
++1. assistant tool-call batch
++2. package request custom entry
++3. core `tool_batch_deferred` marker
++4. package terminal-outcome custom entry
++5. source-ordered tool results
++6. assistant continuation
++
++The marker append is the Waiting State linearization point. Before it, already accepted steering/follow-up input wins as `Interruption(preexisting_user_input)` and no stable Waiting State is shown. After it, a normal `prompt()` records `Interruption(new_user_prompt)`, completes the held batch, appends the user message, and performs one provider continuation.
++
++A package Response should:
++
++1. reconstruct the active branch and reject a conflicting terminal outcome
++2. append its Response custom entry
++3. call `pi.resumeDeferred()` (extension) or `session.resumeDeferred()` (SDK)
++
++A package Cancellation should append its Cancellation entry and call `abandonDeferred()`. Calling `abandonDeferred()` while still pending asks compatible package code to record Cancellation first; core fallback is used only when compatible package execution is impossible.
++
++Both operations are argument-free and return:
++
++```typescript
++type DeferredOperationResult = {
++  status: "none" | "still_deferred" | "unavailable" | "advanced";
++  deferredBatch: DeferredBatchSnapshot | undefined;
++};
++```
++
++Extension operations are scheduled after the current callback/custom UI tears down. Do not reuse an operation captured from an extension instance invalidated by reload or session replacement.
++
++## Neutral state
++
++`session.deferredBatch` and `ctx.getDeferredBatch()` return either no work, a normal batch, or invalid history. A normal snapshot includes:
++
++- session and owning assistant identity
++- owner call ID
++- source-ordered call names/IDs and `missing`/`recorded` result state
++- phase `markerless`, `deferred`, `partial`, or `continuation`
++- optional package correlation ID
++- current `available` or typed `unavailable` classification
++
++Snapshots never include tool arguments or package payloads. Unavailability is derived, not journaled. Restoring the exact handler/tool/package code can make a saved batch available again without mutating history.
++
++A settled deferred Agent Thread has:
++
++- `session.isStreaming === false`
++- `session.isIdle === true`
++- a defined `session.deferredBatch`
++- a resolving `waitForIdle()`
++
++It is still user-facing Waiting State. “Idle” only describes the absence of an active in-memory run.
++
++## Compatibility and recovery
++
++Pi rechecks current registration, active-tool policy, argument preparation/schema, ordinary gates, protocol, handler identity/version, and package availability whenever it advances. Persisted history never bypasses current policy.
++
++Opening, `/resume`, `/reload`, and tree navigation reconstruct state without advancing it. Missing or incompatible code produces typed unavailable reasons and preserves the batch for restore-or-abandon recovery. Malformed/conflicting history is surfaced as invalid; Pi does not choose a request or terminal outcome.
++
++Durable deferral requires a persistent downstream session. `--no-session` and `SessionManager.inMemory()` fail closed before package request creation or tool execution.
++
++The durability claim is limited to completed session append calls and process teardown. It does not add `fsync`, power-loss safety, torn-tail repair, exactly-once provider calls, or exactly-once external tool side effects.
++
++## Modes
++
++| Mode | Behavior |
++|---|---|
++| TUI | Uses a compatible package presenter, falling back to `/deferred`; held siblings render as not executed. |
++| SDK | Exposes snapshots/events and argument-free resume/abandon operations. |
++| RPC | Mirrors SDK with JSON `null`, capability discovery, typed errors, and settled operation responses. |
++| JSON | Emits initial `deferred_batch_state` after the session header and later `deferred_batch_changed` events. |
++| Print | Preserves assistant text, prints a privacy-safe Waiting/unavailable line, and exits successfully. |
++
++JSON and print stop before later pre-supplied prompts once stable deferral is reached. They never open package UI or wait invisibly.
++
++## Conformance
++
++Run the offline reference suite shipped with Pi:
++
++```bash
++pi conformance
++```
++
++It uses the minimal durable-deferral extension and public session seams to check stable deferral, reload, teardown/reopen, Response, Interruption, Cancellation, unavailability recovery, and abandonment. Every check prints `PASS`; any failure exits nonzero with an actionable message.
++
++Run this command against the exact downstream Pi build you distribute. Package-specific outcome schemas and UI still need their own tests; conformance proves the Pi capability and reference architecture, not arbitrary package business logic.
+diff --git a/packages/coding-agent/docs/docs.json b/packages/coding-agent/docs/docs.json
+index bbc9e74b..0a1bddfe 100644
+--- a/packages/coding-agent/docs/docs.json
++++ b/packages/coding-agent/docs/docs.json
+@@ -52,6 +52,10 @@
+           "title": "Extensions",
+           "path": "extensions.md"
+         },
++        {
++          "title": "Durable Tool Deferral",
++          "path": "deferred-tools.md"
++        },
+         {
+           "title": "Skills",
+           "path": "skills.md"
+diff --git a/packages/coding-agent/docs/extensions.md b/packages/coding-agent/docs/extensions.md
+index 6aec1196..ef456a49 100644
+--- a/packages/coding-agent/docs/extensions.md
++++ b/packages/coding-agent/docs/extensions.md
+@@ -8,6 +8,7 @@ Extensions are TypeScript modules that extend pi's behavior. They can subscribe
+ 
+ **Key capabilities:**
+ - **Custom tools** - Register tools the LLM can call via `pi.registerTool()`
++- **Durable tool deferral** - Persist an Interaction Request and hold its complete tool batch across restart
+ - **Event interception** - Block or modify tool calls, inject context, customize compaction
+ - **User interaction** - Prompt users via `ctx.ui` (select, confirm, input, notify)
+ - **Custom UI components** - Full TUI components with keyboard input via `ctx.ui.custom()` for complex interactions
+@@ -47,6 +48,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
+ - [ExtensionAPI Methods](#extensionapi-methods)
+ - [State Management](#state-management)
+ - [Custom Tools](#custom-tools)
++  - [Durable Tool Deferral](#durable-tool-deferral)
+   - [Dynamic Tool Loading](#dynamic-tool-loading)
+ - [Custom UI](#custom-ui)
+ - [Error Handling](#error-handling)
+@@ -982,6 +984,12 @@ ctx.sessionManager.buildContextEntries()    // Active branch entries with compac
+ ctx.sessionManager.getLeafId()              // Current leaf entry ID
+ ```
+ 
++### ctx.capabilities / ctx.getDeferredBatch()
++
++`ctx.capabilities` advertises the exact durable-tool protocol versions and operations supported by this Pi. `ctx.getDeferredBatch()` returns the complete privacy-safe snapshot for the active branch, or `undefined` when no Deferred Tool Batch is active.
++
++A deferred Agent Thread is settled: `ctx.isIdle()` is true even though `ctx.getDeferredBatch()` remains defined. See [Durable Tool Deferral](deferred-tools.md) for phases, availability, and package/core ownership.
++
+ ### ctx.modelRegistry / ctx.model
+ 
+ Access to models, providers, and resolved authentication. `ctx.modelRegistry.getProvider(id)` returns the effective pi-ai provider, while `getProviderAuth(id)` resolves its current API key, headers, base URL, and provider-scoped environment without requiring a loaded model. `ctx.model` is the active model.
+@@ -1383,6 +1391,12 @@ pi.registerTool({
+ });
+ ```
+ 
++### pi.resumeDeferred() / pi.abandonDeferred()
++
++Schedule argument-free advancement or abandonment of the active Deferred Tool Batch. Both return a typed `DeferredOperationResult` after resulting work settles. They never accept Responses, arguments, call IDs, or tool results.
++
++Calls made inside an extension event or `ctx.ui.custom()` callback begin only after that callback/UI teardown unwinds. A package must append its typed outcome first. Use `resumeDeferred()` after Response and `abandonDeferred()` after Cancellation. See [Durable Tool Deferral](deferred-tools.md).
++
+ ### pi.sendMessage(message, options?)
+ 
+ Inject a custom message into the session. Custom messages participate in LLM context. For durable TUI-only content that should not be sent to the LLM, use [`pi.appendEntry()`](#piappendentrycustomtype-data) with [`pi.registerEntryRenderer()`](#piregisterentryrenderercustomtype-renderer).
+@@ -1854,6 +1868,12 @@ export default function (pi: ExtensionAPI) {
+ 
+ Register tools the LLM can call via `pi.registerTool()`. Tools appear in the system prompt and can have custom rendering.
+ 
++### Durable Tool Deferral
++
++A tool may declare one versioned `deferral` capability next to `execute`. Exactly one capable call may own a batch; Pi validates every call before executing any of them and persists a neutral marker when the owner returns `deferred`.
++
++Registration validates namespaced handler identity, positive exact versions, resumable versions, resolver functions, availability inspection, and presenter configuration. Invalid definitions fail while the extension loads. Start with [`durable-deferral.ts`](../examples/extensions/durable-deferral.ts), run `pi conformance`, and read [Durable Tool Deferral](deferred-tools.md) before implementing package records or presentation.
++
+ Use `promptSnippet` for a short one-line entry in the `Available tools` section in the default system prompt. If omitted, custom tools are left out of that section.
+ 
+ Use `promptGuidelines` to add tool-specific bullets to the default system prompt `Guidelines` section. These bullets are included only while the tool is active (for example, after `pi.setActiveTools([...])`).
+@@ -2859,10 +2879,10 @@ const highlighted = highlightCode(code, lang, theme);
+ 
+ | Mode | `ctx.mode` | `ctx.hasUI` | Notes |
+ |------|------------|-------------|-------|
+-| Interactive | `"tui"` | `true` | Full TUI with terminal rendering |
+-| RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs and notifications via JSON protocol; `custom()` returns `undefined`. See [rpc.md](rpc.md) |
+-| JSON (`--mode json`) | `"json"` | `false` | Event stream to stdout; UI methods are no-ops |
+-| Print (`-p`) | `"print"` | `false` | Extensions run but can't prompt |
++| Interactive | `"tui"` | `true` | Full TUI; compatible deferred presenters may open after durable settlement. |
++| RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs and notifications via JSON protocol; `custom()` returns `undefined`; deferred work uses dedicated RPC state/operations. See [rpc.md](rpc.md) |
++| JSON (`--mode json`) | `"json"` | `false` | Event stream to stdout; UI methods are no-ops; deferred state is emitted and exits successfully. |
++| Print (`-p`) | `"print"` | `false` | Extensions cannot prompt; Waiting/unavailable state is printed safely and exits successfully. |
+ 
+ Use `ctx.mode === "tui"` before TUI-specific features (`custom()`, component factories, terminal input). Use `ctx.hasUI` before dialog and notification methods that work in both TUI and RPC modes.
+ 
+diff --git a/packages/coding-agent/docs/json.md b/packages/coding-agent/docs/json.md
+index a9d28cbc..4b4b117b 100644
+--- a/packages/coding-agent/docs/json.md
++++ b/packages/coding-agent/docs/json.md
+@@ -21,7 +21,8 @@ type AgentSessionEvent =
+   | { type: "summarization_retry_scheduled"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+   | { type: "summarization_retry_attempt_start"; source: "branchSummary" }
+   | { type: "summarization_retry_attempt_start"; source: "compaction"; reason: "manual" | "threshold" | "overflow" }
+-  | { type: "summarization_retry_finished" };
++  | { type: "summarization_retry_finished" }
++  | { type: "deferred_batch_changed"; deferredBatch: DeferredBatchSnapshot | undefined };
+ ```
+ 
+ `queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction.
+@@ -67,6 +68,14 @@ Each line is a JSON object. The first line is the session header:
+ {"type":"session","version":3,"id":"uuid","timestamp":"...","cwd":"/path"}
+ ```
+ 
++When an opened session already has deferred work, the next line after the header is an authoritative initial snapshot:
++
++```json
++{"type":"deferred_batch_state","deferredBatch":{"kind":"batch","phase":"deferred","availability":{"status":"available"},"...":"..."}}
++```
++
++Live replacement state uses `deferred_batch_changed`; cleared state is explicit JSON `null`. Snapshots contain mechanical metadata only—never tool arguments or package request payloads. A newly reached durable Waiting State exits successfully, and later pre-supplied prompts in the same invocation are left unprocessed rather than reinterpreted as Interruptions.
++
+ Followed by events as they occur:
+ 
+ ```json
+@@ -79,6 +88,8 @@ Followed by events as they occur:
+ {"type":"agent_end","messages":[...]}
+ ```
+ 
++See [Durable Tool Deferral](deferred-tools.md) for lifecycle, compatibility, and behavior across JSON, print, RPC, TUI, and SDK modes.
++
+ ## Example
+ 
+ ```bash
+diff --git a/packages/coding-agent/docs/rpc.md b/packages/coding-agent/docs/rpc.md
+index 7e86feca..1bd80d2d 100644
+--- a/packages/coding-agent/docs/rpc.md
++++ b/packages/coding-agent/docs/rpc.md
+@@ -38,6 +38,37 @@ In particular, Node `readline` is not protocol-compliant for RPC mode because it
+ 
+ ## Commands
+ 
++### Deferred Tool Batches
++
++Use `get_capabilities` to discover exact process-wide support. Older Pi versions return their normal unknown-command error.
++
++```json
++{"id":"caps","type":"get_capabilities"}
++```
++
++```json
++{"id":"caps","type":"response","command":"get_capabilities","success":true,"data":{"deferredToolBatches":{"protocolVersions":[1],"operations":["resume","abandon"]}}}
++```
++
++`get_state.data.deferredBatch` is either a complete privacy-safe snapshot or `null`. Arguments and package request payloads are never included. Per-session tool/handler compatibility is reported under `deferredBatch.availability`; process capability alone does not mean the current batch is available.
++
++Advance with argument-free commands:
++
++```json
++{"id":"resume","type":"resume_deferred"}
++{"id":"abandon","type":"abandon_deferred"}
++```
++
++The response is sent only after resulting work settles and contains status `none`, `still_deferred`, `unavailable`, or `advanced` plus the final `deferredBatch` snapshot (`null` when cleared):
++
++```json
++{"id":"resume","type":"response","command":"resume_deferred","success":true,"data":{"status":"advanced","deferredBatch":null}}
++```
++
++State changes stream as `{"type":"deferred_batch_changed","deferredBatch":...}` with a complete replacement snapshot or `null`. Reconnecting clients call `get_state` for authoritative current state. `agent_waiting`, `deferred_unavailable`, and invalid-history failures include `errorCode` plus `data.deferredBatch`; clients must not parse human `error` text.
++
++Package-specific RPC APIs record typed Responses/Cancellations. Core resume/abandon commands never accept answers, call IDs, arguments, or tool results. See [Durable Tool Deferral](deferred-tools.md).
++
+ ### Prompting
+ 
+ #### prompt
+@@ -185,7 +216,8 @@ Response:
+     "sessionName": "my-feature-work",
+     "autoCompactionEnabled": true,
+     "messageCount": 5,
+-    "pendingMessageCount": 0
++    "pendingMessageCount": 0,
++    "deferredBatch": null
+   }
+ }
+ ```
+@@ -855,6 +887,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
+ | `summarization_retry_attempt_start` | Retried summarization request starts |
+ | `summarization_retry_finished` | Summarization retry loop completes |
+ | `extension_error` | Extension threw an error |
++| `deferred_batch_changed` | Complete replacement deferred snapshot, or `null` when cleared |
+ 
+ ### agent_start
+ 
+@@ -1110,6 +1143,16 @@ For branch summaries, `source` is `"branchSummary"` and no `reason` is present.
+ }
+ ```
+ 
++### deferred_batch_changed
++
++Emitted after durable deferred state changes. The payload is the complete replacement snapshot; it is `null` when state clears.
++
++```json
++{"type":"deferred_batch_changed","deferredBatch":{"kind":"batch","phase":"deferred","availability":{"status":"available"},"...":"..."}}
++```
++
++Events are live hints rather than a durable subscription. Use `get_state` after reconnect or runtime/session replacement.
++
+ ### extension_error
+ 
+ Emitted when an extension throws an error.
+@@ -1328,6 +1371,19 @@ Failed commands return a response with `success: false`:
+ }
+ ```
+ 
++Deferred-state failures also include a machine-readable code and current snapshot:
++
++```json
++{
++  "type": "response",
++  "command": "prompt",
++  "success": false,
++  "error": "The Agent Thread is waiting",
++  "errorCode": "agent_waiting",
++  "data": { "deferredBatch": { "kind": "batch", "phase": "deferred" } }
++}
++```
++
+ Parse errors:
+ 
+ ```json
+diff --git a/packages/coding-agent/docs/sdk.md b/packages/coding-agent/docs/sdk.md
+index 1dc32a14..4c5996e0 100644
+--- a/packages/coding-agent/docs/sdk.md
++++ b/packages/coding-agent/docs/sdk.md
+@@ -95,6 +95,13 @@ interface AgentSession {
+   thinkingLevel: ThinkingLevel;
+   messages: AgentMessage[];
+   isStreaming: boolean;
++  isIdle: boolean;
++  capabilities: AgentSessionCapabilities;
++  deferredBatch: DeferredBatchSnapshot | undefined;
++
++  // Argument-free durable advancement
++  resumeDeferred(): Promise<DeferredOperationResult>;
++  abandonDeferred(): Promise<DeferredOperationResult>;
+ 
+   // In-place tree navigation within the current session file
+   navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
+@@ -233,6 +240,22 @@ await session.followUp("After you're done, also do this");
+ 
+ Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued).
+ 
++### Durable Tool Batches
++
++Read `session.deferredBatch` for the complete neutral snapshot of active deferred work. A durable Waiting State is settled: `isStreaming` is false, `isIdle` is true, and `waitForIdle()` resolves while `deferredBatch` remains defined.
++
++```typescript
++const snapshot = session.deferredBatch;
++if (snapshot?.kind === "batch" && snapshot.availability.status === "available") {
++  const result = await session.resumeDeferred();
++  console.log(result.status, result.deferredBatch);
++}
++```
++
++`resumeDeferred()` and `abandonDeferred()` accept no arguments and return `none`, `still_deferred`, `unavailable`, or `advanced` plus the final snapshot. A package records its typed Response before resume or typed Cancellation before abandon. A normal `prompt()` while deferred performs the ordered Interruption path; `steer()` and `followUp()` reject with `AgentSessionError.code === "agent_waiting"`.
++
++Subscribe to `deferred_batch_changed` for complete replacement snapshots, and read the getter immediately after creating/replacing a runtime for initial state. Current registration, schemas, enablement, and gates are rechecked on every advancement. See [Durable Tool Deferral](deferred-tools.md).
++
+ ### Agent and AgentState
+ 
+ The `Agent` class (from `@earendil-works/pi-agent-core`) handles the core LLM interaction. Access it via `session.agent`.
+@@ -295,6 +318,11 @@ session.subscribe((event) => {
+       // Message complete
+       break;
+     
++    // Durable state replacement
++    case "deferred_batch_changed":
++      console.log(event.deferredBatch);
++      break;
++
+     // Agent lifecycle
+     case "agent_start":
+       // Agent started processing prompt
+@@ -1181,6 +1209,11 @@ type ToolDefinition
+ type Skill
+ type PromptTemplate
+ type Tool
++type ToolDeferralDefinition
++type ToolDeferralRequest
++type ToolDeferralResolution
++type DeferredBatchSnapshot
++type DeferredOperationResult
+ ```
+ 
+-For extension types, see [extensions.md](extensions.md) for the full API.
++For extension types, see [extensions.md](extensions.md) and [Durable Tool Deferral](deferred-tools.md) for the full API.
+diff --git a/packages/coding-agent/docs/session-format.md b/packages/coding-agent/docs/session-format.md
+index e2c49f1d..61b0e918 100644
+--- a/packages/coding-agent/docs/session-format.md
++++ b/packages/coding-agent/docs/session-format.md
+@@ -26,6 +26,16 @@ Sessions have a version field in the header:
+ 
+ Existing sessions are automatically migrated to the current version (v3) when loaded.
+ 
++### Downstream durable-deferral format
++
++A session that first records durable deferred work is changed to the fail-closed downstream header type `dev.taylorrowser.pi-wait-for-user/session`, downstream format version `1`, with `basedOnPiSessionVersion: 3`. This namespace prevents unpatched Pi or a future official schema from silently interpreting experimental records.
++
++```json
++{"type":"dev.taylorrowser.pi-wait-for-user/session","version":1,"basedOnPiSessionVersion":3,"id":"uuid","timestamp":"...","cwd":"/path/to/project"}
++```
++
++Unsupported downstream versions or mismatched base Pi versions are rejected before mutation. Durable deferral is unavailable for in-memory sessions and `--no-session`. See [Durable Tool Deferral](deferred-tools.md).
++
+ ## Source Files
+ 
+ Source on GitHub ([pi-mono](https://github.com/earendil-works/pi-mono)):
+@@ -268,6 +278,20 @@ Extension state persistence. Does NOT participate in LLM context.
+ 
+ Use `customType` to identify your extension's entries on reload. Interactive mode can render custom entries via `pi.registerEntryRenderer(customType, renderer)`, but they still do not participate in LLM context.
+ 
++Deferring packages use package-namespaced custom entries for request payloads and typed terminal outcomes. Those records remain package-owned and must be reconstructed from active-branch ancestry rather than physical adjacency.
++
++### ToolBatchDeferredEntry
++
++Core appends one neutral marker after the package request and before any terminal outcome or tool result:
++
++```json
++{"type":"tool_batch_deferred","id":"d3f3rr3d","parentId":"request1","timestamp":"...","assistantEntryId":"assistant1","ownerCallId":"call-1","heldCallIds":["call-0","call-1"],"correlationId":"request-1","protocolVersion":1,"handlerId":"com.example.package.wait","handlerVersion":1}
++```
++
++`heldCallIds` exactly matches every tool call in the owning assistant entry in source order, and `ownerCallId` occurs exactly once. The marker intentionally does not duplicate tool names, arguments, package payloads, session identity, branch identity, or derived status. The owning assistant message and active ancestry are authoritative.
++
++Normal order is assistant batch → package request custom entry → marker → package outcome custom entry → source-ordered tool results → assistant continuation. Correlated records need not be adjacent. Opening a session reconstructs this lifecycle without appending or executing anything.
++
+ ### CustomMessageEntry
+ 
+ Extension-injected messages that DO participate in LLM context.
+diff --git a/packages/coding-agent/docs/usage.md b/packages/coding-agent/docs/usage.md
+index c9df34ef..6d33e835 100644
+--- a/packages/coding-agent/docs/usage.md
++++ b/packages/coding-agent/docs/usage.md
+@@ -50,6 +50,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
+ | `/fork` | Create a new session from a previous user message |
+ | `/clone` | Duplicate the current active branch into a new session |
+ | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
++| `/deferred` | Inspect, retry, or abandon the active Deferred Tool Batch |
+ | `/copy` | Copy last assistant message to clipboard |
+ | `/export [file]` | Export session to HTML or JSONL |
+ | `/import <file>` | Import and resume a session from a JSONL file |
+@@ -72,6 +73,8 @@ On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described i
+ 
+ Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpMode`.
+ 
++When durable Waiting State is already settled, steering and follow-up queues reject instead of accepting memory-only messages. Submit a normal editor message to perform the ordered Interruption path, use the package presenter to record a Response, or open `/deferred` for generic recovery. Quitting, aborting, navigating branches, or dismissing presentation does not imply Cancellation. See [Durable Tool Deferral](deferred-tools.md).
++
+ ## Sessions
+ 
+ Sessions are saved automatically to `~/.pi/agent/sessions/`, organized by working directory.
+@@ -157,6 +160,7 @@ pi update --self             # Update pi only
+ pi update --extension <src>  # Update one package
+ pi list                      # List installed packages
+ pi config                    # Enable/disable package resources
++pi conformance               # Validate durable tool deferral offline
+ ```
+ 
+ These commands manage pi packages and `pi update` can update the pi CLI installation. To uninstall pi itself, see [Quickstart](quickstart.md#uninstall). `pi config` and project package commands accept `--approve`/`--no-approve` to trust or ignore project-local settings for one command. `pi update` never prompts for project trust.
+diff --git a/packages/coding-agent/examples/extensions/README.md b/packages/coding-agent/examples/extensions/README.md
+index d60d6e38..1c91df75 100644
+--- a/packages/coding-agent/examples/extensions/README.md
++++ b/packages/coding-agent/examples/extensions/README.md
+@@ -32,6 +32,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
+ |-----------|-------------|
+ | `todo.ts` | Todo list tool + `/todos` command with custom rendering and state persistence |
+ | `hello.ts` | Minimal custom tool example |
++| `durable-deferral.ts` | Minimal package-owned durable Interaction Request; validated by `pi conformance` |
+ | `question.ts` | Demonstrates `ctx.ui.select()` for asking the user questions with custom UI |
+ | `questionnaire.ts` | Multi-question input with tab bar navigation between questions |
+ | `tool-override.ts` | Override built-in tools (e.g., add logging/access control to `read`) |
+@@ -193,6 +194,10 @@ action: StringEnum(["list", "add"] as const)
+ action: Type.Union([Type.Literal("list"), Type.Literal("add")])
+ ```
+ 
++**Durable deferral for restart-safe human input:**
++
++Start from `durable-deferral.ts`, then run `pi conformance`. The package owns request/outcome custom entries and presentation; Pi owns the neutral Deferred Tool Batch marker and argument-free advancement. See [Durable Tool Deferral](../../docs/deferred-tools.md).
++
+ **State persistence via details:**
+ ```typescript
+ // Store state in tool result details for proper forking support
+diff --git a/packages/coding-agent/examples/extensions/durable-deferral.ts b/packages/coding-agent/examples/extensions/durable-deferral.ts
+new file mode 100644
+index 00000000..9d2cf204
+--- /dev/null
++++ b/packages/coding-agent/examples/extensions/durable-deferral.ts
+@@ -0,0 +1,209 @@
++import type { ExtensionAPI, ExtensionFactory, SessionEntry } from "@earendil-works/pi-coding-agent";
++import { Text } from "@earendil-works/pi-tui";
++import { Type } from "typebox";
++
++const REQUEST_TYPE = "dev.pi.example.durable-wait/request";
++const OUTCOME_TYPE = "dev.pi.example.durable-wait/outcome";
++const PACKAGE_VERSION = 1;
++export const RESPONSE_EVENT = "dev.pi.example.durable-wait/respond";
++export const CANCELLATION_EVENT = "dev.pi.example.durable-wait/cancel";
++export const OUTCOME_RECORDED_EVENT = "dev.pi.example.durable-wait/outcome-recorded";
++
++interface WaitRequest {
++	version: typeof PACKAGE_VERSION;
++	requestId: string;
++	assistantEntryId: string;
++	ownerCallId: string;
++	payload: { prompt: string };
++}
++
++export interface WaitOutcome {
++	version: typeof PACKAGE_VERSION;
++	requestId: string;
++	outcome:
++		| { type: "response"; value: string }
++		| { type: "interruption"; provenance: "new_user_prompt" | "preexisting_user_input" }
++		| { type: "cancellation"; reason: string };
++}
++
++export type RecordWaitOutcomeResult =
++	| { status: "recorded"; outcome: WaitOutcome }
++	| { status: "conflict"; outcome: WaitOutcome };
++
++/** Package-specific outcome seam used by SDK/RPC hosts and the conformance command. */
++export interface DurableWaitController {
++	respond(value: string): RecordWaitOutcomeResult;
++	cancel(reason: string): RecordWaitOutcomeResult;
++	getOutcome(): WaitOutcome | undefined;
++}
++
++function customData<T>(entry: SessionEntry, customType: string): T | undefined {
++	return entry.type === "custom" && entry.customType === customType ? (entry.data as T) : undefined;
++}
++
++function findLast<T>(branch: SessionEntry[], customType: string): T | undefined {
++	for (let index = branch.length - 1; index >= 0; index--) {
++		const data = customData<T>(branch[index], customType);
++		if (data) return data;
++	}
++	return undefined;
++}
++
++function findOwningAssistant(branch: SessionEntry[], toolCallId: string): Extract<SessionEntry, { type: "message" }> {
++	for (let index = branch.length - 1; index >= 0; index--) {
++		const entry = branch[index];
++		if (
++			entry.type === "message" &&
++			entry.message.role === "assistant" &&
++			entry.message.content.some((content) => content.type === "toolCall" && content.id === toolCallId)
++		) {
++			return entry;
++		}
++	}
++	throw new Error(`Owning assistant entry for ${toolCallId} was not found`);
++}
++
++export function createDurableWaitExtension(controller?: Partial<DurableWaitController>): ExtensionFactory {
++	return (pi: ExtensionAPI) => {
++		let currentBranch: (() => SessionEntry[]) | undefined;
++
++		const getRequest = (): WaitRequest => {
++			const request = currentBranch && findLast<WaitRequest>(currentBranch(), REQUEST_TYPE);
++			if (!request) throw new Error("No active durable wait request");
++			return request;
++		};
++		const getOutcome = (): WaitOutcome | undefined => {
++			const request = getRequest();
++			return currentBranch?.()
++				.map((entry) => customData<WaitOutcome>(entry, OUTCOME_TYPE))
++				.find((outcome) => outcome?.requestId === request.requestId);
++		};
++		const recordOutcome = (outcome: WaitOutcome["outcome"]): RecordWaitOutcomeResult => {
++			const request = getRequest();
++			const existing = getOutcome();
++			if (existing) return { status: "conflict", outcome: existing };
++			const entry: WaitOutcome = { version: PACKAGE_VERSION, requestId: request.requestId, outcome };
++			pi.appendEntry(OUTCOME_TYPE, entry);
++			return { status: "recorded", outcome: entry };
++		};
++
++		if (controller) {
++			controller.respond = (value) => recordOutcome({ type: "response", value });
++			controller.cancel = (reason) => recordOutcome({ type: "cancellation", reason });
++			controller.getOutcome = getOutcome;
++		}
++		const stopResponseListener = pi.events.on(RESPONSE_EVENT, (data) => {
++			const value = typeof data === "string" ? data : "";
++			pi.events.emit(OUTCOME_RECORDED_EVENT, recordOutcome({ type: "response", value }));
++		});
++		const stopCancellationListener = pi.events.on(CANCELLATION_EVENT, (data) => {
++			const reason = typeof data === "string" ? data : "cancelled";
++			pi.events.emit(OUTCOME_RECORDED_EVENT, recordOutcome({ type: "cancellation", reason }));
++		});
++		pi.on("session_shutdown", () => {
++			stopResponseListener();
++			stopCancellationListener();
++		});
++
++		pi.registerTool({
++			name: "durable_wait",
++			label: "Durable Wait",
++			description: "Pause the Agent Thread durably until the user responds or continues without responding",
++			parameters: Type.Object({
++				prompt: Type.String({ description: "The input requested from the user" }),
++			}),
++			deferral: {
++				handlerId: "dev.pi.example.durable-wait",
++				handlerVersion: 1,
++				resumableHandlerVersions: [1],
++				inspectAvailability: ({ correlationId }, ctx) => {
++					const records = ctx.sessionManager.getBranch();
++					const request = records
++						.map((entry) => customData<WaitRequest>(entry, REQUEST_TYPE))
++						.find((entry) => entry?.requestId === correlationId);
++					const outcome = records
++						.map((entry) => customData<WaitOutcome>(entry, OUTCOME_TYPE))
++						.find((entry) => entry?.requestId === correlationId);
++					return (request?.version ?? outcome?.version) === PACKAGE_VERSION
++						? { status: "available" }
++						: {
++								status: "unavailable",
++								message: "The durable-wait package schema is incompatible with the persisted request.",
++								details: { supportedPackageVersions: [PACKAGE_VERSION] },
++							};
++				},
++				resolve: async (operation, _signal, ctx) => {
++					const branch = ctx.sessionManager.getBranch();
++					currentBranch = () => ctx.sessionManager.getBranch();
++					const assistant = findOwningAssistant(branch, operation.toolCallId);
++					let request = branch
++						.map((entry) => customData<WaitRequest>(entry, REQUEST_TYPE))
++						.find(
++							(entry) => entry?.assistantEntryId === assistant.id && entry.ownerCallId === operation.toolCallId,
++						);
++					if (!request) {
++						request = {
++							version: PACKAGE_VERSION,
++							requestId: `wait-${assistant.id}-${operation.toolCallId}`,
++							assistantEntryId: assistant.id,
++							ownerCallId: operation.toolCallId,
++							payload: { prompt: operation.params.prompt },
++						};
++						pi.appendEntry(REQUEST_TYPE, request);
++					}
++
++					const existingOutcome = getOutcome();
++					if (existingOutcome) {
++						return {
++							status: "ready",
++							disposition: existingOutcome.outcome.type === "response" ? "execute_batch" : "complete_owner",
++						};
++					}
++					if (operation.operation === "interrupt") {
++						recordOutcome({ type: "interruption", provenance: operation.provenance });
++						return { status: "ready", disposition: "complete_owner" };
++					}
++					if (operation.operation === "cancel") {
++						recordOutcome({ type: "cancellation", reason: operation.reason });
++						return { status: "ready", disposition: "complete_owner" };
++					}
++					return { status: "deferred", correlationId: request.requestId };
++				},
++				presenter: async (_snapshot, ctx) => {
++					if (ctx.mode !== "tui") return;
++					const request = getRequest();
++					const value = await ctx.ui.input("Waiting for user", request.payload.prompt);
++					if (value === undefined) return;
++					if (recordOutcome({ type: "response", value }).status === "recorded") {
++						void pi.resumeDeferred();
++					}
++				},
++			},
++			async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
++				currentBranch = () => ctx.sessionManager.getBranch();
++				const outcome = getOutcome();
++				if (!outcome) throw new Error("Durable wait outcome was not found");
++				const text =
++					outcome.outcome.type === "response"
++						? `Response: ${outcome.outcome.value}`
++						: outcome.outcome.type === "interruption"
++							? "Left unanswered"
++							: `Cancelled: ${outcome.outcome.reason}`;
++				return { content: [{ type: "text", text }], details: { outcome } };
++			},
++			renderCall(args, theme) {
++				return new Text(
++					`${theme.fg("toolTitle", theme.bold("durable_wait "))}${theme.fg("muted", args.prompt)}`,
++					0,
++					0,
++				);
++			},
++			renderResult(result, _options, theme) {
++				const text = result.content[0];
++				return new Text(theme.fg("accent", text?.type === "text" ? text.text : ""), 0, 0);
++			},
++		});
++	};
++}
++
++export default createDurableWaitExtension();
+diff --git a/packages/coding-agent/src/cli/args.ts b/packages/coding-agent/src/cli/args.ts
+index c194579c..9755c680 100644
+--- a/packages/coding-agent/src/cli/args.ts
++++ b/packages/coding-agent/src/cli/args.ts
+@@ -232,6 +232,7 @@ ${chalk.bold("Commands:")}
+   ${APP_NAME} update [source|self|pi]   Update pi, extensions, or model catalogs
+   ${APP_NAME} list                      List installed extensions from settings
+   ${APP_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
++  ${APP_NAME} conformance               Validate durable deferral through the public extension and SDK seams
+   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list/config
+ 
+ ${chalk.bold("Options:")}
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index befb8ff2..09d09a8e 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -103,6 +103,7 @@ import {
+ 	wrapRegisteredTools,
+ } from "./extensions/index.ts";
+ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
++import { validateToolDeferralRegistration } from "./extensions/tool-deferral-validation.ts";
+ import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
+ import { ModelRegistry } from "./model-registry.ts";
+ import type { ModelRuntime } from "./model-runtime.ts";
+@@ -413,6 +414,7 @@ export class AgentSession {
+ 		this._scopedModels = config.scopedModels ?? [];
+ 		this._resourceLoader = config.resourceLoader;
+ 		this._customTools = config.customTools ?? [];
++		for (const tool of this._customTools) validateToolDeferralRegistration(tool);
+ 		this._cwd = config.cwd;
+ 		this._modelRuntime = config.modelRuntime;
+ 		this._extensionRunnerRef = config.extensionRunnerRef;
+diff --git a/packages/coding-agent/src/core/extensions/index.ts b/packages/coding-agent/src/core/extensions/index.ts
+index e1f848ea..dc8351ae 100644
+--- a/packages/coding-agent/src/core/extensions/index.ts
++++ b/packages/coding-agent/src/core/extensions/index.ts
+@@ -40,6 +40,7 @@ export type {
+ 	BeforeProviderRequestEvent,
+ 	BeforeProviderRequestEventResult,
+ 	BuildSystemPromptOptions,
++	CancelToolDeferralRequest,
+ 	// Context
+ 	CompactOptions,
+ 	// Events - Agent
+@@ -56,6 +57,7 @@ export type {
+ 	// Message and Entry Rendering
+ 	EntryRenderer,
+ 	EntryRenderOptions,
++	EvaluateToolDeferralRequest,
+ 	ExecOptions,
+ 	ExecResult,
+ 	Extension,
+@@ -92,6 +94,8 @@ export type {
+ 	InputEvent,
+ 	InputEventResult,
+ 	InputSource,
++	InspectToolDeferralRequest,
++	InterruptToolDeferralRequest,
+ 	KeybindingsManager,
+ 	LoadExtensionsResult,
+ 	LsToolCallEvent,
+@@ -147,7 +151,10 @@ export type {
+ 	// Events - Tool
+ 	ToolCallEvent,
+ 	ToolCallEventResult,
++	ToolDeferralAvailability,
+ 	ToolDeferralDefinition,
++	ToolDeferralRequest,
++	ToolDeferralResolution,
+ 	// Tools
+ 	ToolDefinition,
+ 	// Events - Tool Execution
+diff --git a/packages/coding-agent/src/core/extensions/loader.ts b/packages/coding-agent/src/core/extensions/loader.ts
+index 70c08746..25bef510 100644
+--- a/packages/coding-agent/src/core/extensions/loader.ts
++++ b/packages/coding-agent/src/core/extensions/loader.ts
+@@ -31,6 +31,7 @@ import type { ExecOptions } from "../exec.ts";
+ import { execCommand } from "../exec.ts";
+ import { createSyntheticSourceInfo } from "../source-info.ts";
+ import { time } from "../timings.ts";
++import { validateToolDeferralRegistration } from "./tool-deferral-validation.ts";
+ import type {
+ 	EntryRenderer,
+ 	Extension,
+@@ -246,6 +247,7 @@ function createExtensionAPI(
+ 
+ 		registerTool(tool: ToolDefinition): void {
+ 			runtime.assertActive();
++			validateToolDeferralRegistration(tool);
+ 			extension.tools.set(tool.name, {
+ 				definition: tool,
+ 				sourceInfo: extension.sourceInfo,
+diff --git a/packages/coding-agent/src/core/extensions/tool-deferral-validation.ts b/packages/coding-agent/src/core/extensions/tool-deferral-validation.ts
+new file mode 100644
+index 00000000..bd54b639
+--- /dev/null
++++ b/packages/coding-agent/src/core/extensions/tool-deferral-validation.ts
+@@ -0,0 +1,47 @@
++import type { ToolDefinition } from "./types.ts";
++
++const HANDLER_ID_PATTERN = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?)+$/;
++
++function fail(toolName: string, message: string): never {
++	throw new Error(`Tool "${toolName}" ${message}`);
++}
++
++/** Validate the runtime shape and compatibility claims of a durable deferral capability. */
++export function validateToolDeferralRegistration(tool: ToolDefinition): void {
++	const deferral = tool.deferral as unknown;
++	if (deferral === undefined) return;
++	if (deferral === null || typeof deferral !== "object" || Array.isArray(deferral)) {
++		fail(tool.name, "deferral must be an object");
++	}
++
++	const capability = deferral as Record<string, unknown>;
++	if (typeof capability.handlerId !== "string" || !HANDLER_ID_PATTERN.test(capability.handlerId)) {
++		fail(tool.name, 'deferral.handlerId must be a globally namespaced identifier such as "com.example.package.wait"');
++	}
++	if (!Number.isInteger(capability.handlerVersion) || (capability.handlerVersion as number) <= 0) {
++		fail(tool.name, "deferral.handlerVersion must be a positive integer");
++	}
++
++	const versions = capability.resumableHandlerVersions;
++	if (!Array.isArray(versions) || versions.length === 0) {
++		fail(tool.name, "deferral.resumableHandlerVersions must be a non-empty array");
++	}
++	if (!versions.every((version) => Number.isInteger(version) && version > 0)) {
++		fail(tool.name, "deferral.resumableHandlerVersions must contain only positive integers");
++	}
++	if (new Set(versions).size !== versions.length) {
++		fail(tool.name, "deferral.resumableHandlerVersions must not contain duplicates");
++	}
++	if (!versions.includes(capability.handlerVersion)) {
++		fail(tool.name, `deferral.resumableHandlerVersions must include handlerVersion ${capability.handlerVersion}`);
++	}
++	if (typeof capability.resolve !== "function") {
++		fail(tool.name, "deferral.resolve must be a function");
++	}
++	if (capability.inspectAvailability !== undefined && typeof capability.inspectAvailability !== "function") {
++		fail(tool.name, "deferral.inspectAvailability must be a function when provided");
++	}
++	if (capability.presenter !== undefined && typeof capability.presenter !== "function") {
++		fail(tool.name, "deferral.presenter must be a function when provided");
++	}
++}
+diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
+index 7b5690a3..404ca621 100644
+--- a/packages/coding-agent/src/core/extensions/types.ts
++++ b/packages/coding-agent/src/core/extensions/types.ts
+@@ -13,7 +13,10 @@ import type {
+ 	AgentToolDeferral,
+ 	AgentToolResult,
+ 	AgentToolUpdateCallback,
++	CancelToolDeferralRequest,
++	EvaluateToolDeferralRequest,
+ 	InspectToolDeferralRequest,
++	InterruptToolDeferralRequest,
+ 	ThinkingLevel,
+ 	ToolDeferralAvailability,
+ 	ToolDeferralRequest,
+@@ -94,7 +97,18 @@ import type {
+ 
+ export type { ExecOptions, ExecResult } from "../exec.ts";
+ export type { BuildSystemPromptOptions } from "../system-prompt.ts";
+-export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
++export type {
++	AgentToolResult,
++	AgentToolUpdateCallback,
++	CancelToolDeferralRequest,
++	EvaluateToolDeferralRequest,
++	InspectToolDeferralRequest,
++	InterruptToolDeferralRequest,
++	ToolDeferralAvailability,
++	ToolDeferralRequest,
++	ToolDeferralResolution,
++	ToolExecutionMode,
++};
+ export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
+ 
+ // ============================================================================
+diff --git a/packages/coding-agent/src/deferred-conformance.ts b/packages/coding-agent/src/deferred-conformance.ts
+new file mode 100644
+index 00000000..8e410f73
+--- /dev/null
++++ b/packages/coding-agent/src/deferred-conformance.ts
+@@ -0,0 +1,261 @@
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
++import { getExamplesPath } from "./config.ts";
++import type { AgentSession } from "./core/agent-session.ts";
++import { createEventBus, type EventBus } from "./core/event-bus.ts";
++import { ModelRuntime } from "./core/model-runtime.ts";
++import { DefaultResourceLoader } from "./core/resource-loader.ts";
++import { createAgentSession } from "./core/sdk.ts";
++import { SessionManager } from "./core/session-manager.ts";
++import { SettingsManager } from "./core/settings-manager.ts";
++
++const RESPONSE_EVENT = "dev.pi.example.durable-wait/respond";
++const CANCELLATION_EVENT = "dev.pi.example.durable-wait/cancel";
++const OUTCOME_RECORDED_EVENT = "dev.pi.example.durable-wait/outcome-recorded";
++
++export interface DeferredConformanceResult {
++	passed: string[];
++	failed?: { check: string; message: string };
++}
++
++type Scenario = {
++	root: string;
++	faux: ReturnType<typeof fauxProvider>;
++	eventBus: ReturnType<typeof createEventBus>;
++	session: AgentSession;
++};
++
++function textOfLastToolResult(session: AgentSession): string | undefined {
++	const result = [...session.messages]
++		.reverse()
++		.find((message) => message.role === "toolResult" && message.toolName === "durable_wait");
++	if (!result || result.role !== "toolResult") return undefined;
++	return result.content.flatMap((content) => (content.type === "text" ? [content.text] : [])).join("\n");
++}
++
++function assert(condition: unknown, message: string): asserts condition {
++	if (!condition) throw new Error(message);
++}
++
++async function createScenario(
++	options: {
++		root?: string;
++		sessionManager?: SessionManager;
++		withExtension?: boolean;
++		faux?: ReturnType<typeof fauxProvider>;
++		eventBus?: ReturnType<typeof createEventBus>;
++	} = {},
++): Promise<Scenario> {
++	const root = options.root ?? mkdtempSync(join(tmpdir(), "pi-deferred-conformance-"));
++	const faux = options.faux ?? fauxProvider();
++	const eventBus = options.eventBus ?? createEventBus();
++	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false } });
++	const modelRuntime = await ModelRuntime.create({
++		authPath: join(root, "auth.json"),
++		modelsPath: null,
++		allowModelNetwork: false,
++	});
++	modelRuntime.registerNativeProvider(faux.provider);
++	await modelRuntime.refresh({ allowNetwork: false });
++	const resourceLoader = new DefaultResourceLoader({
++		cwd: root,
++		agentDir: join(root, "agent"),
++		settingsManager,
++		eventBus,
++		additionalExtensionPaths:
++			options.withExtension === false ? [] : [join(getExamplesPath(), "extensions", "durable-deferral.ts")],
++		noExtensions: true,
++		noSkills: true,
++		noPromptTemplates: true,
++		noThemes: true,
++		noContextFiles: true,
++	});
++	await resourceLoader.reload();
++	const extensionErrors = resourceLoader.getExtensions().errors;
++	if (extensionErrors.length > 0) throw new Error(extensionErrors.map((error) => error.error).join("; "));
++	const sessionManager = options.sessionManager ?? SessionManager.create(root, join(root, "sessions"));
++	const { session } = await createAgentSession({
++		cwd: root,
++		agentDir: join(root, "agent"),
++		model: faux.getModel(),
++		modelRuntime,
++		resourceLoader,
++		settingsManager,
++		sessionManager,
++		tools: options.withExtension === false ? [] : ["durable_wait"],
++	});
++	session.subscribe(() => {});
++	return { root, faux, eventBus, session };
++}
++
++async function defer(scenario: Scenario): Promise<void> {
++	scenario.faux.setResponses([
++		fauxAssistantMessage(fauxToolCall("durable_wait", { prompt: "Ship this change?" }, { id: "wait-1" }), {
++			stopReason: "toolUse",
++		}),
++	]);
++	await scenario.session.prompt("Ask before shipping");
++	assert(scenario.session.deferredBatch?.kind === "batch", "expected one Deferred Tool Batch");
++	assert(scenario.session.deferredBatch.phase === "deferred", "expected stable deferred phase");
++}
++
++function disposeScenario(scenario: Scenario, removeRoot = true): void {
++	scenario.session.dispose();
++	scenario.eventBus.clear();
++	if (removeRoot) rmSync(scenario.root, { recursive: true, force: true });
++}
++
++function recordOutcome(eventBus: EventBus, event: string, value: string): Promise<void> {
++	return new Promise((resolve, reject) => {
++		const timeout = setTimeout(() => {
++			stop();
++			reject(new Error("the example extension did not record the package outcome"));
++		}, 2_000);
++		const stop = eventBus.on(OUTCOME_RECORDED_EVENT, (data) => {
++			clearTimeout(timeout);
++			stop();
++			const status = (data as { status?: unknown } | undefined)?.status;
++			if (status !== "recorded") {
++				reject(new Error(`package outcome was not recorded: ${String(status)}`));
++				return;
++			}
++			resolve();
++		});
++		eventBus.emit(event, value);
++	});
++}
++
++export async function runDeferredConformance(
++	report: (line: string) => void = (line) => console.log(line),
++): Promise<DeferredConformanceResult> {
++	const passed: string[] = [];
++	const activeScenarios = new Set<Scenario>();
++	let currentCheck = "stable deferral";
++	const pass = (check: string) => {
++		passed.push(check);
++		report(`PASS ${check}`);
++	};
++	const open = async (options: Parameters<typeof createScenario>[0] = {}) => {
++		const scenario = await createScenario(options);
++		activeScenarios.add(scenario);
++		return scenario;
++	};
++	const close = (scenario: Scenario, removeRoot = true) => {
++		if (!activeScenarios.delete(scenario)) return;
++		disposeScenario(scenario, removeRoot);
++	};
++
++	try {
++		const stable = await open();
++		await defer(stable);
++		assert(stable.session.isIdle, "deferred Agent Thread must be settled");
++		assert(!stable.session.isStreaming, "deferred Agent Thread must not be streaming");
++		pass("stable deferral");
++
++		currentCheck = "reload";
++		const beforeReload = stable.session.deferredBatch;
++		await stable.session.reload();
++		assert(
++			JSON.stringify(stable.session.deferredBatch) === JSON.stringify(beforeReload),
++			"reload changed deferred state",
++		);
++		pass("reload");
++
++		currentCheck = "teardown/reopen";
++		const sessionFile = stable.session.sessionFile;
++		assert(sessionFile, "persistent conformance session has no file");
++		const stableRoot = stable.root;
++		close(stable, false);
++		const reopened = await open({
++			root: stableRoot,
++			sessionManager: SessionManager.open(sessionFile),
++		});
++		assert(reopened.session.deferredBatch?.kind === "batch", "reopen lost deferred state");
++		assert(reopened.session.deferredBatch.phase === "deferred", "reopen changed deferred phase");
++		pass("teardown/reopen");
++		close(reopened);
++
++		currentCheck = "Response";
++		const response = await open();
++		await defer(response);
++		await recordOutcome(response.eventBus, RESPONSE_EVENT, "yes");
++		response.faux.setResponses([fauxAssistantMessage("continued after Response")]);
++		const responseResult = await response.session.resumeDeferred();
++		assert(responseResult.status === "advanced", "Response did not advance the Agent Thread");
++		assert(textOfLastToolResult(response.session) === "Response: yes", "Response result was not package-owned");
++		pass("Response");
++		close(response);
++
++		currentCheck = "Interruption";
++		const interruption = await open();
++		await defer(interruption);
++		interruption.faux.setResponses([fauxAssistantMessage("continued after Interruption")]);
++		await interruption.session.prompt("Continue without answering");
++		assert(interruption.session.deferredBatch === undefined, "Interruption left deferred state active");
++		assert(textOfLastToolResult(interruption.session) === "Left unanswered", "Interruption result was not typed");
++		pass("Interruption");
++		close(interruption);
++
++		currentCheck = "Cancellation";
++		const cancellation = await open();
++		await defer(cancellation);
++		await recordOutcome(cancellation.eventBus, CANCELLATION_EVENT, "declined");
++		cancellation.faux.setResponses([fauxAssistantMessage("continued after Cancellation")]);
++		const cancellationResult = await cancellation.session.abandonDeferred();
++		assert(cancellationResult.status === "advanced", "Cancellation did not advance the Agent Thread");
++		assert(textOfLastToolResult(cancellation.session) === "Cancelled: declined", "Cancellation result was not typed");
++		pass("Cancellation");
++		close(cancellation);
++
++		currentCheck = "unavailability recovery";
++		const initial = await open();
++		await defer(initial);
++		const unavailableFile = initial.session.sessionFile;
++		const unavailableRoot = initial.root;
++		assert(unavailableFile, "unavailability session has no file");
++		close(initial, false);
++		const unavailable = await open({
++			root: unavailableRoot,
++			sessionManager: SessionManager.open(unavailableFile),
++			withExtension: false,
++		});
++		assert(
++			unavailable.session.deferredBatch?.kind === "batch" &&
++				unavailable.session.deferredBatch.availability.status === "unavailable",
++			"missing extension was not reported as unavailable",
++		);
++		close(unavailable, false);
++		const restored = await open({
++			root: unavailableRoot,
++			sessionManager: SessionManager.open(unavailableFile),
++		});
++		assert(
++			restored.session.deferredBatch?.kind === "batch" &&
++				restored.session.deferredBatch.availability.status === "available",
++			"restoring compatible code did not recover availability",
++		);
++		pass("unavailability recovery");
++		close(restored);
++
++		currentCheck = "abandonment";
++		const abandonment = await open();
++		await defer(abandonment);
++		abandonment.faux.setResponses([fauxAssistantMessage("continued after abandonment")]);
++		const abandonResult = await abandonment.session.abandonDeferred();
++		assert(abandonResult.status === "advanced", "abandonment did not advance the Agent Thread");
++		assert(textOfLastToolResult(abandonment.session) === "Cancelled: abandoned", "abandonment was not typed");
++		pass("abandonment");
++		close(abandonment);
++
++		report(`Deferred conformance passed (${passed.length}/${passed.length})`);
++		return { passed };
++	} catch (error) {
++		const message = error instanceof Error ? error.message : String(error);
++		report(`FAIL ${currentCheck}: ${message}`);
++		return { passed, failed: { check: currentCheck, message } };
++	} finally {
++		for (const scenario of activeScenarios) disposeScenario(scenario);
++	}
++}
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index eb1259d0..9b48dc2f 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -78,6 +78,7 @@ export type {
+ 	BeforeProviderRequestEvent,
+ 	BeforeProviderRequestEventResult,
+ 	BuildSystemPromptOptions,
++	CancelToolDeferralRequest,
+ 	CompactOptions,
+ 	ContextEvent,
+ 	ContextUsage,
+@@ -86,6 +87,7 @@ export type {
+ 	EditToolCallEvent,
+ 	EntryRenderer,
+ 	EntryRenderOptions,
++	EvaluateToolDeferralRequest,
+ 	ExecOptions,
+ 	ExecResult,
+ 	Extension,
+@@ -111,6 +113,8 @@ export type {
+ 	InputEvent,
+ 	InputEventResult,
+ 	InputSource,
++	InspectToolDeferralRequest,
++	InterruptToolDeferralRequest,
+ 	KeybindingsManager,
+ 	LoadExtensionsResult,
+ 	LsToolCallEvent,
+@@ -145,7 +149,10 @@ export type {
+ 	TerminalInputHandler,
+ 	ToolCallEvent,
+ 	ToolCallEventResult,
++	ToolDeferralAvailability,
+ 	ToolDeferralDefinition,
++	ToolDeferralRequest,
++	ToolDeferralResolution,
+ 	ToolDefinition,
+ 	ToolExecutionEndEvent,
+ 	ToolExecutionMode,
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index ce7465f1..de197312 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -41,6 +41,7 @@ import { assertValidSessionId, SessionManager } from "./core/session-manager.ts"
+ import { SettingsManager } from "./core/settings-manager.ts";
+ import { printTimings, resetTimings, time } from "./core/timings.ts";
+ import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
++import { runDeferredConformance } from "./deferred-conformance.ts";
+ import { builtInExtensions } from "./extensions/index.ts";
+ import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
+ import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
+@@ -483,6 +484,17 @@ export async function main(args: string[], options?: MainOptions) {
+ 		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
+ 	}
+ 
++	if (args[0] === "conformance") {
++		if (args.length !== 1) {
++			console.error(chalk.red("Error: pi conformance does not accept arguments"));
++			process.exitCode = 1;
++			return;
++		}
++		const result = await runDeferredConformance();
++		if (result.failed) process.exitCode = 1;
++		return;
++	}
++
+ 	const cwd = process.cwd();
+ 	const agentDir = getAgentDir();
+ 	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+diff --git a/packages/coding-agent/test/suite/regressions/22-deferred-conformance-command.test.ts b/packages/coding-agent/test/suite/regressions/22-deferred-conformance-command.test.ts
+new file mode 100644
+index 00000000..c26f4d91
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/22-deferred-conformance-command.test.ts
+@@ -0,0 +1,61 @@
++import { spawn } from "node:child_process";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
++import { afterEach, describe, expect, it } from "vitest";
++
++const roots: string[] = [];
++const packageDir = dirname(fileURLToPath(new URL("../../../package.json", import.meta.url)));
++const cliPath = join(packageDir, "dist", "cli.js");
++
++afterEach(() => {
++	while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++});
++
++function runConformance(): Promise<{ code: number | null; stdout: string; stderr: string }> {
++	const root = mkdtempSync(join(tmpdir(), "pi-conformance-command-"));
++	roots.push(root);
++	return new Promise((resolve, reject) => {
++		const child = spawn(process.execPath, [cliPath, "conformance"], {
++			cwd: root,
++			env: {
++				...process.env,
++				PI_CODING_AGENT_DIR: join(root, "agent"),
++				PI_OFFLINE: "1",
++				NO_COLOR: "1",
++			},
++			stdio: ["ignore", "pipe", "pipe"],
++		});
++		let stdout = "";
++		let stderr = "";
++		child.stdout.setEncoding("utf8").on("data", (chunk) => {
++			stdout += chunk;
++		});
++		child.stderr.setEncoding("utf8").on("data", (chunk) => {
++			stderr += chunk;
++		});
++		child.on("error", reject);
++		child.on("close", (code) => resolve({ code, stdout, stderr }));
++	});
++}
++
++describe("pi conformance", () => {
++	it("runs the documented durable-deferral suite as an offline black box", async () => {
++		const result = await runConformance();
++
++		expect(result.code).toBe(0);
++		expect(result.stderr).toBe("");
++		expect(result.stdout.trim().split("\n")).toEqual([
++			"PASS stable deferral",
++			"PASS reload",
++			"PASS teardown/reopen",
++			"PASS Response",
++			"PASS Interruption",
++			"PASS Cancellation",
++			"PASS unavailability recovery",
++			"PASS abandonment",
++			"Deferred conformance passed (8/8)",
++		]);
++	});
++});
+diff --git a/packages/coding-agent/test/suite/regressions/22-deferred-tool-registration.test.ts b/packages/coding-agent/test/suite/regressions/22-deferred-tool-registration.test.ts
+new file mode 100644
+index 00000000..211bfef5
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/22-deferred-tool-registration.test.ts
+@@ -0,0 +1,141 @@
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { getModel } from "@earendil-works/pi-ai/compat";
++import { Type } from "typebox";
++import { afterEach, describe, expect, it } from "vitest";
++import { loadExtensions } from "../../../src/core/extensions/loader.ts";
++import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
++import { createAgentSession } from "../../../src/core/sdk.ts";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import { SettingsManager } from "../../../src/core/settings-manager.ts";
++import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
++
++const roots: string[] = [];
++
++afterEach(() => {
++	while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++});
++
++async function loadWithDeferral(deferralSource: string) {
++	const root = mkdtempSync(join(tmpdir(), "pi-deferral-registration-"));
++	roots.push(root);
++	const extensionPath = join(root, "extension.ts");
++	writeFileSync(
++		extensionPath,
++		`import { Type } from "typebox";
++export default function (pi) {
++	pi.registerTool({
++		name: "wait",
++		label: "Wait",
++		description: "Wait durably",
++		parameters: Type.Object({}),
++		deferral: ${deferralSource},
++		execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
++	});
++}`,
++	);
++	return loadExtensions([extensionPath], root);
++}
++
++describe("deferred tool registration", () => {
++	it.each([
++		["null", "deferral must be an object"],
++		[
++			`{ handlerId: "question", handlerVersion: 1, resumableHandlerVersions: [1], resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.handlerId must be a globally namespaced identifier",
++		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 0, resumableHandlerVersions: [1], resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.handlerVersion must be a positive integer",
++		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 1, resumableHandlerVersions: [], resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.resumableHandlerVersions must be a non-empty array",
++		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 1, resumableHandlerVersions: [1, 1], resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.resumableHandlerVersions must not contain duplicates",
++		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 2, resumableHandlerVersions: [1], resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.resumableHandlerVersions must include handlerVersion 2",
++		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 1, resumableHandlerVersions: [0, 1], resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.resumableHandlerVersions must contain only positive integers",
++		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 1, resumableHandlerVersions: [1], resolve: "later" }`,
++			"deferral.resolve must be a function",
++		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 1, resumableHandlerVersions: [1], inspectAvailability: true, resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.inspectAvailability must be a function",
++		],
++		[
++			`{ handlerId: "dev.example.wait", handlerVersion: 1, resumableHandlerVersions: [1], presenter: {}, resolve: async () => ({ status: "deferred", correlationId: "1" }) }`,
++			"deferral.presenter must be a function",
++		],
++	])("rejects invalid capability %s", async (deferralSource, expectedMessage) => {
++		const result = await loadWithDeferral(deferralSource);
++
++		expect(result.extensions).toEqual([]);
++		expect(result.errors).toHaveLength(1);
++		expect(result.errors[0]?.error).toContain(`Tool "wait" ${expectedMessage}`);
++	});
++
++	it("rejects invalid deferred capabilities on SDK custom tools", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-sdk-deferral-registration-"));
++		roots.push(root);
++		const agentDir = join(root, "agent");
++		initTheme("dark");
++		const settingsManager = SettingsManager.create(root, agentDir);
++		const resourceLoader = new DefaultResourceLoader({
++			cwd: root,
++			agentDir,
++			settingsManager,
++		});
++		await resourceLoader.reload();
++
++		await expect(
++			createAgentSession({
++				cwd: root,
++				agentDir,
++				model: getModel("anthropic", "claude-sonnet-4-5")!,
++				settingsManager,
++				sessionManager: SessionManager.inMemory(),
++				resourceLoader,
++				customTools: [
++					{
++						name: "sdk_wait",
++						label: "SDK Wait",
++						description: "Invalid deferred SDK tool",
++						parameters: Type.Object({}),
++						deferral: {
++							handlerId: "sdk-wait",
++							handlerVersion: 1,
++							resumableHandlerVersions: [1],
++							resolve: async () => ({ status: "deferred", correlationId: "request-1" }),
++						},
++						execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
++					},
++				],
++			}),
++		).rejects.toThrow(/Tool "sdk_wait" deferral\.handlerId must be a globally namespaced identifier/);
++	});
++
++	it("accepts an exact, versioned capability", async () => {
++		const result = await loadWithDeferral(`{
++			handlerId: "dev.example.wait",
++			handlerVersion: 2,
++			resumableHandlerVersions: [1, 2],
++			inspectAvailability: () => ({ status: "available" }),
++			resolve: async () => ({ status: "deferred", correlationId: "1" }),
++			presenter: async () => {},
++		}`);
++
++		expect(result.errors).toEqual([]);
++		expect(result.extensions).toHaveLength(1);
++	});
++});
+-- 
+2.50.1 (Apple Git-155)
+
