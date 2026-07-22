@@ -1,0 +1,133 @@
+From df9288e8c46f731bd4745bfe70d8a0bcf1c9a639 Mon Sep 17 00:00:00 2001
+From: Taylor Rowser <taylorrowser@outlook.com>
+Date: Wed, 22 Jul 2026 15:11:11 -0400
+Subject: [PATCH] fix(coding-agent): reconstruct example presenter state (#43)
+
+---
+ .../examples/extensions/durable-deferral.ts   | 27 ++++----
+ .../43-durable-deferral-example.test.ts       | 62 +++++++++++++++++++
+ 2 files changed, 78 insertions(+), 11 deletions(-)
+ create mode 100644 packages/coding-agent/test/suite/regressions/43-durable-deferral-example.test.ts
+
+diff --git a/packages/coding-agent/examples/extensions/durable-deferral.ts b/packages/coding-agent/examples/extensions/durable-deferral.ts
+index 9d2cf204..45c0415c 100644
+--- a/packages/coding-agent/examples/extensions/durable-deferral.ts
++++ b/packages/coding-agent/examples/extensions/durable-deferral.ts
+@@ -65,22 +65,26 @@ function findOwningAssistant(branch: SessionEntry[], toolCallId: string): Extrac
+ 
+ export function createDurableWaitExtension(controller?: Partial<DurableWaitController>): ExtensionFactory {
+ 	return (pi: ExtensionAPI) => {
+-		let currentBranch: (() => SessionEntry[]) | undefined;
++		type Branch = () => SessionEntry[];
++		let currentBranch: Branch | undefined;
+ 
+-		const getRequest = (): WaitRequest => {
+-			const request = currentBranch && findLast<WaitRequest>(currentBranch(), REQUEST_TYPE);
++		const getRequest = (branch: Branch | undefined = currentBranch): WaitRequest => {
++			const request = branch && findLast<WaitRequest>(branch(), REQUEST_TYPE);
+ 			if (!request) throw new Error("No active durable wait request");
+ 			return request;
+ 		};
+-		const getOutcome = (): WaitOutcome | undefined => {
+-			const request = getRequest();
+-			return currentBranch?.()
++		const getOutcome = (branch: Branch | undefined = currentBranch): WaitOutcome | undefined => {
++			const request = getRequest(branch);
++			return branch?.()
+ 				.map((entry) => customData<WaitOutcome>(entry, OUTCOME_TYPE))
+ 				.find((outcome) => outcome?.requestId === request.requestId);
+ 		};
+-		const recordOutcome = (outcome: WaitOutcome["outcome"]): RecordWaitOutcomeResult => {
+-			const request = getRequest();
+-			const existing = getOutcome();
++		const recordOutcome = (
++			outcome: WaitOutcome["outcome"],
++			branch: Branch | undefined = currentBranch,
++		): RecordWaitOutcomeResult => {
++			const request = getRequest(branch);
++			const existing = getOutcome(branch);
+ 			if (existing) return { status: "conflict", outcome: existing };
+ 			const entry: WaitOutcome = { version: PACKAGE_VERSION, requestId: request.requestId, outcome };
+ 			pi.appendEntry(OUTCOME_TYPE, entry);
+@@ -171,10 +175,11 @@ export function createDurableWaitExtension(controller?: Partial<DurableWaitContr
+ 				},
+ 				presenter: async (_snapshot, ctx) => {
+ 					if (ctx.mode !== "tui") return;
+-					const request = getRequest();
++					const branch = () => ctx.sessionManager.getBranch();
++					const request = getRequest(branch);
+ 					const value = await ctx.ui.input("Waiting for user", request.payload.prompt);
+ 					if (value === undefined) return;
+-					if (recordOutcome({ type: "response", value }).status === "recorded") {
++					if (recordOutcome({ type: "response", value }, branch).status === "recorded") {
+ 						void pi.resumeDeferred();
+ 					}
+ 				},
+diff --git a/packages/coding-agent/test/suite/regressions/43-durable-deferral-example.test.ts b/packages/coding-agent/test/suite/regressions/43-durable-deferral-example.test.ts
+new file mode 100644
+index 00000000..f5c9eff2
+--- /dev/null
++++ b/packages/coding-agent/test/suite/regressions/43-durable-deferral-example.test.ts
+@@ -0,0 +1,62 @@
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { createDurableWaitExtension } from "../../../examples/extensions/durable-deferral.ts";
++import { SessionManager } from "../../../src/core/session-manager.ts";
++import type { ExtensionUIContext } from "../../../src/index.ts";
++import { createHarness, type Harness } from "../harness.ts";
++
++describe("regression #43: durable-deferral example presenter", () => {
++	const harnesses: Harness[] = [];
++	const roots: string[] = [];
++
++	afterEach(() => {
++		while (harnesses.length > 0) harnesses.pop()?.cleanup();
++		while (roots.length > 0) rmSync(roots.pop()!, { recursive: true, force: true });
++	});
++
++	it("renders a persisted Interaction Request after process teardown and reopen", async () => {
++		const root = mkdtempSync(join(tmpdir(), "pi-durable-example-reopen-"));
++		roots.push(root);
++		const initial = await createHarness({
++			sessionManager: SessionManager.create(root, join(root, "sessions")),
++			extensionFactories: [createDurableWaitExtension()],
++		});
++		harnesses.push(initial);
++		initial.setResponses([
++			fauxAssistantMessage(fauxToolCall("durable_wait", { prompt: "Ship this change?" }, { id: "wait-1" }), {
++				stopReason: "toolUse",
++			}),
++		]);
++
++		await initial.session.prompt("Ask before shipping");
++		const sessionFile = initial.session.sessionFile;
++		expect(sessionFile).toBeDefined();
++		expect(initial.session.deferredBatch?.phase).toBe("deferred");
++		initial.cleanup();
++		harnesses.pop();
++
++		const input = vi.fn(async () => undefined);
++		const reopened = await createHarness({
++			sessionManager: SessionManager.open(sessionFile!),
++			extensionFactories: [createDurableWaitExtension()],
++		});
++		harnesses.push(reopened);
++		await reopened.session.bindExtensions({
++			mode: "tui",
++			uiContext: { input } as unknown as ExtensionUIContext,
++		});
++		const snapshot = reopened.session.deferredBatch;
++		const presenter = reopened.session.getToolDefinition("durable_wait")?.deferral?.presenter;
++
++		expect(snapshot?.kind).toBe("batch");
++		if (snapshot?.kind !== "batch") throw new Error("Expected a reconstructed Deferred Tool Batch");
++		expect(snapshot.phase).toBe("deferred");
++		expect(presenter).toBeDefined();
++		await presenter!(snapshot, reopened.session.extensionRunner.createContext());
++
++		expect(input).toHaveBeenCalledWith("Waiting for user", "Ship this change?");
++	});
++});

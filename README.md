@@ -2,10 +2,10 @@
 
 A maintained downstream Pi release that can stop an Agent Thread for durable human input, survive complete process teardown, and continue through an explicit Response, Interruption, Cancellation, resume, or abandonment path.
 
-The active release is **`pi-v0.81.1-patch.4`**. It combines:
+The active release is **`pi-v0.81.1-patch.5`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
-- the eleven ordered durable-deferral patches in [`patches/active`](patches/active); and
+- the twelve ordered durable-deferral patches in [`patches/active`](patches/active); and
 - the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.3`.
 
 ## Fast install
@@ -20,7 +20,7 @@ The normal installer downloads a precompiled, checksummed binary for the current
 Review [`scripts/bootstrap.sh`](scripts/bootstrap.sh), then run:
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.4/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.5/install.sh | sh
 ```
 
 The installer verifies `SHA256SUMS`, installs into a versioned user-data directory, runs the public 8/8 deferred conformance check, and creates `~/.local/bin/pi-wait-for-user`. If that directory is not on `PATH`, it prints the exact directory to add.
@@ -58,7 +58,7 @@ See the [Question Tool guide](packages/question-tool/README.md) for interaction 
 
 ## Checksum-first manual install
 
-Download `SHA256SUMS` and the matching asset from the [active GitHub release](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.4):
+Download `SHA256SUMS` and the matching asset from the [active GitHub release](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.5):
 
 | Platform | Asset |
 | --- | --- |
@@ -84,10 +84,10 @@ The release bootstrap can manage the exact version without relying on whichever 
 
 ```bash
 # Verify
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.4/install.sh | sh -s -- verify
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.5/install.sh | sh -s -- verify
 
 # Uninstall this release
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.4/install.sh | sh -s -- uninstall
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.5/install.sh | sh -s -- uninstall
 ```
 
 Uninstall leaves `~/.pi/agent` and any upstream `pi` installation untouched.
@@ -99,9 +99,9 @@ Releases install into separate versioned directories. To roll back after a futur
 Use this only when a prebuilt binary is unsuitable. It requires Node.js 22.19+, Git, and npm, and performs the slower exact-source clone and build:
 
 ```bash
-gh release download pi-v0.81.1-patch.4 \
-  --pattern 'pi-wait-for-user-pi-v0.81.1-patch.4.tgz'
-tar -xzf pi-wait-for-user-pi-v0.81.1-patch.4.tgz
+gh release download pi-v0.81.1-patch.5 \
+  --pattern 'pi-wait-for-user-pi-v0.81.1-patch.5.tgz'
+tar -xzf pi-wait-for-user-pi-v0.81.1-patch.5.tgz
 node package/scripts/install.mjs install
 ```
 
