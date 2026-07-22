@@ -7,6 +7,8 @@ const key = {
 	down: "\u001b[B",
 	enter: "\r",
 	escape: "\u001b",
+	left: "\u001b[D",
+	right: "\u001b[C",
 	up: "\u001b[A",
 };
 
@@ -117,6 +119,49 @@ test("a question set requires a separate Review & Submit confirmation", async ()
 	form.component.handleInput(key.enter);
 
 	assert.equal(form.result.length, 2);
+	await form.pending;
+});
+
+test("submitting a custom answer after backward navigation preserves the next question's choice", async () => {
+	const questions = [
+		{
+			id: "environment",
+			label: "Environment",
+			question: "Where should this deploy?",
+			options: [{ label: "Staging" }],
+		},
+		{
+			id: "speed",
+			label: "Speed",
+			question: "How quickly?",
+			options: [{ label: "Carefully" }],
+		},
+	];
+	const form = openForm(questions);
+
+	form.component.handleInput(key.enter);
+	form.component.handleInput(key.enter);
+	form.component.handleInput(key.left);
+	form.component.handleInput(key.left);
+	form.component.handleInput(key.down);
+	form.component.handleInput("Production");
+	form.component.handleInput(key.enter);
+	form.component.handleInput(key.right);
+	form.component.handleInput(key.enter);
+
+	assert.deepEqual(form.result, [
+		{
+			questionId: "environment",
+			answer: "Production",
+			kind: "custom",
+		},
+		{
+			questionId: "speed",
+			answer: "Carefully",
+			kind: "choice",
+			selectedIndex: 1,
+		},
+	]);
 	await form.pending;
 });
 

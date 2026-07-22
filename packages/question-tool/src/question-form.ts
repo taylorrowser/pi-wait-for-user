@@ -79,6 +79,7 @@ export async function showQuestionForm(
 			let onReview =
 				questions.length > 1 && Boolean(allResponses(questions, drafts));
 			let editingCustom = false;
+			let didSubmitCustomInput = false;
 			let choiceIndex = 0;
 			let cachedLines: string[] | undefined;
 			const customInput = new Input();
@@ -144,6 +145,7 @@ export async function showQuestionForm(
 			customInput.onSubmit = (value) => {
 				const answer = value.trim();
 				if (!answer) return;
+				didSubmitCustomInput = true;
 				customInput.setValue(answer);
 				persistDraft({
 					customText: answer,
@@ -189,9 +191,10 @@ export async function showQuestionForm(
 						return;
 					}
 					const before = customInput.getValue();
+					didSubmitCustomInput = false;
 					customInput.handleInput(data);
 					const after = customInput.getValue();
-					if (after !== before)
+					if (!didSubmitCustomInput && after !== before)
 						persistDraft({
 							customText: after,
 							selectedChoice: currentQuestion().options.length,
