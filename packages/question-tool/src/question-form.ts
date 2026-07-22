@@ -173,6 +173,12 @@ export async function showQuestionForm(
 						refresh();
 						return;
 					}
+					if (matchesKey(data, Key.up)) {
+						editingCustom = false;
+						choiceIndex = Math.max(0, choiceIndex - 1);
+						refresh();
+						return;
+					}
 					if (matchesKey(data, Key.tab)) {
 						if (currentQuestionIndex === questions.length - 1) showReview();
 						else moveToQuestion(currentQuestionIndex + 1);
