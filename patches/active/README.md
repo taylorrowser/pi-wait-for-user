@@ -2,7 +2,9 @@
 
 This directory is the complete ordered delta from the Pi release pinned in
 `upstream/pi.lock.json`. Patch files use zero-padded names and are applied in
-lexicographic order, for example `0001-deferred-entry.patch`.
+lexicographic order, for example `0001-deferred-entry.patch`. The active release
+manifest pins every filename and SHA-256; changing any patch requires a new
+release ID and a fresh release-candidate report.
 
 The active series currently contains the durable deferral, Response-resumption,
 atomic whole-batch, idempotent recovery, unavailable recovery/abandonment,

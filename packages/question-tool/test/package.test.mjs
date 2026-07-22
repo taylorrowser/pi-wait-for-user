@@ -58,7 +58,7 @@ test("the active patched Pi discovers the package without extension registration
 	assert.doesNotMatch(result.stderr, /extension|handler|deferral/i);
 });
 
-test("the documented source installation links patched Pi and persistently installs the Question Tool", () => {
+test("patched Pi can install and discover the local Question Tool package", () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-question-install-"));
 	const prefix = join(root, "prefix");
 	const home = join(root, "home");
@@ -116,5 +116,6 @@ test("npm pack contains the extension, public contracts, and documentation", () 
 	assert.ok(files.includes("extensions/index.ts"));
 	assert.ok(files.includes("src/index.ts"));
 	assert.ok(files.includes("README.md"));
+	assert.ok(files.includes("LICENSE"));
 	assert.ok(files.every((file) => !file.startsWith("test/")));
 });
