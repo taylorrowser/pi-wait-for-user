@@ -47,6 +47,12 @@ function expectEqual(actual, expected, label) {
   if (actual !== expected) fail(`${label}: expected ${String(expected)}, found ${String(actual)}`);
 }
 
+function readShellVariable(path, variable, label) {
+  const matches = [...readFileSync(path, "utf8").matchAll(new RegExp(`^${variable}="([^"]*)"$`, "gm"))];
+  if (matches.length !== 1) fail(`${label}: expected exactly one ${variable} assignment, found ${matches.length}`);
+  return matches[0][1];
+}
+
 function verifyRelease(root) {
   const activePath = join(root, "releases", "active.json");
   const active = readJson(activePath);
@@ -61,6 +67,24 @@ function verifyRelease(root) {
   expectEqual(manifest.releaseId, active.releaseId, "Active release ID");
   expectEqual(manifest.tag, active.releaseId, "Release tag");
   expectEqual(JSON.stringify(manifest.binaryPlatforms), JSON.stringify(binaryPlatforms), "Binary platforms");
+
+  const bootstrapPath = join(root, "scripts", "bootstrap.sh");
+  const binaryInstallerPath = join(root, "scripts", "install-binary.sh");
+  expectEqual(
+    readShellVariable(bootstrapPath, "release_id", "Bootstrap release ID"),
+    manifest.releaseId,
+    "Bootstrap release ID",
+  );
+  expectEqual(
+    readShellVariable(binaryInstallerPath, "release_id", "Binary installer release ID"),
+    manifest.releaseId,
+    "Binary installer release ID",
+  );
+  expectEqual(
+    readShellVariable(binaryInstallerPath, "pi_version", "Binary installer Pi version"),
+    manifest.upstream.packageVersion,
+    "Binary installer Pi version",
+  );
 
   const lock = readJson(join(root, "upstream", "pi.lock.json"));
   expectEqual(lock.repository, manifest.upstream.repository, "Upstream repository");
