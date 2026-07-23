@@ -367,7 +367,7 @@ function comparePayload(actual, expected) {
 }
 
 function publishStableDispatcher(paths, selected) {
-  if (!selected.config.rootKeysPinnedByInstaller) {
+  if (selected.config.rootKeyProvenance.type !== "installer-pinned") {
     fail("Command Ownership requires root keys pinned by the reviewed installer");
   }
   const destination = join(paths.root, "dispatcher");
@@ -606,12 +606,17 @@ function readAcceptedMetadataState(paths) {
   return accepted;
 }
 
-function writeConfig(paths, platform, rootKeys, rootKeysPinnedByInstaller) {
+function rootKeyProvenance(rootKeys, type) {
+  const keys = [...rootKeys].map(([keyId, publicKey]) => ({ keyId, publicKey })).sort((a, b) => a.keyId.localeCompare(b.keyId));
+  return { type, configurationSha256: digestBytes(serializeMetadata(keys)) };
+}
+
+function writeConfig(paths, platform, rootKeys, provenanceType) {
   const config = {
     schemaVersion: 1,
     platform,
     rootKeys: [...rootKeys].map(([keyId, publicKey]) => ({ keyId, publicKey })).sort((a, b) => a.keyId.localeCompare(b.keyId)),
-    rootKeysPinnedByInstaller,
+    rootKeyProvenance: rootKeyProvenance(rootKeys, provenanceType),
   };
   if (existsSync(paths.config)) {
     const existing = readConfig(paths);
@@ -619,15 +624,17 @@ function writeConfig(paths, platform, rootKeys, rootKeysPinnedByInstaller) {
     if (existing.platform !== platform || canonicalJson([...existing.rootKeys]) !== canonicalJson([...configuredRootKeys])) {
       fail("Managed root trust or platform configuration mismatch");
     }
-    if (rootKeysPinnedByInstaller && !existing.rootKeysPinnedByInstaller) atomicWrite(paths.config, config);
+    if (provenanceType === "installer-pinned" && existing.rootKeyProvenance.type !== "installer-pinned") atomicWrite(paths.config, config);
   } else atomicWrite(paths.config, config);
 }
 
 function readConfig(paths) {
   const config = readJson(paths.config, "managed configuration");
-  exactObject(config, "managed configuration", ["schemaVersion", "platform", "rootKeys", "rootKeysPinnedByInstaller"]);
-  if (config.schemaVersion !== 1 || !Array.isArray(config.rootKeys) || config.rootKeys.length === 0
-    || typeof config.rootKeysPinnedByInstaller !== "boolean") fail("Malformed managed configuration");
+  exactObject(config, "managed configuration", ["schemaVersion", "platform", "rootKeys", "rootKeyProvenance"]);
+  if (config.schemaVersion !== 1 || !Array.isArray(config.rootKeys) || config.rootKeys.length === 0) fail("Malformed managed configuration");
+  exactObject(config.rootKeyProvenance, "root-key provenance", ["type", "configurationSha256"]);
+  if (!["caller-selected", "installer-pinned"].includes(config.rootKeyProvenance.type)) fail("Malformed root-key provenance");
+  expectString(config.rootKeyProvenance.configurationSha256, "root-key provenance digest", sha256Pattern);
   ensurePlatform(config.platform);
   const rootKeys = new Map();
   for (const entry of config.rootKeys) {
@@ -636,6 +643,9 @@ function readConfig(paths) {
     expectString(entry.publicKey, "managed root public key");
     if (rootKeys.has(entry.keyId)) fail("Malformed managed configuration");
     rootKeys.set(entry.keyId, entry.publicKey);
+  }
+  if (config.rootKeyProvenance.configurationSha256 !== rootKeyProvenance(rootKeys, config.rootKeyProvenance.type).configurationSha256) {
+    fail("Root-key provenance configuration mismatch");
   }
   return { ...config, rootKeys };
 }
@@ -826,7 +836,7 @@ function diagnostic(paths, error) {
   }
 }
 
-export function installAndActivate(options) {
+function installAndActivateWithProvenance(options, provenanceType) {
   const {
     dataRoot,
     platform,
@@ -839,7 +849,6 @@ export function installAndActivate(options) {
     now = new Date(),
     checkpoint,
     legacyDirectories = [],
-    rootKeysPinnedByInstaller = false,
   } = options;
   ensurePlatform(platform);
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("Invalid activation verification date");
@@ -849,7 +858,7 @@ export function installAndActivate(options) {
     let managerStage;
     let releaseStage;
     try {
-      writeConfig(paths, platform, rootKeys, rootKeysPinnedByInstaller);
+      writeConfig(paths, platform, rootKeys, provenanceType);
       const accepted = readAcceptedMetadataState(paths);
       if (!accepted && pathExists(paths.activation)) fail("Accepted metadata state is missing for existing Activation");
       const authority = verifyTrustMetadata(trustEnvelope, {
@@ -971,6 +980,14 @@ export function installAndActivate(options) {
       throw error;
     }
   });
+}
+
+export function installAndActivate(options) {
+  return installAndActivateWithProvenance(options, "caller-selected");
+}
+
+export function installAndActivateFromPinnedRoot(options) {
+  return installAndActivateWithProvenance(options, "installer-pinned");
 }
 
 export function recoverPrevious(dataRoot) {
@@ -1304,15 +1321,25 @@ function isManagedDispatcherExecutable(path) {
   }
 }
 
-function executableIdentity(path, environment) {
+function executableIdentity(path, environment, expected) {
   const executablePath = realpathSync(path);
   const stat = lstatSync(executablePath);
   if (!stat.isFile() || (stat.mode & 0o111) === 0) fail(`Stock Pi is not executable: ${path}`);
+  const baseIdentity = {
+    resolvedPath: resolve(path),
+    executablePath,
+    sha256: sha256File(executablePath),
+    size: stat.size,
+  };
+  if (expected && (baseIdentity.resolvedPath !== expected.resolvedPath
+    || baseIdentity.executablePath !== expected.executablePath
+    || baseIdentity.sha256 !== expected.sha256
+    || baseIdentity.size !== expected.size)) fail(`Stock Pi identity changed at ${path}`);
   const observed = spawnSync(path, ["--version"], { encoding: "utf8", env: environment });
   if (observed.error || observed.status !== 0) fail(`Cannot read Stock Pi version from ${path}`);
   const version = observed.stdout.trim();
   if (!version) fail(`Stock Pi returned no version identity: ${path}`);
-  return { resolvedPath: resolve(path), executablePath, sha256: sha256File(executablePath), size: stat.size, version };
+  return { ...baseIdentity, version };
 }
 
 function entrypointMatches(entrypoint) {
@@ -1530,8 +1557,10 @@ export function executeStockPi(dataRoot, args, { environment = process.env } = {
     fail("Refusing dispatcher recursion while executing Stock Pi");
   }
   let current;
-  try { current = executableIdentity(stock.resolvedPath, environment); } catch (error) {
-    fail(`Recorded Stock Pi is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  try { current = executableIdentity(stock.resolvedPath, environment, stock); } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/^Stock Pi identity changed/.test(message)) fail(message);
+    fail(`Recorded Stock Pi is unavailable: ${message}`);
   }
   if (canonicalJson(current) !== canonicalJson(stock)) fail(`Stock Pi identity changed at ${stock.resolvedPath}`);
   console.error("Warning: Stock Pi cannot open downstream session files. Use it only for Stock Pi sessions.");
@@ -1552,7 +1581,15 @@ export function disableManagedEntrypoint(dataRoot) {
       exactObject(ownership, "managed entrypoint receipt", ["schemaVersion", "type", "path", "target"]);
       if (ownership.schemaVersion !== 1) fail("Malformed managed entrypoint receipt");
       entrypoint = { path: ownership.path, target: ownership.target };
-    } else entrypoint = readManagedOwnership(dataRoot).entrypoints.pi;
+    } else {
+      const managedOwnership = readManagedOwnership(dataRoot);
+      if (pathExists(compatibilityReceiptPath(paths))) {
+        requireOwnedCompatibility(paths, managedOwnership.entrypoints.compatibility);
+      } else if (!entrypointMatches(managedOwnership.entrypoints.compatibility)) {
+        fail(`Managed compatibility entrypoint ownership mismatch: ${managedOwnership.entrypoints.compatibility.path}`);
+      }
+      entrypoint = managedOwnership.entrypoints.pi;
+    }
     const path = resolve(entrypoint.path);
     if (!pathExists(path)) return "already disabled";
     const stat = lstatSync(path);

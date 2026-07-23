@@ -21,7 +21,6 @@ function recoveryMessage(error) {
 }
 
 function selectedDataRoot() {
-  if (process.env.PI_MANAGED_DATA_ROOT) return process.env.PI_MANAGED_DATA_ROOT;
   const scriptDirectory = dirname(fileURLToPath(import.meta.url));
   if (basename(scriptDirectory) === "dispatcher") {
     const receipt = JSON.parse(readFileSync(join(scriptDirectory, ".managed", "receipt.json"), "utf8"));
@@ -30,7 +29,7 @@ function selectedDataRoot() {
     }
     return dirname(resolve(receipt.ownedPath));
   }
-  return defaultManagedDataRoot();
+  return process.env.PI_MANAGED_DATA_ROOT || defaultManagedDataRoot();
 }
 
 try {

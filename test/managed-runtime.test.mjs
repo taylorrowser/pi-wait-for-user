@@ -27,6 +27,7 @@ import {
   defaultManagedBinDirectory,
   defaultManagedDataRoot,
   installAndActivate,
+  installAndActivateFromPinnedRoot,
   readActivation,
   readLegacyMigration,
   readManagedOwnership,
@@ -229,14 +230,17 @@ esac
 }
 
 function activate(dataRoot, candidate, options = {}) {
-  return installAndActivate({
+  const { callerSelected = false, ...activationOptions } = options;
+  const request = {
     dataRoot,
     platform: "linux-x64",
     now,
-    rootKeysPinnedByInstaller: true,
     ...candidate,
-    ...options,
-  });
+    ...activationOptions,
+  };
+  return callerSelected
+    ? installAndActivate(request)
+    : installAndActivateFromPinnedRoot(request);
 }
 
 function runManagedCli(executable, dataRoot, args, environment = {}) {
@@ -703,7 +707,7 @@ test("caller-selected activation roots cannot claim Command Ownership", () => {
   const bin = mkdtempSync(join(tmpdir(), "managed-runtime-unpinned-root-bin-"));
   const candidate = fixture();
   try {
-    activate(dataRoot, candidate, { rootKeysPinnedByInstaller: false });
+    activate(dataRoot, candidate, { callerSelected: true });
     const result = runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], {
       PATH: `${bin}:/usr/bin:/bin`,
     });
@@ -757,7 +761,7 @@ test("installer claims pi only with explicit --manage-pi", () => {
     assert.equal(sideBySide.status, 0, sideBySide.stderr);
     assert.equal(existsSync(join(sideBySideBin, "pi")), false);
     assert.equal(existsSync(join(sideBySideBin, "pi-wait-for-user")), true);
-    assert.match(sideBySide.stdout, /Adopted verified legacy Downstream Release/);
+    assert.match(sideBySide.stdout, /Adopted verified Legacy Downstream Installation/);
     assert.match(sideBySide.stdout, /remove legacy directories manually/);
 
     const managedRoot = join(root, "managed-data");
@@ -823,7 +827,7 @@ test("plain side-by-side setup publishes only compatibility, which can explicitl
   }
 });
 
-test("managed ownership publication interruption never claims pi before the compatibility command exists", () => {
+test("Command Ownership publication interruption never claims pi before the Compatibility Entrypoint exists", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-entrypoint-interrupt-"));
   const bin = mkdtempSync(join(tmpdir(), "managed-runtime-entrypoint-interrupt-bin-"));
   const candidate = fixture();
@@ -862,7 +866,7 @@ test("managed enable records Stock Pi and publishes both command names to one Di
       "managed", "enable", "--bin-dir", bin,
     ], { PATH: `${bin}:${stockBin}:/usr/bin:/bin` });
     assert.equal(enabled.status, 0, enabled.stderr);
-    assert.match(enabled.stdout, /Managed command ownership enabled/);
+    assert.match(enabled.stdout, /Command Ownership enabled/);
     assert.equal(readlinkSync(join(bin, "pi")), join(dataRoot, "dispatcher", "managed-dispatcher.mjs"));
     assert.equal(readlinkSync(join(bin, "pi-wait-for-user")), join(dataRoot, "dispatcher", "managed-dispatcher.mjs"));
 
@@ -1060,7 +1064,7 @@ test("an unowned symlink to Dispatcher source is still a hard collision", () => 
   }
 });
 
-test("managed disable retains the compatibility command and re-enable converges", () => {
+test("managed disable retains the Compatibility Entrypoint and re-enable converges", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-reenable-"));
   const bin = mkdtempSync(join(tmpdir(), "managed-runtime-reenable-bin-"));
   const candidate = fixture();
@@ -1076,6 +1080,15 @@ test("managed disable retains the compatibility command and re-enable converges"
     const unavailableStock = runManager(dataRoot, ["managed", "stock", "--"], environment);
     assert.notEqual(unavailableStock.status, 0);
     assert.match(unavailableStock.stderr, /No Stock Pi executable was recorded/);
+
+    rmSync(join(bin, "pi-wait-for-user"));
+    writeFileSync(join(bin, "pi-wait-for-user"), "foreign\n");
+    const refused = runDispatcher(dataRoot, ["managed", "disable"]);
+    assert.notEqual(refused.status, 0);
+    assert.equal(existsSync(join(bin, "pi")), true);
+    rmSync(join(bin, "pi-wait-for-user"));
+    symlinkSync(join(dataRoot, "dispatcher", "managed-dispatcher.mjs"), join(bin, "pi-wait-for-user"));
+
     const disabled = runDispatcher(dataRoot, ["managed", "disable"]);
     assert.equal(disabled.status, 0, disabled.stderr);
     assert.equal(existsSync(join(bin, "pi")), false);
@@ -1112,10 +1125,12 @@ test("managed stock rechecks identity, warns about downstream sessions, and prev
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /Recorded Stock Pi is unavailable/);
 
-    writeExecutable(stock, "#!/bin/sh\necho changed\n");
+    const changedExecuted = join(stockBin, "changed-executed");
+    writeExecutable(stock, `#!/bin/sh\ntouch "${changedExecuted}"\necho changed\n`);
     const changed = runManager(dataRoot, ["managed", "stock", "--", "--version"], environment);
     assert.notEqual(changed.status, 0);
     assert.match(changed.stderr, /Stock Pi identity changed/);
+    assert.equal(existsSync(changedExecuted), false);
 
     const ownershipPath = join(dataRoot, "state", "entrypoints.json");
     const ownership = JSON.parse(readFileSync(ownershipPath, "utf8"));

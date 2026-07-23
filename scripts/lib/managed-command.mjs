@@ -81,7 +81,7 @@ export function managedActivationOptions(values, { dataRoot, now = new Date(), c
 export function legacyMigrationMessages(migration) {
   if (!migration) return [];
   const result = migration.disposition === "adopted-after-signed-verification"
-    ? `Adopted verified legacy Downstream Release from ${migration.legacyPath}.`
-    : `Legacy Downstream Release was not signed-payload identical and was left untouched at ${migration.legacyPath}.`;
+    ? `Adopted verified Legacy Downstream Installation from ${migration.legacyPath}.`
+    : `Legacy Downstream Installation was not signed-payload identical and was left untouched at ${migration.legacyPath}.`;
   return [result, migration.cleanup];
 }

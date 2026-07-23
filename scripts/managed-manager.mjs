@@ -42,6 +42,14 @@ function packageIdentity() {
 function dataRoot() {
   return process.env.PI_MANAGED_DATA_ROOT || defaultManagedDataRoot();
 }
+
+function interruptionCheckpoint() {
+  const interruptedAt = process.env.PI_MANAGED_INTERRUPT_AT;
+  return interruptedAt
+    ? (name) => { if (name === interruptedAt) fail(`Interrupted at ${name}`); }
+    : undefined;
+}
+
 function activate(args) {
   const values = parseManagedOptions(args);
   rejectUnknownOptions(values, ["--data-root", "--platform", "--trust", "--channel", "--manifest", "--root-key", "--manager-archive", "--release-archive", "--legacy-dir", "--now"]);
@@ -49,9 +57,7 @@ function activate(args) {
   const activation = installAndActivate(managedActivationOptions(values, {
     dataRoot: selectedDataRoot,
     now: values.has("--now") ? new Date(values.get("--now")) : new Date(),
-    checkpoint: process.env.PI_MANAGED_INTERRUPT_AT
-      ? (name) => { if (name === process.env.PI_MANAGED_INTERRUPT_AT) fail(`Interrupted at ${name}`); }
-      : undefined,
+    checkpoint: interruptionCheckpoint(),
   }));
   return { activation, migration: readLegacyMigration(selectedDataRoot) };
 }
@@ -61,11 +67,9 @@ function installCompatibility(args) {
   rejectUnknownOptions(values, ["--data-root", "--bin-dir"]);
   const result = installManagedCompatibility(values.get("--data-root") || dataRoot(), {
     binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
-    checkpoint: process.env.PI_MANAGED_INTERRUPT_AT
-      ? (name) => { if (name === process.env.PI_MANAGED_INTERRUPT_AT) fail(`Interrupted at ${name}`); }
-      : undefined,
+    checkpoint: interruptionCheckpoint(),
   });
-  console.log(`Managed compatibility command ${result}.`);
+  console.log(`Compatibility Entrypoint ${result}.`);
 }
 
 function enableOwnership(args) {
@@ -73,11 +77,9 @@ function enableOwnership(args) {
   rejectUnknownOptions(values, ["--data-root", "--bin-dir"]);
   const result = enableManagedOwnership(values.get("--data-root") || dataRoot(), {
     binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
-    checkpoint: process.env.PI_MANAGED_INTERRUPT_AT
-      ? (name) => { if (name === process.env.PI_MANAGED_INTERRUPT_AT) fail(`Interrupted at ${name}`); }
-      : undefined,
+    checkpoint: interruptionCheckpoint(),
   });
-  console.log(`Managed command ownership ${result}.`);
+  console.log(`Command Ownership ${result}.`);
   console.log(shellHashRemediation);
 }
 

@@ -14,7 +14,7 @@ import {
   defaultManagedBinDirectory,
   defaultManagedDataRoot,
   enableManagedOwnership,
-  installAndActivate,
+  installAndActivateFromPinnedRoot,
   installManagedCompatibility,
   preflightManagedCommandOwnership,
   readLegacyMigration,
@@ -39,10 +39,7 @@ try {
   const binDirectory = resolve(values.get("--bin-dir") || defaultManagedBinDirectory());
   preflightManagedCommandOwnership(dataRoot, { binDirectory, managePi });
   const rootKeys = readPinnedRootKeys(join(import.meta.dirname, "managed-root-keys.json"));
-  const activation = installAndActivate({
-    ...managedActivationOptions(values, { dataRoot, rootKeys }),
-    rootKeysPinnedByInstaller: true,
-  });
+  const activation = installAndActivateFromPinnedRoot(managedActivationOptions(values, { dataRoot, rootKeys }));
   installManagedCompatibility(dataRoot, { binDirectory });
   if (managePi) enableManagedOwnership(dataRoot, { binDirectory });
   console.log(`${managePi ? "Managed" : "Side-by-side"} installation ready: ${activation.active.downstreamReleaseId}.`);
