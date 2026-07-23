@@ -129,6 +129,26 @@ test("opening a saved Agent Thread reconstructs its Question Interaction Request
 	}
 });
 
+test("the package provides privacy-safe short text for core-owned deferred re-entry", async () => {
+	const harness = await createHarness();
+	try {
+		await defer(harness);
+		const snapshot = harness.session.deferredBatch;
+		const summary = harness.session.getToolDefinition("question")?.deferral?.summary;
+		assert.equal(snapshot?.kind, "batch");
+		assert.equal(typeof summary, "function");
+		assert.equal(
+			await summary(snapshot, {
+				cwd: harness.root,
+				sessionManager: harness.session.sessionManager,
+			}),
+			"2 questions need Responses",
+		);
+	} finally {
+		dispose(harness);
+	}
+});
+
 test("a typed package Response survives the durable boundary and resumes the original Question Tool call", async () => {
 	const harness = await createHarness();
 	try {

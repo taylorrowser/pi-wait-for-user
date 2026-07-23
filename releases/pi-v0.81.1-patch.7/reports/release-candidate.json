@@ -1,0 +1,255 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "pi-v0.81.1-patch.7",
+  "upstream": {
+    "repository": "https://github.com/earendil-works/pi.git",
+    "tag": "v0.81.1",
+    "commit": "20be4b18d4c57487f8993d2762bace129f0cf7c6",
+    "packageVersion": "0.81.1"
+  },
+  "startedAt": "2026-07-23T15:44:07.750Z",
+  "result": "passed",
+  "fixtureCategories": [
+    {
+      "name": "legacy",
+      "fixtures": [
+        "prototype/session-journal-harness/harness.mjs"
+      ]
+    },
+    {
+      "name": "session-format",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/44-eager-downstream-session-header.test.ts"
+      ]
+    },
+    {
+      "name": "markerless",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts"
+      ]
+    },
+    {
+      "name": "deferred",
+      "fixtures": [
+        "packages/coding-agent/test/suite/agent-session-deferred.test.ts"
+      ]
+    },
+    {
+      "name": "ready",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts"
+      ]
+    },
+    {
+      "name": "partial",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/16-idempotent-deferred-recovery.test.ts"
+      ]
+    },
+    {
+      "name": "complete",
+      "fixtures": [
+        "packages/coding-agent/test/suite/agent-session-deferred.test.ts"
+      ]
+    },
+    {
+      "name": "unavailable",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts",
+        "packages/coding-agent/test/suite/regressions/45-live-unavailable-resolver.test.ts"
+      ]
+    },
+    {
+      "name": "incompatible-version",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts"
+      ]
+    },
+    {
+      "name": "compaction",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts"
+      ]
+    },
+    {
+      "name": "branch",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/18-deferred-branches-compaction.test.ts"
+      ]
+    },
+    {
+      "name": "queue",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/19-interrupt-waiting-state.test.ts"
+      ]
+    },
+    {
+      "name": "abandonment",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/17-unavailable-deferred-recovery.test.ts"
+      ]
+    },
+    {
+      "name": "rpc",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/20-rpc-deferred-mode.test.ts",
+        "packages/coding-agent/test/suite/regressions/20-rpc-client-deferred.test.ts"
+      ]
+    },
+    {
+      "name": "json",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/20-print-json-deferred-modes.test.ts"
+      ]
+    },
+    {
+      "name": "print",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/20-print-json-deferred-modes.test.ts"
+      ]
+    },
+    {
+      "name": "tui",
+      "fixtures": [
+        "packages/coding-agent/test/suite/regressions/21-interactive-deferred-presentation.test.ts",
+        "packages/coding-agent/test/suite/regressions/43-durable-deferral-example.test.ts",
+        "packages/coding-agent/test/suite/regressions/49-deferred-presentation.test.ts",
+        "packages/coding-agent/test/suite/regressions/49-deferred-surface-lifecycle.test.ts",
+        "packages/coding-agent/test/deferred-inspector.test.ts"
+      ]
+    },
+    {
+      "name": "question-tool",
+      "fixtures": [
+        "packages/question-tool/test/agent-session.test.mjs",
+        "packages/question-tool/test/question-form.test.mjs",
+        "packages/question-tool/test/question-tool-extension.test.mjs",
+        "packages/question-tool/test/package.test.mjs"
+      ]
+    }
+  ],
+  "stages": [
+    {
+      "name": "release-inputs",
+      "command": [
+        "node",
+        "scripts/release.mjs",
+        "verify"
+      ],
+      "status": "passed",
+      "durationMs": 40
+    },
+    {
+      "name": "repository-tests",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "status": "passed",
+      "durationMs": 42783
+    },
+    {
+      "name": "prepare-exact-patch",
+      "command": [
+        "node",
+        "scripts/pi-patch.mjs",
+        "prepare",
+        ".work/pi-v0.81.1"
+      ],
+      "status": "passed",
+      "durationMs": 4072
+    },
+    {
+      "name": "install-dependencies",
+      "command": [
+        "npm",
+        "ci",
+        "--ignore-scripts"
+      ],
+      "status": "passed",
+      "durationMs": 6733
+    },
+    {
+      "name": "typecheck",
+      "command": [
+        "npm",
+        "run",
+        "check"
+      ],
+      "status": "passed",
+      "durationMs": 7143
+    },
+    {
+      "name": "hydrate-model-data",
+      "command": [
+        "npm",
+        "run",
+        "hydrate:model-data"
+      ],
+      "status": "passed",
+      "durationMs": 1608
+    },
+    {
+      "name": "build",
+      "command": [
+        "npm",
+        "run",
+        "build:offline"
+      ],
+      "status": "passed",
+      "durationMs": 3947
+    },
+    {
+      "name": "legacy-compatibility",
+      "command": [
+        "prototype/session-journal-harness/run.sh",
+        ".work/pi-v0.81.1/packages/coding-agent"
+      ],
+      "status": "passed",
+      "durationMs": 1076
+    },
+    {
+      "name": "full-pi-suite",
+      "command": [
+        ".work/pi-v0.81.1/test.sh"
+      ],
+      "status": "passed",
+      "durationMs": 51450
+    },
+    {
+      "name": "public-conformance",
+      "command": [
+        "node",
+        ".work/pi-v0.81.1/packages/coding-agent/dist/cli.js",
+        "conformance"
+      ],
+      "status": "passed",
+      "durationMs": 407,
+      "result": {
+        "passed": 8,
+        "required": 8
+      }
+    },
+    {
+      "name": "question-tool-typecheck",
+      "command": [
+        "npm",
+        "run",
+        "typecheck:question-tool"
+      ],
+      "status": "passed",
+      "durationMs": 1213
+    },
+    {
+      "name": "question-tool-suite",
+      "command": [
+        "npm",
+        "run",
+        "test:question-tool"
+      ],
+      "status": "passed",
+      "durationMs": 3789
+    }
+  ],
+  "finishedAt": "2026-07-23T15:46:12.025Z"
+}

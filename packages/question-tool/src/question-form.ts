@@ -396,5 +396,6 @@ export async function showQuestionForm(
 				handleInput,
 			};
 		},
+		{ deferredBatch: true },
 	);
 }

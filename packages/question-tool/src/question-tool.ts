@@ -29,8 +29,6 @@ import {
 } from "./lifecycle.ts";
 import { showQuestionForm } from "./question-form.ts";
 
-const INDICATOR_KEY = "pi-question-tool";
-
 const OptionSchema = Type.Object({
 	label: Type.String({
 		minLength: 1,
@@ -102,7 +100,7 @@ function findOwningAssistant(
 
 function createStore(
 	pi: ExtensionAPI,
-	ctx: ExtensionContext,
+	ctx: Pick<ExtensionContext, "sessionManager">,
 ): QuestionLifecycleStore {
 	return createQuestionLifecycleStore({
 		getBranch: () => ctx.sessionManager.getBranch(),
@@ -111,9 +109,8 @@ function createStore(
 }
 
 function requestSummary(request: QuestionRequestRecord): string {
-	return request.payload.questions.length === 1
-		? request.payload.questions[0].question
-		: `${request.payload.questions.length} questions need Responses`;
+	const count = request.payload.questions.length;
+	return count === 1 ? "1 question needs a Response" : `${count} questions need Responses`;
 }
 
 function outcomeText(outcome: QuestionOutcomeRecord): string {
@@ -135,59 +132,12 @@ export function createQuestionToolExtension(
 ): ExtensionFactory {
 	return (pi: ExtensionAPI) => {
 		let currentContext: ExtensionContext | undefined;
-		let activeRequestId: string | undefined;
 		let dialogOpen = false;
 		let closeDialog: (() => void) | undefined;
 
 		const activeStore = (): QuestionLifecycleStore => {
 			if (!currentContext) throw new Error("No active Question Tool session");
 			return createStore(pi, currentContext);
-		};
-		const clearIndicator = (ctx: ExtensionContext): void => {
-			ctx.ui.setStatus(INDICATOR_KEY, undefined);
-			ctx.ui.setWidget(INDICATOR_KEY, undefined);
-		};
-		const updatePendingIndicator = (ctx: ExtensionContext): void => {
-			const request = activeRequestId
-				? createStore(pi, ctx).getRequest(activeRequestId)
-				: undefined;
-			if (!request || dialogOpen) {
-				clearIndicator(ctx);
-				return;
-			}
-			ctx.ui.setWidget(INDICATOR_KEY, (_tui, theme) => {
-				return new Text(
-					[
-						theme.fg("warning", theme.bold("⏸ Question waiting")) +
-							theme.fg("muted", `  ${requestSummary(request)}`),
-						theme.fg(
-							"dim",
-							"  Alt+Q or /q to open • Esc only dismisses • a normal message leaves it unanswered",
-						),
-					].join("\n"),
-					0,
-					0,
-				);
-			});
-		};
-		const showRecoveryIndicator = (
-			ctx: ExtensionContext,
-			outcome: QuestionOutcomeRecord,
-		): void => {
-			activeRequestId = undefined;
-			ctx.ui.setWidget(
-				INDICATOR_KEY,
-				(_tui, theme) =>
-					new Text(
-						theme.fg(
-							"warning",
-							`${outcome.outcome.type === "response" ? "Response" : "Outcome"} recorded; deferred work remains.`,
-						) +
-							theme.fg("dim", "  Run /deferred to inspect, retry, or recover."),
-						0,
-						0,
-					),
-			);
 		};
 		const useContext = (ctx: ExtensionContext): QuestionLifecycleStore => {
 			currentContext = ctx;
@@ -206,10 +156,8 @@ export function createQuestionToolExtension(
 			batch.correlationId === requestId;
 
 		const closeSettledPresentation = (): void => {
-			activeRequestId = undefined;
 			closeDialog?.();
 			closeDialog = undefined;
-			if (currentContext) clearIndicator(currentContext);
 		};
 
 		if (controller) {
@@ -241,26 +189,21 @@ export function createQuestionToolExtension(
 			const store = useContext(ctx);
 			const snapshot = ctx.getDeferredBatch();
 			const request =
-				snapshot?.kind === "batch" && snapshot.correlationId
+				snapshot?.kind === "batch" && snapshot.availability.status === "available" && snapshot.correlationId
 					? store.getRequest(snapshot.correlationId)
 					: undefined;
 			const existingOutcome = request && store.getOutcome(request.requestId);
 			if (!request || existingOutcome) {
-				if (existingOutcome) showRecoveryIndicator(ctx, existingOutcome);
-				else {
-					activeRequestId = undefined;
-					clearIndicator(ctx);
-					ctx.ui.notify(
-						"There is no active Question Interaction Request in this Agent Thread.",
-						"info",
-					);
-				}
+				ctx.ui.notify(
+					existingOutcome
+						? "The Question outcome is already recorded; use /deferred inspect for core recovery."
+						: "There is no active Question Interaction Request in this Agent Thread.",
+					"info",
+				);
 				return;
 			}
 
-			activeRequestId = request.requestId;
 			dialogOpen = true;
-			updatePendingIndicator(ctx);
 			try {
 				const responses = await showQuestionForm(
 					ctx,
@@ -271,35 +214,15 @@ export function createQuestionToolExtension(
 				);
 				if (!responses) return;
 				const result = store.respond(request.requestId, responses);
-				activeRequestId = undefined;
-				clearIndicator(ctx);
 				if (result.status === "recorded") {
-					void pi
-						.resumeDeferred()
-						.then((operation) => {
-							if (
-								isCurrentRequestBatch(
-									ctx,
-									request.requestId,
-									operation.deferredBatch,
-								)
-							) {
-								showRecoveryIndicator(ctx, result.outcome);
-							}
-						})
-						.catch((error: unknown) => {
-							if (!isCurrentRequestBatch(ctx, request.requestId)) return;
-							showRecoveryIndicator(ctx, result.outcome);
-							ctx.ui.notify(
-								error instanceof Error ? error.message : String(error),
-								"error",
-							);
-						});
+					void pi.resumeDeferred().catch((error: unknown) => {
+						if (!isCurrentRequestBatch(ctx, request.requestId)) return;
+						ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+					});
 				}
 			} finally {
 				closeDialog = undefined;
 				dialogOpen = false;
-				updatePendingIndicator(ctx);
 			}
 		};
 
@@ -418,9 +341,19 @@ export function createQuestionToolExtension(
 						correlationId: request.requestId,
 					};
 				},
-				presenter: async (snapshot: DeferredBatch, ctx) => {
-					activeRequestId = snapshot.correlationId;
+				presenter: async (_snapshot: DeferredBatch, ctx) => {
 					await openQuestion(ctx);
+				},
+				summary: (snapshot, ctx) => {
+					const store = createStore(pi, ctx);
+					const request = snapshot.correlationId
+						? store.getRequest(snapshot.correlationId)
+						: undefined;
+					if (!request) throw new Error("Question Interaction Request was not found");
+					const outcome = store.getOutcome(request.requestId);
+					return outcome
+						? "Question outcome recorded; deferred work remains"
+						: requestSummary(request);
 				},
 			},
 			async execute(toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -433,8 +366,6 @@ export function createQuestionToolExtension(
 				const outcome = request && store.getOutcome(request.requestId);
 				if (!request || !outcome)
 					throw new Error("Question Tool outcome was not found");
-				activeRequestId = undefined;
-				clearIndicator(ctx);
 				return {
 					content: [{ type: "text" as const, text: outcomeText(outcome) }],
 					details: { request, outcome },
@@ -462,7 +393,7 @@ export function createQuestionToolExtension(
 				if (!details && context.deferredState === "owner") {
 					return new Text(
 						theme.fg("warning", "⏸ Waiting for your response") +
-							theme.fg("dim", "  Alt+Q or /q to open"),
+							theme.fg("dim", "  /deferred to open"),
 						0,
 						0,
 					);
@@ -552,18 +483,8 @@ export function createQuestionToolExtension(
 				);
 				return;
 			}
-			const snapshot = ctx.getDeferredBatch();
-			activeRequestId =
-				snapshot?.kind === "batch" ? snapshot.correlationId : undefined;
-			const outcome = activeRequestId
-				? createStore(pi, ctx).getOutcome(activeRequestId)
-				: undefined;
-			if (outcome) showRecoveryIndicator(ctx, outcome);
-			else updatePendingIndicator(ctx);
 		});
-		pi.on("session_shutdown", (_event, ctx) => {
-			clearIndicator(ctx);
-			activeRequestId = undefined;
+		pi.on("session_shutdown", () => {
 			currentContext = undefined;
 		});
 	};

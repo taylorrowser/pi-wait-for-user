@@ -110,7 +110,7 @@ test("the release candidate input verifies every pinned identity without becomin
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
-    new RegExp(`Verified ${releaseCandidateId.replaceAll(".", "\\.")}: Pi v0\\.81\\.1, 13 patches, Question Tool ${releaseCandidateInput.questionTool.version.replaceAll(".", "\\.")}`),
+    new RegExp(`Verified ${releaseCandidateId.replaceAll(".", "\\.")}: Pi v0\\.81\\.1, 14 patches, Question Tool ${releaseCandidateInput.questionTool.version.replaceAll(".", "\\.")}`),
   );
 });
 
