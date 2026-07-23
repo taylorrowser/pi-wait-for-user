@@ -16,6 +16,22 @@ _Avoid_: Fallback Pi, managed Pi
 The stable command boundary of a Managed Installation that selects its active downstream release and routes installation lifecycle operations.
 _Avoid_: Shim, per-release wrapper
 
+**Command Ownership**:
+The explicit Managed Installation state in which the manager owns the normal `pi` entrypoint as well as the compatibility entrypoint.
+_Avoid_: Takeover, replacement
+
+**Compatibility Entrypoint**:
+The manager-owned `pi-wait-for-user` command that selects the same Activation while Command Ownership is enabled or disabled.
+_Avoid_: Pinned launcher, legacy alias
+
+**Stock Pi Identity**:
+The observable identity of the Stock Pi command resolved when Command Ownership is enabled, retained so later divergence is explicit.
+_Avoid_: Backup, fallback identity
+
+**Legacy Downstream Installation**:
+A side-by-side Downstream Release installed before manager receipts and Activation, eligible for adoption only after signed payload verification.
+_Avoid_: Managed Release, Stock Pi
+
 **Manager Release**:
 An immutable signed version of the lifecycle implementation selected alongside a compatible Downstream Release.
 _Avoid_: Managed Dispatcher, installer

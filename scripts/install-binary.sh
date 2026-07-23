@@ -4,6 +4,7 @@ set -eu
 release_id="pi-v0.81.1-patch.6"
 pi_version="0.81.1"
 payload_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+usage="Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH]"
 action=${1:-install}
 if [ "$#" -gt 0 ]; then shift; fi
 
@@ -19,11 +20,12 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --install-dir) install_dir=$2; shift 2 ;;
     --bin-dir) bin_dir=$2; shift 2 ;;
-    *) echo "Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH]" >&2; exit 1 ;;
+    *) echo "$usage" >&2; exit 1 ;;
   esac
 done
 
 launcher="$bin_dir/pi-wait-for-user"
+launcher_receipt="$install_dir/.launcher-receipt"
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) platform=darwin-arm64 ;;
   Darwin-x86_64) platform=darwin-x64 ;;
@@ -55,17 +57,43 @@ verify_directory() {
   }
 }
 
+launcher_receipt_matches() {
+  test -f "$launcher_receipt" || return 1
+  expected_receipt=$(printf 'schemaVersion=1\npath=%s\ntarget=%s\n' "$launcher" "$install_dir/pi-wait-for-user")
+  actual_receipt=$(cat "$launcher_receipt")
+  test "$actual_receipt" = "$expected_receipt"
+}
+
+write_launcher_receipt() {
+  directory=$1
+  printf 'schemaVersion=1\npath=%s\ntarget=%s\n' "$launcher" "$install_dir/pi-wait-for-user" > "$directory/.launcher-receipt"
+}
+
+inspect_launcher() {
+  launcher_status=absent
+  if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
+    return 0
+  fi
+  if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ] && launcher_receipt_matches; then
+    launcher_status=current
+    return 0
+  fi
+  echo "pi-wait-for-user: unowned foreign command collision: $launcher" >&2
+  return 1
+}
+
 activate() {
+  inspect_launcher
   mkdir -p "$bin_dir"
-  temporary_link="$bin_dir/.pi-wait-for-user.tmp.$$"
-  rm -f "$temporary_link"
-  ln -s "$install_dir/pi-wait-for-user" "$temporary_link"
-  mv -f "$temporary_link" "$launcher"
+  if [ "$launcher_status" = absent ]; then
+    ln -s "$install_dir/pi-wait-for-user" "$launcher"
+  fi
 }
 
 case "$action" in
   install)
     verify_directory "$payload_dir"
+    inspect_launcher
     if [ -e "$install_dir" ]; then
       echo "pi-wait-for-user: install already exists: $install_dir" >&2
       exit 1
@@ -77,6 +105,7 @@ case "$action" in
     mkdir "$temporary"
     trap 'rm -rf "$temporary"' EXIT HUP INT TERM
     cp -R "$payload_dir/." "$temporary/"
+    write_launcher_receipt "$temporary"
     mv "$temporary" "$install_dir"
     trap - EXIT HUP INT TERM
     activate
@@ -101,14 +130,14 @@ case "$action" in
     ;;
   uninstall)
     test -d "$install_dir" || { echo "pi-wait-for-user: no installation at $install_dir" >&2; exit 1; }
-    if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ]; then
+    if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ] && launcher_receipt_matches; then
       rm "$launcher"
     fi
     rm -rf "$install_dir"
     echo "Removed $release_id. Pi settings and sessions were left unchanged."
     ;;
   *)
-    echo "Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH]" >&2
+    echo "$usage" >&2
     exit 1
     ;;
 esac
