@@ -62,21 +62,28 @@ function activate(args) {
   return { activation, adoption: readLegacyInstallationAdoption(selectedDataRoot) };
 }
 
-function installCompatibility(args) {
+function commandLocations(args) {
   const values = parseManagedOptions(args);
   rejectUnknownOptions(values, ["--data-root", "--bin-dir"]);
-  const result = installManagedCompatibility(values.get("--data-root") || dataRoot(), {
+  return {
+    dataRoot: values.get("--data-root") || dataRoot(),
     binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
+  };
+}
+
+function installCompatibility(args) {
+  const locations = commandLocations(args);
+  const result = installManagedCompatibility(locations.dataRoot, {
+    binDirectory: locations.binDirectory,
     checkpoint: interruptionCheckpoint(),
   });
   console.log(`Compatibility Entrypoint ${result}.`);
 }
 
 function enableOwnership(args) {
-  const values = parseManagedOptions(args);
-  rejectUnknownOptions(values, ["--data-root", "--bin-dir"]);
-  const result = enableManagedOwnership(values.get("--data-root") || dataRoot(), {
-    binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
+  const locations = commandLocations(args);
+  const result = enableManagedOwnership(locations.dataRoot, {
+    binDirectory: locations.binDirectory,
     checkpoint: interruptionCheckpoint(),
   });
   console.log(`Command Ownership ${result}.`);
