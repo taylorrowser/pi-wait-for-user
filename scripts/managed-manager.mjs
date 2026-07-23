@@ -146,7 +146,7 @@ function interactiveLaunch(args) {
   if (args.some((argument) => nonInteractiveFlags.has(argument))) return false;
   if (["install", "remove", "uninstall", "list", "config", "conformance"].includes(args[0])) return false;
   const mode = args.indexOf("--mode");
-  return mode < 0 || !["json", "rpc"].includes(args[mode + 1]);
+  return mode < 0 || !["text", "json", "rpc"].includes(args[mode + 1]);
 }
 
 function beginStartupCheck(args) {

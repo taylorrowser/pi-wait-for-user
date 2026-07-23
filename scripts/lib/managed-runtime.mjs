@@ -200,6 +200,36 @@ function layout(dataRoot) {
   };
 }
 
+export function managedStateDirectory(dataRoot) {
+  const paths = layout(dataRoot);
+  ensureManagedDirectory(paths.root);
+  ensureManagedDirectory(paths.state);
+  return paths.state;
+}
+
+function managedStatePath(dataRoot, name) {
+  if (typeof name !== "string" || basename(name) !== name || name === "." || name === "..") {
+    fail("Malformed managed state filename");
+  }
+  return join(managedStateDirectory(dataRoot), name);
+}
+
+export function readManagedStateJson(dataRoot, name, label, { maximumSize = 2 * 1024 * 1024 } = {}) {
+  const path = managedStatePath(dataRoot, name);
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximumSize) fail(`Malformed ${label}`);
+  return readJson(path, label);
+}
+
+export function writeManagedStateJson(dataRoot, name, value) {
+  const path = managedStatePath(dataRoot, name);
+  if (pathExists(path)) {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) fail("Managed state path is foreign");
+  }
+  atomicWrite(path, value);
+}
+
 function initializeLayout(dataRoot) {
   const paths = layout(dataRoot);
   for (const path of [paths.root, paths.state, paths.managers, paths.releases, paths.receipts, paths.artifacts, paths.leases, paths.temporary, paths.diagnostics]) {

@@ -1,20 +1,15 @@
-import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
-  fsyncSync,
   lstatSync,
   linkSync,
-  mkdirSync,
   openSync,
-  readFileSync,
-  renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -23,15 +18,17 @@ import {
   assertLifecycleCapability,
   inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
+  managedStateDirectory,
   readActivation,
+  readManagedStateJson,
   readManagedUpdateContext,
   recordManagedUpdateDiagnostic,
   validateActivePair,
   withLifecycleLockAsync,
   withManagedTemporaryDirectory,
+  writeManagedStateJson,
 } from "./managed-runtime.mjs";
 import {
-  serializeMetadata,
   verifyChannel,
   verifyChannelSelection,
   verifyReleaseManifest,
@@ -50,58 +47,14 @@ function fail(message) {
 }
 
 function paths(dataRoot) {
-  const root = resolve(dataRoot);
+  const state = managedStateDirectory(dataRoot);
   return {
-    root,
-    state: join(root, "state"),
-    status: join(root, "state", "update-status.json"),
-    startup: join(root, "state", "startup-check.json"),
-    startupLock: join(root, "state", "startup-check.lock"),
-    hold: join(root, "state", "update-hold.json"),
+    state,
+    status: join(state, "update-status.json"),
+    startup: join(state, "startup-check.json"),
+    startupLock: join(state, "startup-check.lock"),
+    hold: join(state, "update-hold.json"),
   };
-}
-
-function safeParent(path, label) {
-  const parent = dirname(path);
-  if (!existsSync(parent)) mkdirSync(parent, { recursive: true, mode: 0o700 });
-  const parentStat = lstatSync(parent);
-  if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) fail(`${label} parent is foreign`);
-  if (existsSync(path)) {
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !stat.isFile()) fail(`${label} path is foreign`);
-  }
-  return parent;
-}
-
-function atomicWrite(path, value) {
-  const parent = safeParent(path, "managed state");
-  const temporary = join(parent, `.${basename(path)}.tmp-${randomUUID()}`);
-  const fd = openSync(temporary, "wx", 0o600);
-  try {
-    writeSync(fd, serializeMetadata(value));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(temporary, path);
-  try {
-    const directory = openSync(parent, "r");
-    try { fsyncSync(directory); } finally { closeSync(directory); }
-  } catch {
-    // Atomic rename remains safe on filesystems that do not support directory fsync.
-  }
-}
-
-function readJson(path, label) {
-  safeParent(path, label);
-  try {
-    const stat = lstatSync(path);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > metadataLimit) fail(`Malformed ${label}`);
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch (error) {
-    if (error instanceof Error && error.message === `Malformed ${label}`) throw error;
-    fail(`Malformed ${label}`);
-  }
 }
 
 function errorMessage(error) {
@@ -313,7 +266,7 @@ function validateStatus(status) {
 export function readManagedUpdateStatus(dataRoot) {
   const path = paths(dataRoot).status;
   if (!existsSync(path)) return null;
-  return validateStatus(readJson(path, "managed update status"));
+  return validateStatus(readManagedStateJson(dataRoot, "update-status.json", "managed update status", { maximumSize: metadataLimit }));
 }
 
 async function checkManagedUpdateLocked(dataRoot, options = {}) {
@@ -368,7 +321,7 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   const candidateCompatible = Boolean(platformArchive) && manifest.manager.artifacts.length === 1;
   const status = updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError, candidateCompatible);
   status.checkedAt = now.toISOString();
-  if (options.cache !== false) atomicWrite(paths(dataRoot).status, status);
+  if (options.cache !== false) writeManagedStateJson(dataRoot, "update-status.json", status);
   if (!candidateChanged) await withManagedUpdateStage("Update Hold cleanup", async () => clearExactUpdateHold(dataRoot, manifest.releaseId));
   const common = {
     active: status.active,
@@ -476,7 +429,7 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
       }));
       stage = "post-activation cleanup";
       clearExactUpdateHold(dataRoot, checked.candidate.releaseId);
-      atomicWrite(paths(dataRoot).status, activatedStatus(checked, checked.candidate, options.now || new Date()));
+      writeManagedStateJson(dataRoot, "update-status.json", activatedStatus(checked, checked.candidate, options.now || new Date()));
       return { kind: "activated", active: checked.candidate, channel: checked.channel, activation };
     });
   } catch (error) {
@@ -535,7 +488,7 @@ export async function runManagedUpdate(dataRoot, options = {}) {
 function readUpdateHold(dataRoot) {
   const holdPath = paths(dataRoot).hold;
   if (!existsSync(holdPath)) return null;
-  const hold = readJson(holdPath, "Update Hold");
+  const hold = readManagedStateJson(dataRoot, "update-hold.json", "Update Hold", { maximumSize: metadataLimit });
   if (!hasExactKeys(hold, ["schemaVersion", "type", "releaseId", "createdAt"])
     || hold.schemaVersion !== 1 || hold.type !== "update-hold" || !idPattern.test(hold.releaseId)
     || !validDate(hold.createdAt)) fail("Malformed Update Hold");
@@ -572,7 +525,6 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
   if (environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE || options.offline) return false;
   const now = options.now || new Date();
   const selected = paths(dataRoot);
-  safeParent(selected.startupLock, "startup check lock");
   let lock;
   try { lock = openSync(selected.startupLock, "wx", 0o600); } catch (error) {
     if (error?.code !== "EEXIST") throw error;
@@ -597,7 +549,7 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
     if (current.dev !== stat.dev || current.ino !== stat.ino
       || recovery.dev !== stat.dev || recovery.ino !== stat.ino) return false;
     unlinkSync(selected.startupLock);
-    atomicWrite(recoveryPath, {
+    writeManagedStateJson(dataRoot, basename(recoveryPath), {
       schemaVersion: 1,
       type: "startup-check-lock-recovery",
       staleModifiedAt: new Date(stat.mtimeMs).toISOString(),
@@ -611,14 +563,15 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
   closeSync(lock);
   try {
     if (existsSync(selected.startup)) {
-      const state = readJson(selected.startup, "startup check state");
-      if (state?.schemaVersion !== 1 || state.type !== "managed-startup-check" || typeof state.lastAttemptAt !== "string") {
+      const state = readManagedStateJson(dataRoot, "startup-check.json", "startup check state", { maximumSize: metadataLimit });
+      if (!hasExactKeys(state, ["schemaVersion", "type", "lastAttemptAt"])
+        || state.schemaVersion !== 1 || state.type !== "managed-startup-check" || !validDate(state.lastAttemptAt)) {
         fail("Malformed startup check state");
       }
       const elapsed = now.getTime() - Date.parse(state.lastAttemptAt);
       if (Number.isFinite(elapsed) && elapsed >= 0 && elapsed < startupThrottleMilliseconds) return false;
     }
-    atomicWrite(selected.startup, {
+    writeManagedStateJson(dataRoot, "startup-check.json", {
       schemaVersion: 1,
       type: "managed-startup-check",
       lastAttemptAt: now.toISOString(),
