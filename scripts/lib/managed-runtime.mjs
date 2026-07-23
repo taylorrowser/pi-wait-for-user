@@ -914,6 +914,10 @@ function readConfig(paths) {
   return { ...config, rootKeys };
 }
 
+function samePair(left, right) {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
 function validatePairShape(value, label) {
   exactObject(value, label, ["managerReleaseId", "downstreamReleaseId", "manifestSha256", "platform"]);
   ensureIdentifier(value.managerReleaseId, `${label} Manager Release ID`);
@@ -1072,7 +1076,7 @@ export function verifyManagedInstallation(dataRoot, options = {}) {
   const pairs = options.all && activation.previous
     ? [activation.active, activation.previous]
     : [activation.active];
-  const unique = pairs.filter((pair, index) => pairs.findIndex((entry) => canonicalJson(entry) === canonicalJson(pair)) === index);
+  const unique = pairs.filter((pair, index) => pairs.findIndex((entry) => samePair(entry, pair)) === index);
   return unique.map((pair) => verifyPair(dataRoot, pair, options));
 }
 
@@ -1268,7 +1272,7 @@ function installAndActivateWithProvenance(options, provenanceType) {
           else fail("Update Hold clear transaction does not match the selected Activation");
         }
         const current = readActivation(dataRoot);
-        if (canonicalJson(current.active) === canonicalJson(pair)) {
+        if (samePair(current.active, pair)) {
           updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
           return current;
         }
@@ -1294,7 +1298,11 @@ function installAndActivateWithProvenance(options, provenanceType) {
         previous,
       };
       atomicWrite(paths.activation, activation);
-      updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
+      try {
+        updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
+      } catch (error) {
+        recordManagedUpdateDiagnostic(dataRoot, "post-activation Legacy Downstream Installation adoption", error);
+      }
       checkpoint?.("after-activation-switch");
       try { pruneInstalledPairsLocked(dataRoot); } catch (error) {
         recordManagedUpdateDiagnostic(dataRoot, "post-activation retention", error);
@@ -1471,8 +1479,8 @@ function readUpdateHoldClearTransaction(paths) {
 function pairTransactionState(dataRoot, transaction) {
   if (!transaction) return null;
   const active = readActivation(dataRoot).active;
-  if (canonicalJson(active) === canonicalJson(transaction.target)) return "committed";
-  if (canonicalJson(active) === canonicalJson(transaction.source)) return "not-committed";
+  if (samePair(active, transaction.target)) return "committed";
+  if (samePair(active, transaction.source)) return "not-committed";
   return "superseded";
 }
 
@@ -1498,7 +1506,7 @@ export function readManagedUpdateHold(dataRoot) {
   return readUpdateHoldRecord(paths);
 }
 
-function installedPairForRelease(paths, releaseId, { allowMissingPayload = false } = {}) {
+function installedPairForRelease(paths, releaseId, { allowMissingPairs = [] } = {}) {
   ensureIdentifier(releaseId, "local release ID");
   const releasePath = join(paths.releases, releaseId);
   const centralPath = receiptPath(paths, "downstream", releaseId);
@@ -1514,8 +1522,9 @@ function installedPairForRelease(paths, releaseId, { allowMissingPayload = false
   if (pathExists(releasePath)) {
     const verifiedReceipt = readReceiptCopies(paths, "downstream", releaseId, releasePath, pair);
     comparePayload(payloadWithoutManagerFiles(releasePath), verifiedReceipt.payload);
-  } else if (allowMissingPayload) validateReceipt(receipt, "downstream", releasePath, pair);
-  else return null;
+  } else if (allowMissingPairs.some((pending) => samePair(pending, pair))) {
+    validateReceipt(receipt, "downstream", releasePath, pair);
+  } else return null;
   return pair;
 }
 
@@ -1558,7 +1567,7 @@ function readPinnedPairs(paths) {
 function readVerifiedPinnedPairs(paths) {
   return readPinnedPairs(paths).map((pair) => {
     const installed = installedPairForRelease(paths, pair.downstreamReleaseId);
-    if (!installed || canonicalJson(installed) !== canonicalJson(pair)) {
+    if (!installed || !samePair(installed, pair)) {
       fail(`Pinned Release identity mismatch: ${pair.downstreamReleaseId}`);
     }
     return pair;
@@ -1619,7 +1628,7 @@ export function rollbackManagedInstallation(dataRoot, options = {}) {
       if (releaseId) fail(`No locally installed verified pair exists for ${releaseId}`);
       return { kind: "no-target", activation: current };
     }
-    if (canonicalJson(target) === canonicalJson(current.active)) {
+    if (samePair(target, current.active)) {
       return { kind: "already-active", activation: current };
     }
     verifyPair(dataRoot, target);
@@ -1648,14 +1657,12 @@ export function rollbackManagedInstallation(dataRoot, options = {}) {
       hold,
       createdAt: new Date().toISOString(),
     });
+    atomicWrite(updateHoldPath(paths), hold);
     options.checkpoint?.("before-rollback-switch");
     atomicWrite(paths.activation, rolledBack);
     options.checkpoint?.("rollback-activation-committed");
-    try {
-      atomicWrite(updateHoldPath(paths), hold);
-      unlinkSync(paths.rollback);
-    } catch (error) {
-      recordManagedUpdateDiagnostic(dataRoot, "Update Hold projection", error);
+    try { unlinkSync(paths.rollback); } catch (error) {
+      recordManagedUpdateDiagnostic(dataRoot, "rollback transaction retirement", error);
     }
     options.checkpoint?.("after-rollback-switch");
     try { pruneInstalledPairsLocked(dataRoot); } catch (error) {
@@ -1665,14 +1672,18 @@ export function rollbackManagedInstallation(dataRoot, options = {}) {
   });
 }
 
-function clearManagedUpdateHoldLocked(dataRoot, releaseId) {
+function clearManagedUpdateHoldLocked(dataRoot, releaseId, checkpoint) {
   const paths = layout(dataRoot);
   const transaction = readRollbackTransaction(paths);
   const clearTransaction = readUpdateHoldClearTransaction(paths);
   if (clearTransaction && (!releaseId || clearTransaction.releaseId === releaseId)) {
-    unlinkSync(paths.holdClear);
     const projected = readUpdateHoldRecord(paths);
     if (projected?.releaseId === clearTransaction.releaseId) unlinkSync(updateHoldPath(paths));
+    checkpoint?.("update-hold-projection-cleared");
+    if (transaction?.hold.releaseId === clearTransaction.releaseId) unlinkSync(paths.rollback);
+    checkpoint?.("rollback-transaction-retired-after-update");
+    unlinkSync(paths.holdClear);
+    checkpoint?.("update-hold-clear-transaction-retired");
     return true;
   }
   const transactionHold = pairTransactionState(dataRoot, transaction) === "committed" ? transaction.hold : null;
@@ -1680,8 +1691,8 @@ function clearManagedUpdateHoldLocked(dataRoot, releaseId) {
   const projected = readUpdateHoldRecord(paths);
   const hold = transactionHold || projected;
   if (!hold || (releaseId && hold.releaseId !== releaseId)) return false;
-  if (transactionHold?.releaseId === hold.releaseId) unlinkSync(paths.rollback);
   if (projected?.releaseId === hold.releaseId) unlinkSync(updateHoldPath(paths));
+  if (transactionHold?.releaseId === hold.releaseId) unlinkSync(paths.rollback);
   return true;
 }
 
@@ -1689,9 +1700,11 @@ export function clearManagedUpdateHoldForRelease(dataRoot, releaseId, options = 
   ensureIdentifier(releaseId, "Update Hold release ID");
   if (options.lifecycleCapability !== undefined) {
     assertLifecycleCapability(options.lifecycleCapability);
-    return clearManagedUpdateHoldLocked(dataRoot, releaseId);
+    return clearManagedUpdateHoldLocked(dataRoot, releaseId, options.checkpoint);
   }
-  return withLifecycleLock(dataRoot, `clear Update Hold for ${releaseId}`, () => clearManagedUpdateHoldLocked(dataRoot, releaseId));
+  return withLifecycleLock(dataRoot, `clear Update Hold for ${releaseId}`, () => (
+    clearManagedUpdateHoldLocked(dataRoot, releaseId, options.checkpoint)
+  ));
 }
 
 export function clearManagedUpdateHold(dataRoot) {
@@ -1848,7 +1861,7 @@ function readPendingPairs(paths) {
 }
 
 function writePendingPairs(paths, pairs) {
-  const unique = pairs.filter((pair, index) => pairs.findIndex((entry) => canonicalJson(entry) === canonicalJson(pair)) === index);
+  const unique = pairs.filter((pair, index) => pairs.findIndex((entry) => samePair(entry, pair)) === index);
   if (unique.length === 0) {
     if (existsSync(paths.pending)) unlinkSync(paths.pending);
   } else atomicWrite(paths.pending, { schemaVersion: 1, pairs: unique });
@@ -1892,13 +1905,14 @@ function removeThroughTombstone(paths, source, kind) {
   removeStage(tombstone);
 }
 
-function removeInstalledPairLocked(dataRoot, pair, { allowRetained = false, uninstall = false } = {}) {
+function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpoint } = {}) {
   exactObject(pair, "cleanup pair", ["managerReleaseId", "downstreamReleaseId", "manifestSha256", "platform"]);
   validatePairShape(pair, "cleanup pair");
+  if (!["retention", "uninstall"].includes(mode)) fail("Invalid pair removal mode");
   const paths = layout(dataRoot);
-  const activation = uninstall ? null : readActivation(dataRoot);
-  if (!allowRetained && canonicalJson(pair) === canonicalJson(activation.active)) fail("Cannot remove the active pair");
-  if (!allowRetained && activation.previous && canonicalJson(pair) === canonicalJson(activation.previous)) fail("Cannot remove the retained previous pair");
+  const activation = mode === "uninstall" ? null : readActivation(dataRoot);
+  if (mode === "retention" && samePair(pair, activation.active)) fail("Cannot remove the active pair");
+  if (mode === "retention" && activation.previous && samePair(pair, activation.previous)) fail("Cannot remove the retained previous pair");
   if (livePairLeases(paths, pair).length > 0) {
     writePendingPairs(paths, [...readPendingPairs(paths), pair]);
     return "deferred";
@@ -1912,13 +1926,15 @@ function removeInstalledPairLocked(dataRoot, pair, { allowRetained = false, unin
   if (existsSync(releasePath)) {
     readReceiptCopies(paths, "downstream", pair.downstreamReleaseId, releasePath, pair);
     removeThroughTombstone(paths, releasePath, "downstream");
+    checkpoint?.("uninstall-downstream-payload-removed");
     unlinkSync(centralReleaseReceipt);
+    checkpoint?.("uninstall-downstream-receipt-removed");
   } else if (existsSync(centralReleaseReceipt)) {
     validateReceipt(readJson(centralReleaseReceipt, "downstream receipt"), "downstream", releasePath, pair);
     unlinkSync(centralReleaseReceipt);
   }
 
-  const retainedManager = allowRetained ? false : [activation.active, activation.previous]
+  const retainedManager = mode === "uninstall" ? false : [activation.active, activation.previous]
     .filter(Boolean)
     .some((entry) => entry.managerReleaseId === pair.managerReleaseId);
   const releaseReceipts = ensureNoSymlinkPath(paths.receipts, join(paths.receipts, "releases"), "Downstream receipt directory");
@@ -1937,13 +1953,20 @@ function removeInstalledPairLocked(dataRoot, pair, { allowRetained = false, unin
     if (existsSync(managerPath)) {
       readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
       removeThroughTombstone(paths, managerPath, "manager");
+      checkpoint?.("uninstall-manager-payload-removed");
       unlinkSync(centralManagerReceipt);
+      checkpoint?.("uninstall-manager-receipt-removed");
     } else if (existsSync(centralManagerReceipt)) {
       validateReceipt(readJson(centralManagerReceipt, "manager receipt"), "manager", managerPath, pair);
       unlinkSync(centralManagerReceipt);
     }
   }
-  writePendingPairs(paths, readPendingPairs(paths).filter((entry) => canonicalJson(entry) !== canonicalJson(pair)));
+  writePendingPairs(paths, readPendingPairs(paths).filter((entry) => !samePair(entry, pair)));
+  const leaseDirectory = pairLeaseDirectory(paths, pair);
+  if (pathExists(leaseDirectory) && !lstatSync(leaseDirectory).isSymbolicLink()
+    && lstatSync(leaseDirectory).isDirectory() && readdirSync(leaseDirectory).length === 0) {
+    rmSync(leaseDirectory, { recursive: true });
+  }
   return "removed";
 }
 
@@ -1954,7 +1977,7 @@ function pruneInstalledPairsLocked(dataRoot) {
   let removed = 0;
   let deferred = 0;
   for (const pair of installedPairs(paths)) {
-    if (retained.some((entry) => canonicalJson(entry) === canonicalJson(pair))) continue;
+    if (retained.some((entry) => samePair(entry, pair))) continue;
     const outcome = removeInstalledPairLocked(dataRoot, pair);
     if (outcome === "removed") removed += 1;
     else deferred += 1;
@@ -2353,12 +2376,17 @@ export function executeStockPi(dataRoot, args, { environment = process.env } = {
   return result.status ?? 1;
 }
 
-function validateDispatcherForRemoval(paths) {
+function validateDispatcherForRemoval(paths, { allowMissingPayload = false } = {}) {
   const destination = join(paths.root, "dispatcher");
   const centralPath = join(paths.state, "dispatcher.json");
   if (!pathExists(destination) && !pathExists(centralPath)) return null;
-  if (!pathExists(destination) || !pathExists(centralPath)
-    || lstatSync(destination).isSymbolicLink() || !lstatSync(destination).isDirectory()) {
+  if (!pathExists(centralPath)) fail("Inconsistent Managed Dispatcher receipt");
+  if (!pathExists(destination)) {
+    if (!allowMissingPayload) fail("Inconsistent Managed Dispatcher receipt");
+    validateDispatcherReceipt(readJson(centralPath, "Managed Dispatcher receipt"), destination);
+    return { destination, centralPath, payloadExists: false };
+  }
+  if (lstatSync(destination).isSymbolicLink() || !lstatSync(destination).isDirectory()) {
     fail("Inconsistent Managed Dispatcher receipt");
   }
   const embedded = validateDispatcherReceipt(
@@ -2368,10 +2396,10 @@ function validateDispatcherForRemoval(paths) {
   const central = validateDispatcherReceipt(readJson(centralPath, "Managed Dispatcher receipt"), destination);
   if (canonicalJson(embedded) !== canonicalJson(central)) fail("Managed Dispatcher receipt copies mismatch");
   validateDispatcherPayload(destination, central);
-  return { destination, centralPath };
+  return { destination, centralPath, payloadExists: true };
 }
 
-function validateManagerPayloadsForRemoval(paths, { allowMissingPayload = false } = {}) {
+function validateManagerPayloadsForRemoval(paths, { allowMissingManagerIds = new Set() } = {}) {
   const receiptDirectory = ensureNoSymlinkPath(paths.receipts, join(paths.receipts, "managers"), "Manager receipt directory");
   ensureManagedDirectory(receiptDirectory);
   const found = [];
@@ -2390,7 +2418,7 @@ function validateManagerPayloadsForRemoval(paths, { allowMissingPayload = false 
     if (pathExists(managerPath)) {
       const receipt = readReceiptCopies(paths, "manager", managerReleaseId, managerPath, pair);
       comparePayload(payloadWithoutManagerFiles(managerPath), receipt.payload);
-    } else if (allowMissingPayload) validateReceipt(central, "manager", managerPath, pair);
+    } else if (allowMissingManagerIds.has(managerReleaseId)) validateReceipt(central, "manager", managerPath, pair);
     else fail(`Inconsistent receipt for Manager Release ${managerReleaseId}`);
     found.push(managerReleaseId);
   }
@@ -2452,8 +2480,8 @@ function validateUninstallReceiptsAndLeases(paths, pairs) {
     const directory = ensureNoSymlinkPath(paths.leases, join(paths.leases, name), "Pair lease directory");
     if (!lstatSync(directory).isDirectory()) fail(`Foreign pair lease path: ${name}`);
     const pair = pairDirectories.get(name);
-    if (pair) livePairLeases(paths, pair);
-    else if (!idPattern.test(name) || readdirSync(directory).length > 0) fail(`Foreign pair lease path: ${name}`);
+    if (!pair) fail(`Foreign pair lease path: ${name}`);
+    livePairLeases(paths, pair);
   }
 }
 
@@ -2470,9 +2498,20 @@ function validateUninstallState(dataRoot, paths, pairs) {
     if (!known.has(name) && !dynamicRecovery) fail(`Foreign managed state path: ${name}`);
     if (dynamicRecovery) {
       const recovery = readJson(path, "lifecycle recovery state");
-      if (recovery.schemaVersion !== 1 || typeof recovery.type !== "string"
-        || !["lifecycle-lock-recovery", "lifecycle-lock-recovery-owner", "startup-check-lock-recovery", "startup-check-recovery-owner"].includes(recovery.type)) {
-        fail(`Malformed managed recovery state: ${name}`);
+      const recoveryKeys = {
+        "lifecycle-lock-recovery": ["schemaVersion", "type", "staleToken", "claimedByToken", "claimedAt"],
+        "lifecycle-lock-recovery-owner": ["schemaVersion", "type", "staleToken", "pid", "processStartIdentity", "claimantToken", "claimedAt"],
+        "startup-check-lock-recovery": ["schemaVersion", "type", "staleToken", "claimedAt"],
+        "startup-check-recovery-owner": ["schemaVersion", "type", "staleToken", "pid", "processStartIdentity", "token", "claimedAt"],
+      };
+      const keys = recoveryKeys[recovery.type];
+      if (recovery.schemaVersion !== 1 || !keys) fail(`Malformed managed recovery state: ${name}`);
+      exactObject(recovery, "managed recovery state", keys);
+      expectString(recovery.staleToken, "managed recovery stale token");
+      expectDate(recovery.claimedAt, "managed recovery claim date");
+      if ("pid" in recovery && (!Number.isSafeInteger(recovery.pid) || recovery.pid < 1)) fail(`Malformed managed recovery state: ${name}`);
+      for (const field of ["claimedByToken", "processStartIdentity", "claimantToken", "token"]) {
+        if (field in recovery) expectString(recovery[field], `managed recovery ${field}`);
       }
     }
   }
@@ -2485,21 +2524,30 @@ function validateUninstallState(dataRoot, paths, pairs) {
     readConfig(paths);
     if (!readAcceptedMetadataState(paths)) fail("Accepted metadata state is missing for existing Activation");
     for (const selected of [activation.active, activation.previous].filter(Boolean)) {
-      if (!pairs.some((pair) => canonicalJson(pair) === canonicalJson(selected))) {
+      if (!pairs.some((pair) => samePair(pair, selected))) {
         fail("Activation selects an unreceipted local pair");
       }
     }
   }
   if (uninstallPending) {
     for (const pending of uninstallPending.pairs) {
-      const installed = pairs.some((pair) => canonicalJson(pair) === canonicalJson(pending));
+      const installed = pairs.some((pair) => samePair(pair, pending));
       const payloadExists = pathExists(join(paths.releases, pending.downstreamReleaseId));
       const receiptExists = pathExists(receiptPath(paths, "downstream", pending.downstreamReleaseId));
       if (!installed && (payloadExists || receiptExists)) fail("Pending uninstall pair identity mismatch");
     }
   }
   readPendingPairs(paths);
-  readPinnedPairs(paths);
+  const pins = uninstallPending ? readPinnedPairs(paths) : readVerifiedPinnedPairs(paths);
+  if (uninstallPending) {
+    for (const pin of pins) {
+      const installed = pairs.find((pair) => pair.downstreamReleaseId === pin.downstreamReleaseId);
+      const pending = uninstallPending.pairs.some((pair) => samePair(pair, pin));
+      if ((installed && !samePair(installed, pin)) || (!installed && !pending)) {
+        fail(`Pinned Release identity mismatch: ${pin.downstreamReleaseId}`);
+      }
+    }
+  }
   readRollbackTransaction(paths);
   readUpdateHoldClearTransaction(paths);
   readUpdateHoldRecord(paths);
@@ -2558,18 +2606,28 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
   return withLifecycleLock(dataRoot, "uninstall Managed Installation", () => {
     const paths = initializeLayout(dataRoot);
     const pendingUninstall = readUninstallPending(paths);
-    const pairs = installedPairs(paths, { allowMissingPayload: Boolean(pendingUninstall) });
-    validateManagerPayloadsForRemoval(paths, { allowMissingPayload: Boolean(pendingUninstall) });
+    const pendingPairs = pendingUninstall?.pairs || [];
+    const installed = installedPairs(paths, { allowMissingPairs: pendingPairs });
+    const pendingWithOwnedState = pendingPairs.filter((pair) => [
+      join(paths.releases, pair.downstreamReleaseId),
+      receiptPath(paths, "downstream", pair.downstreamReleaseId),
+      join(paths.managers, pair.managerReleaseId),
+      receiptPath(paths, "manager", pair.managerReleaseId),
+    ].some((path) => pathExists(path)));
+    const pairs = [...installed, ...pendingWithOwnedState]
+      .filter((pair, index, all) => all.findIndex((candidate) => samePair(candidate, pair)) === index);
+    validateManagerPayloadsForRemoval(paths, { allowMissingManagerIds: new Set(pendingPairs.map((pair) => pair.managerReleaseId)) });
     validateUninstallState(dataRoot, paths, pairs);
     validateUninstallReceiptsAndLeases(paths, pairs);
     validateUninstallCaches(paths);
-    const dispatcher = validateDispatcherForRemoval(paths);
+    const dispatcher = validateDispatcherForRemoval(paths, { allowMissingPayload: Boolean(pendingUninstall) });
     const ownershipPath = join(paths.state, "entrypoints.json");
     const compatibilityPath = compatibilityReceiptPath(paths);
     const ownership = pathExists(ownershipPath) ? readManagedOwnership(dataRoot) : null;
     const compatibility = pathExists(compatibilityPath) ? readCompatibilityEntrypoint(paths) : null;
     if (ownership) {
-      assertDispatcherIdentity(ownership.dispatcher);
+      if (dispatcher?.payloadExists) assertDispatcherIdentity(ownership.dispatcher);
+      else if (!pendingUninstall) fail("Managed Dispatcher identity is missing");
       if (compatibility && (resolve(compatibility.path) !== resolve(ownership.entrypoints.compatibility.path)
         || resolve(compatibility.target) !== resolve(ownership.entrypoints.compatibility.target))) {
         fail("Compatibility Entrypoint receipt copies mismatch");
@@ -2596,14 +2654,21 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
 
     let deferred = 0;
     for (const pair of pairs) {
-      if (removeInstalledPairLocked(dataRoot, pair, { allowRetained: true, uninstall: true }) === "deferred") deferred += 1;
-      writeUninstallPending(paths, installedPairs(paths, { allowMissingPayload: true }), pendingCreatedAt, { preserveEmpty: true });
+      if (removeInstalledPairLocked(dataRoot, pair, {
+        mode: "uninstall",
+        checkpoint: options.checkpoint,
+      }) === "deferred") deferred += 1;
+      writeUninstallPending(paths, installedPairs(paths, { allowMissingPairs: pairs }), pendingCreatedAt, { preserveEmpty: true });
     }
     options.checkpoint?.("uninstall-payloads-removed");
 
     if (dispatcher) {
-      removeThroughTombstone(paths, dispatcher.destination, "dispatcher");
+      if (dispatcher.payloadExists) {
+        removeThroughTombstone(paths, dispatcher.destination, "dispatcher");
+        options.checkpoint?.("uninstall-dispatcher-payload-removed");
+      }
       unlinkSync(dispatcher.centralPath);
+      options.checkpoint?.("uninstall-dispatcher-receipt-removed");
     }
     if (pathExists(ownershipPath)) unlinkSync(ownershipPath);
     if (pathExists(compatibilityPath)) unlinkSync(compatibilityPath);
@@ -2619,7 +2684,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
     }
     options.checkpoint?.("uninstall-state-removed");
 
-    const remainingPairs = installedPairs(paths, { allowMissingPayload: true });
+    const remainingPairs = installedPairs(paths, { allowMissingPairs: pairs });
     writeUninstallPending(paths, remainingPairs, pendingCreatedAt);
     if (remainingPairs.length === 0) {
       for (const name of managedRootEntries) {

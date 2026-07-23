@@ -355,6 +355,7 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
     dataRoot,
     manifest.releaseId,
     options.lifecycleCapability,
+    options.checkpoint,
   ));
   const common = {
     active: status.active,
@@ -388,8 +389,8 @@ function failureStage(error, fallback) {
   return errorMessage(error).match(/^Managed Update failed during ([^:]+):/)?.[1] || fallback;
 }
 
-function clearExactUpdateHold(dataRoot, releaseId, lifecycleCapability) {
-  return clearManagedUpdateHoldForRelease(dataRoot, releaseId, { lifecycleCapability });
+function clearExactUpdateHold(dataRoot, releaseId, lifecycleCapability, checkpoint) {
+  return clearManagedUpdateHoldForRelease(dataRoot, releaseId, { lifecycleCapability, checkpoint });
 }
 
 function activatedStatus(checked, candidate, now) {
@@ -466,9 +467,22 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
         lifecycleCapability: options.lifecycleCapability,
       }));
       stage = "post-activation cleanup";
-      clearExactUpdateHold(dataRoot, checked.candidate.releaseId, options.lifecycleCapability);
-      writeManagedStateJson(dataRoot, "update-status.json", activatedStatus(checked, checked.candidate, options.now || new Date()));
-      return { kind: "activated", active: checked.candidate, channel: checked.channel, activation };
+      let cleanupError;
+      try {
+        clearExactUpdateHold(dataRoot, checked.candidate.releaseId, options.lifecycleCapability, options.checkpoint);
+        writeManagedStateJson(dataRoot, "update-status.json", activatedStatus(checked, checked.candidate, options.now || new Date()));
+      } catch (error) {
+        cleanupError = errorMessage(error);
+        recordManagedUpdateDiagnostic(dataRoot, stage, error);
+      }
+      return {
+        kind: "activated",
+        active: checked.candidate,
+        channel: checked.channel,
+        activation,
+        cleanupPending: Boolean(cleanupError),
+        cleanupError,
+      };
     });
   } catch (error) {
     if (stage !== "verification and activation") {

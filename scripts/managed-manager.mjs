@@ -214,6 +214,7 @@ function beginStartupCheck(args) {
 function printManagedUpdate(result) {
   if (result.kind === "activated") {
     console.log(`Activated Downstream Release ${result.active.releaseId} (upstream Pi ${result.active.upstreamVersion}); Channel sequence ${result.channel.sequence}.`);
+    if (result.cleanupPending) console.error(`Post-activation cleanup is deferred: ${result.cleanupError}`);
   } else if (result.kind === "patch-lag") {
     console.log(`Patch Lag: ${result.patchLag.currentReleaseId} is based on upstream Pi ${result.patchLag.currentUpstreamVersion}; observed upstream Pi ${result.patchLag.observedUpstreamVersion} is newer. The verified Activation remains active.`);
   } else if (result.kind === "incompatible") {
