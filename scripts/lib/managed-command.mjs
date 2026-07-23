@@ -81,6 +81,7 @@ export function managedActivationOptions(values, { dataRoot, now = new Date(), c
 
 export function classifyManagedUpdateArgs(args) {
   if (args[0] !== "update") return { type: "delegate" };
+  if (args.slice(1).some((argument) => argument === "--help" || argument === "-h")) return { type: "delegate" };
   const flags = new Set();
   let source;
   let extensionSource;
@@ -92,7 +93,6 @@ export function classifyManagedUpdateArgs(args) {
       extensionSource = value;
       index += 1;
     } else if (["--self", "--extensions", "--models", "--all", "--force", "--approve", "--no-approve", "-a", "-na"].includes(argument)) {
-      if (flags.has(argument)) return { type: "reject" };
       flags.add(argument);
     } else if (argument.startsWith("-")) return { type: "reject" };
     else if (source) return { type: "reject" };

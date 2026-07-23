@@ -1804,8 +1804,8 @@ test("Managed Dispatcher never exposes upstream-only Pi updates while preserving
   try {
     activate(dataRoot, current);
     for (const args of [
-      ["update", "--extensions"], ["update", "--extensions", "--force"],
-      ["update", "--models"], ["update", "npm:@foo/bar"],
+      ["update", "--extensions"], ["update", "--extensions", "--extensions"], ["update", "--extensions", "--force"],
+      ["update", "--help"], ["update", "--models"], ["update", "npm:@foo/bar"],
       ["update", "--extension", "npm:@foo/bar"],
     ]) {
       const packages = runDispatcher(dataRoot, args, { PI_OFFLINE: "1" });
@@ -1815,7 +1815,7 @@ test("Managed Dispatcher never exposes upstream-only Pi updates while preserving
     }
 
     for (const args of [
-      ["update"], ["update", "pi"], ["update", "self"], ["update", "--self"],
+      ["update"], ["update", "pi"], ["update", "self"], ["update", "--self"], ["update", "--self", "--self"],
       ["update", "--force"], ["update", "--self", "--force"],
       ["update", "--all"], ["update", "--self", "--extensions"], ["update", "pi", "--extensions"],
     ]) {
@@ -2052,17 +2052,25 @@ test("interactive startup notices do not pollute TTY metadata and package-comman
     activate(dataRoot, current);
     await checkManagedUpdate(dataRoot, { transport: updateTransport(candidate), now });
 
-    const interactive = runDispatcherInTty(dataRoot, ["--offline"]);
+    writeFileSync(join(dataRoot, "state", "startup-check.json"), serializeMetadata({
+      schemaVersion: 1,
+      type: "managed-startup-check",
+      lastAttemptAt: now.toISOString(),
+    }));
+    const interactive = runDispatcherInTty(dataRoot, []);
     assert.equal(interactive.status, 0, `${interactive.stdout}\n${interactive.stderr}`);
     assert.match(interactive.stdout, /compatible Downstream Release is available/);
-    const textMode = runDispatcherInTty(dataRoot, ["--mode", "text", "--offline"]);
+    const textMode = runDispatcherInTty(dataRoot, ["--mode", "text"]);
     assert.equal(textMode.status, 0, `${textMode.stdout}\n${textMode.stderr}`);
     assert.match(textMode.stdout, /compatible Downstream Release is available/);
+    const offline = runDispatcherInTty(dataRoot, ["--offline"]);
+    assert.equal(offline.status, 0, `${offline.stdout}\n${offline.stderr}`);
+    assert.doesNotMatch(offline.stdout, /compatible Downstream Release is available/);
 
     for (const args of [
       ["--help"], ["--version"], ["--list-models"], ["--export", "session.jsonl"], ["list"], ["conformance"],
     ]) {
-      const output = runDispatcherInTty(dataRoot, [...args, "--offline"]);
+      const output = runDispatcherInTty(dataRoot, args);
       assert.equal(output.status, 0, `${output.stdout}\n${output.stderr}`);
       assert.doesNotMatch(output.stdout, /compatible Downstream Release is available/);
       if (args[0] === "conformance") assert.match(output.stdout, /Deferred conformance passed/);

@@ -526,7 +526,7 @@ function statusMatchesContext(status, context) {
 
 export function cachedManagedStartupNotice(dataRoot, options = {}) {
   const environment = options.environment || process.env;
-  if (!options.interactive || environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE) return null;
+  if (!options.interactive || options.offline || environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE) return null;
   const status = readManagedUpdateStatus(dataRoot);
   if (!status) return null;
   const context = readManagedStartupContext(dataRoot);

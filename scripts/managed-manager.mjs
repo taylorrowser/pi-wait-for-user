@@ -238,7 +238,10 @@ try {
     else {
       if (args[0] !== "update") {
         try {
-          const notice = cachedManagedStartupNotice(dataRoot(), { interactive: interactiveLaunch(args) });
+          const notice = cachedManagedStartupNotice(dataRoot(), {
+            interactive: interactiveLaunch(args),
+            offline: args.includes("--offline"),
+          });
           if (notice) console.error(notice);
         } catch {
           // Malformed cached status is unsafe to render but cannot block normal launch.
