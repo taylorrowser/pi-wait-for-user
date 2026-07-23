@@ -27,7 +27,6 @@ import {
   defaultManagedBinDirectory,
   defaultManagedDataRoot,
   installAndActivate,
-  installAndActivateFromPinnedRoot,
   readActivation,
   readLegacyMigration,
   readManagedOwnership,
@@ -238,9 +237,14 @@ function activate(dataRoot, candidate, options = {}) {
     ...candidate,
     ...activationOptions,
   };
-  return callerSelected
-    ? installAndActivate(request)
-    : installAndActivateFromPinnedRoot(request);
+  const result = installAndActivate(request);
+  if (!callerSelected) {
+    const configPath = join(dataRoot, "state", "config.json");
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    config.rootKeyProvenance.type = "installer-pinned";
+    writeFileSync(configPath, serializeMetadata(config));
+  }
+  return result;
 }
 
 function runManagedCli(executable, dataRoot, args, environment = {}) {
@@ -813,6 +817,14 @@ test("plain side-by-side setup publishes only compatibility, which can explicitl
     assert.equal(installed.status, 0, installed.stderr);
     assert.equal(existsSync(join(bin, "pi")), false);
     assert.equal(readlinkSync(join(bin, "pi-wait-for-user")), join(dataRoot, "dispatcher", "managed-dispatcher.mjs"));
+
+    const otherBin = join(dirname(bin), "other-bin");
+    const mismatchedBin = runManager(dataRoot, ["managed", "enable", "--bin-dir", otherBin], {
+      PATH: `${otherBin}:${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    });
+    assert.notEqual(mismatchedBin.status, 0);
+    assert.match(mismatchedBin.stderr, /Compatibility Entrypoint ownership mismatch/i);
+    assert.equal(existsSync(join(otherBin, "pi")), false);
 
     const enabled = spawnSync(join(bin, "pi-wait-for-user"), ["managed", "enable", "--bin-dir", bin], {
       encoding: "utf8",

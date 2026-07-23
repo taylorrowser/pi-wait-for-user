@@ -29,7 +29,6 @@
     "scripts/lib",
     "scripts/managed-dispatcher.mjs",
     "scripts/managed-manager.mjs",
-    "scripts/managed-installer.mjs",
     "scripts/package-binaries.mjs",
     "scripts/pi-patch.mjs",
     "scripts/release-metadata.mjs",

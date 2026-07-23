@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import {
   legacyMigrationMessages,
   managedActivationOptions,
   parseManagedOptions,
-  readPinnedRootKeys,
   rejectUnknownOptions,
   shellHashRemediation,
 } from "./lib/managed-command.mjs";
@@ -38,8 +37,7 @@ try {
   const dataRoot = resolve(values.get("--data-root") || defaultManagedDataRoot());
   const binDirectory = resolve(values.get("--bin-dir") || defaultManagedBinDirectory());
   preflightManagedCommandOwnership(dataRoot, { binDirectory, managePi });
-  const rootKeys = readPinnedRootKeys(join(import.meta.dirname, "managed-root-keys.json"));
-  const activation = installAndActivateFromPinnedRoot(managedActivationOptions(values, { dataRoot, rootKeys }));
+  const activation = installAndActivateFromPinnedRoot(managedActivationOptions(values, { dataRoot }));
   installManagedCompatibility(dataRoot, { binDirectory });
   if (managePi) enableManagedOwnership(dataRoot, { binDirectory });
   console.log(`${managePi ? "Managed" : "Side-by-side"} installation ready: ${activation.active.downstreamReleaseId}.`);

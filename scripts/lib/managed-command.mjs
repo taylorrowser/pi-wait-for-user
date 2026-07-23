@@ -62,20 +62,21 @@ export function readPinnedRootKeys(path) {
   return keys;
 }
 
-export function managedActivationOptions(values, { dataRoot, now = new Date(), checkpoint, rootKeys } = {}) {
-  return {
+export function managedActivationOptions(values, { dataRoot, now = new Date(), checkpoint } = {}) {
+  const options = {
     dataRoot,
     platform: values.get("--platform") || nativeManagedPlatform(),
     trustEnvelope: readJsonFile(required(values, "--trust")),
     channelEnvelope: readJsonFile(required(values, "--channel")),
     manifestEnvelope: readJsonFile(required(values, "--manifest")),
-    rootKeys: rootKeys || new Map([parseRootKeyOption(required(values, "--root-key"))]),
     managerArchive: resolve(required(values, "--manager-archive")),
     releaseArchive: resolve(required(values, "--release-archive")),
     legacyDirectories: values.has("--legacy-dir") ? [resolve(values.get("--legacy-dir"))] : [],
     now,
     checkpoint,
   };
+  if (values.has("--root-key")) options.rootKeys = new Map([parseRootKeyOption(values.get("--root-key"))]);
+  return options;
 }
 
 export function legacyMigrationMessages(migration) {

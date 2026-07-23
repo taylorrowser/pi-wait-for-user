@@ -24,7 +24,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
+import { readPinnedRootKeys } from "./managed-command.mjs";
 import {
   canonicalJson,
   createPayloadInventory,
@@ -373,7 +375,7 @@ function publishStableDispatcher(paths, selected) {
   const destination = join(paths.root, "dispatcher");
   const receiptPath = join(paths.state, "dispatcher.json");
   const source = join(selected.managerPath, "package", "scripts");
-  const required = ["managed-dispatcher.mjs", "lib/managed-runtime.mjs", "lib/release-metadata.mjs"];
+  const required = ["managed-dispatcher.mjs", "lib/managed-command.mjs", "lib/managed-runtime.mjs", "lib/release-metadata.mjs"];
   const pinnedRootConfiguration = serializeMetadata({
     schemaVersion: 1,
     rootKeys: [...selected.config.rootKeys]
@@ -987,7 +989,9 @@ export function installAndActivate(options) {
 }
 
 export function installAndActivateFromPinnedRoot(options) {
-  return installAndActivateWithProvenance(options, "installer-pinned");
+  const configurationPath = join(dirname(dirname(fileURLToPath(import.meta.url))), "managed-root-keys.json");
+  const rootKeys = readPinnedRootKeys(configurationPath);
+  return installAndActivateWithProvenance({ ...options, rootKeys }, "installer-pinned");
 }
 
 export function recoverPrevious(dataRoot) {
@@ -1394,12 +1398,11 @@ function validateBinDirectory(binDirectory) {
   if (pathExists(binDirectory) && (lstatSync(binDirectory).isSymbolicLink() || !lstatSync(binDirectory).isDirectory())) {
     fail(`Managed bin directory is foreign: ${binDirectory}`);
   }
-  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
   let ancestor = dirname(binDirectory);
   while (ancestor !== dirname(ancestor)) {
     if (pathExists(ancestor)) {
       const stat = lstatSync(ancestor);
-      if (stat.isSymbolicLink() && (uid === undefined || stat.uid === uid)) {
+      if (stat.isSymbolicLink() && stat.uid !== 0) {
         fail(`Managed bin directory ancestor is a foreign symbolic link: ${ancestor}`);
       }
     }
@@ -1498,7 +1501,8 @@ export function enableManagedOwnership(dataRoot, options = {}) {
       const pi = { path: join(binDirectory, "pi"), target: expectedDispatcherPath };
       const compatibility = { path: join(binDirectory, "pi-wait-for-user"), target: expectedDispatcherPath };
       if (pathExists(pi.path)) fail(`Unowned foreign command collision: ${pi.path}`);
-      if (pathExists(compatibility.path)) requireOwnedCompatibility(paths, compatibility);
+      if (pathExists(compatibilityReceiptPath(paths))) requireOwnedCompatibility(paths, compatibility, { allowMissing: true });
+      else if (pathExists(compatibility.path)) fail(`Unowned foreign command collision: ${compatibility.path}`);
       validateBinDirectory(binDirectory);
       const resolvedStock = commandPath("pi", environment);
       if (resolvedStock && isManagedDispatcherExecutable(resolvedStock)) {
