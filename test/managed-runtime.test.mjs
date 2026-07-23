@@ -248,9 +248,11 @@ function activate(dataRoot, candidate, options = {}) {
 }
 
 function runManagedCli(executable, dataRoot, args, environment = {}) {
+  const { PI_TEST_CWD, ...environmentOverrides } = environment;
   return spawnSync(process.execPath, [executable, ...args], {
     encoding: "utf8",
-    env: { ...process.env, PI_MANAGED_DATA_ROOT: dataRoot, PI_MANAGED_PLATFORM: "linux-x64", ...environment },
+    cwd: PI_TEST_CWD,
+    env: { ...process.env, PI_MANAGED_DATA_ROOT: dataRoot, PI_MANAGED_PLATFORM: "linux-x64", ...environmentOverrides },
   });
 }
 
@@ -980,6 +982,30 @@ test("managed enable never records another Managed Dispatcher as Stock Pi", () =
     destroy(root);
     destroy(first.directory);
     destroy(second.directory);
+  }
+});
+
+test("empty PATH components resolve Stock Pi from the current directory", () => {
+  const root = mkdtempSync(join(tmpdir(), "managed-runtime-current-directory-path-"));
+  const dataRoot = join(root, "data");
+  const bin = join(root, "bin");
+  const workingDirectory = join(root, "project");
+  const candidate = fixture();
+  try {
+    mkdirSync(workingDirectory);
+    writeExecutable(join(workingDirectory, "pi"), "#!/bin/sh\necho current-directory-stock\n");
+    activate(dataRoot, candidate);
+    const result = runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], {
+      PATH: `:${bin}:/usr/bin:/bin`,
+      PWD: workingDirectory,
+      PI_TEST_CWD: workingDirectory,
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(readManagedOwnership(dataRoot).stock.resolvedPath, join(workingDirectory, "pi"));
+    assert.match(result.stderr, /current command resolution selects .*project\/pi/);
+  } finally {
+    destroy(root);
+    destroy(candidate.directory);
   }
 });
 

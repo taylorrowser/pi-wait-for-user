@@ -1304,8 +1304,7 @@ function shellQuote(value) {
 
 function commandPath(name, environment) {
   for (const directory of (environment.PATH || "").split(":")) {
-    if (!directory) continue;
-    const candidate = resolve(directory, name);
+    const candidate = resolve(directory || environment.PWD || process.cwd(), name);
     if (!pathExists(candidate)) continue;
     let stat;
     try { stat = lstatSync(realpathSync(candidate)); } catch { continue; }
@@ -1574,8 +1573,8 @@ export function executeStockPi(dataRoot, args, { environment = process.env } = {
   }
   if (canonicalJson(current) !== canonicalJson(stock)) fail(`Stock Pi identity changed at ${stock.resolvedPath}`);
   console.error("Warning: Stock Pi cannot open downstream session files. Use it only for Stock Pi sessions.");
-  if (typeof process.execve === "function") process.execve(current.executablePath, [current.executablePath, ...args], environment);
-  const result = spawnSync(current.executablePath, args, { stdio: "inherit", env: environment });
+  if (typeof process.execve === "function") process.execve(current.executablePath, [stock.resolvedPath, ...args], environment);
+  const result = spawnSync(current.executablePath, args, { stdio: "inherit", env: environment, argv0: stock.resolvedPath });
   if (result.error) throw result.error;
   return result.status ?? 1;
 }
