@@ -486,7 +486,7 @@ function adoptVerifiedLegacyPayload(stage, legacyPath, expected) {
 
 function discoverLegacyPaths(paths, releaseId, explicitPaths = []) {
   if (!Array.isArray(explicitPaths) || explicitPaths.some((path) => typeof path !== "string" || !path)) {
-    fail("Malformed legacy installation paths");
+    fail("Malformed Legacy Downstream Installation paths");
   }
   const legacyRoot = join(paths.root, "releases");
   const defaultPath = join(legacyRoot, releaseId);
@@ -507,7 +507,7 @@ function updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, l
       releaseId,
       legacyPath,
       disposition: legacyAdopted ? "adopted-after-signed-verification" : "fresh-install-legacy-untouched",
-      cleanup: `After confirming managed commands work, remove legacy directories manually if desired: ${listedPaths}`,
+      cleanup: `After confirming managed commands work, remove Legacy Downstream Installation directories manually if desired: ${listedPaths}`,
     });
   } else if (pathExists(adoptionPath)) unlinkSync(adoptionPath);
 }
@@ -1299,7 +1299,7 @@ export function readManagedOwnership(dataRoot) {
     fail("Command Ownership receipt escapes its owned paths");
   }
   validateStockIdentity(ownership.stock);
-  expectDate(ownership.createdAt, "managed ownership creation date");
+  expectDate(ownership.createdAt, "Command Ownership creation date");
   return ownership;
 }
 
@@ -1352,6 +1352,14 @@ function executableIdentity(path, environment, expected) {
   const version = observed.stdout.trim();
   if (!version) fail(`Stock Pi returned no version identity: ${path}`);
   return { ...baseIdentity, version };
+}
+
+function resolvedStockIdentity(environment) {
+  const resolvedStock = commandPath("pi", environment);
+  if (resolvedStock && isManagedDispatcherExecutable(resolvedStock)) {
+    fail(`Resolved pi is another Managed Dispatcher, not Stock Pi: ${resolvedStock}`);
+  }
+  return resolvedStock ? executableIdentity(resolvedStock, environment) : null;
 }
 
 function entrypointMatches(entrypoint) {
@@ -1513,17 +1521,24 @@ export function enableManagedOwnership(dataRoot, options = {}) {
       if (pathExists(compatibilityReceiptPath(paths))) requireOwnedCompatibility(paths, compatibility, { allowMissing: true });
       else if (pathExists(compatibility.path)) fail(`Unowned foreign command collision: ${compatibility.path}`);
       validateBinDirectory(binDirectory);
-      const resolvedStock = commandPath("pi", environment);
-      if (resolvedStock && isManagedDispatcherExecutable(resolvedStock)) {
-        fail(`Resolved pi is another Managed Dispatcher, not Stock Pi: ${resolvedStock}`);
-      }
       pendingOwnership = {
         entrypoints: { pi, compatibility },
-        stock: resolvedStock ? executableIdentity(resolvedStock, environment) : null,
+        stock: resolvedStockIdentity(environment),
       };
     }
 
     validateBinDirectory(binDirectory);
+    if (ownership && !entrypointMatches(ownership.entrypoints.pi)) {
+      assertEntrypointAvailable(ownership.entrypoints.pi);
+      assertEntrypointAvailable(ownership.entrypoints.compatibility);
+      ownership = {
+        ...ownership,
+        stock: resolvedStockIdentity(environment),
+        createdFrom: selected.pair,
+        createdAt: new Date().toISOString(),
+      };
+      atomicWrite(ownershipPath, ownership);
+    }
     const dispatcher = dispatcherIdentity(publishStableDispatcher(paths, selected));
     if (ownership) {
       if (ownership.dispatcher.sha256 !== dispatcher.sha256 || ownership.dispatcher.size !== dispatcher.size) {
@@ -1555,7 +1570,9 @@ export function enableManagedOwnership(dataRoot, options = {}) {
     const resolvedCommand = commandPath("pi", environment);
     const resolvesToManagedDispatcher = resolvedCommand
       && basename(resolvedCommand) === basename(ownership.entrypoints.pi.path)
-      && realpathSync(dirname(resolvedCommand)) === realpathSync(dirname(ownership.entrypoints.pi.path));
+      && realpathSync(dirname(resolvedCommand)) === realpathSync(dirname(ownership.entrypoints.pi.path))
+      && entrypointMatches(ownership.entrypoints.pi)
+      && realpathSync(resolvedCommand) === realpathSync(ownership.dispatcher.path);
     if (!resolvesToManagedDispatcher) {
       const pathRemediation = resolvedCommand
         ? `Put ${binDirectory} before ${dirname(resolvedCommand)} in PATH`
@@ -1568,7 +1585,7 @@ export function enableManagedOwnership(dataRoot, options = {}) {
 
 export function executeStockPi(dataRoot, args, { environment = process.env } = {}) {
   const ownership = readManagedOwnership(dataRoot);
-  if (!ownership.stock) fail("No Stock Pi executable was recorded when managed ownership was enabled");
+  if (!ownership.stock) fail("No Stock Pi executable was recorded when Command Ownership was enabled");
   const stock = ownership.stock;
   if (resolve(stock.resolvedPath) === resolve(ownership.entrypoints.pi.path)
     || resolve(stock.executablePath) === resolve(ownership.dispatcher.path)

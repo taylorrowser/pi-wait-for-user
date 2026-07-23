@@ -16,7 +16,7 @@ function recoveryMessage(error) {
     `pi: managed launch failed closed: ${error instanceof Error ? error.message : String(error)}`,
     "The selected Activation was not run and Stock Pi was not used.",
     "Recover explicitly: pi managed recover --previous",
-    "Or disable managed ownership: pi managed disable",
+    "Or disable Command Ownership: pi managed disable",
   ].join("\n");
 }
 

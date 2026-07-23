@@ -30,7 +30,7 @@ state/lifecycle.lock               exclusive mutating-operation owner
 dispatcher/                        immutable receipt-owned stage 0 copied from a verified Manager Release
 managers/<manager-release-id>/     immutable Manager Release payload
 downstream-releases/<downstream-release-id>/ immutable Downstream Release payload
-releases/<downstream-release-id>/         untouched legacy side-by-side installations
+releases/<downstream-release-id>/         untouched Legacy Downstream Installations
 receipts/{managers,releases}/      strict receipt projections
 artifacts/<sha256>/                verified artifact bytes for provenance audit
 leases/<manager>--<downstream>/    process-lifetime pair leases
@@ -58,7 +58,7 @@ The previous successfully active pair is copied into the new Activation. The cra
 
 Unknown signed metadata schemas fail activation with reviewed re-bootstrap instructions, but stage 0 does not need to parse those envelopes during a cheap launch, so an already active pair remains usable.
 
-If the legacy side-by-side directory for the selected release exists, activation compares every file path, mode, size, and digest with the signed platform payload. Only an exact match is adopted into the managed staging tree. Otherwise activation installs the fresh signed archive under `downstream-releases/`, leaves the legacy directory unchanged, and records exact manual cleanup guidance.
+If a Legacy Downstream Installation for the selected release exists, Activation compares every file path, mode, size, and digest with the signed platform payload. Only an exact match is adopted into the managed staging tree. Otherwise Activation installs the fresh signed archive under `downstream-releases/`, leaves the Legacy Downstream Installation unchanged, and records exact manual cleanup guidance.
 
 ## Ownership safety and Stock Pi
 

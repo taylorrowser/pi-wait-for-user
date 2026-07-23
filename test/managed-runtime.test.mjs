@@ -664,7 +664,7 @@ test("leased cleanup retries converge after a tombstone was removed before its c
   }
 });
 
-test("signed-payload-identical legacy installation is adopted only after complete verification", () => {
+test("signed-payload-identical Legacy Downstream Installation is adopted only after complete verification", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-legacy-adopt-"));
   const candidate = fixture();
   const extracted = join(candidate.directory, "legacy-extracted");
@@ -679,7 +679,7 @@ test("signed-payload-identical legacy installation is adopted only after complet
     assert.equal(adoption.disposition, "adopted-after-signed-verification");
     assert.equal(existsSync(legacy), true);
     assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
-    assert.match(adoption.cleanup, /remove legacy directories manually/);
+    assert.match(adoption.cleanup, /remove Legacy Downstream Installation directories manually/);
 
     destroy(legacy);
     activate(dataRoot, candidate);
@@ -690,7 +690,7 @@ test("signed-payload-identical legacy installation is adopted only after complet
   }
 });
 
-test("unverified legacy installation is untouched while a fresh Downstream Release is installed", () => {
+test("unverified Legacy Downstream Installation is untouched while a fresh Downstream Release is installed", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-legacy-fresh-"));
   const candidate = fixture();
   const legacy = join(dataRoot, "releases", "pi-v0.81.1-patch.6");
@@ -775,7 +775,7 @@ test("installer claims pi only with explicit --manage-pi", () => {
     assert.equal(existsSync(join(sideBySideBin, "pi")), false);
     assert.equal(existsSync(join(sideBySideBin, "pi-wait-for-user")), true);
     assert.match(sideBySide.stdout, /Adopted verified Legacy Downstream Installation/);
-    assert.match(sideBySide.stdout, /remove legacy directories manually/);
+    assert.match(sideBySide.stdout, /remove Legacy Downstream Installation directories manually/);
     const repeatedSideBySide = spawnSync(process.execPath, [pinnedInstaller,
       ...common, "--data-root", sideBySideRoot, "--bin-dir", sideBySideBin,
     ], { encoding: "utf8", env: { ...process.env, PATH: `${sideBySideBin}:${dirname(process.execPath)}:/usr/bin:/bin` } });
@@ -1104,7 +1104,7 @@ test("managed roots use platform-native data locations and ~/.local/bin by defau
   assert.equal(defaultManagedBinDirectory({ HOME: "/home/example" }), "/home/example/.local/bin");
 });
 
-test("managed ownership refuses foreign command collisions without changing either target", () => {
+test("Command Ownership refuses foreign command collisions without changing either target", () => {
   for (const command of ["pi", "pi-wait-for-user"]) {
     const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-collision-"));
     const bin = mkdtempSync(join(tmpdir(), "managed-runtime-collision-bin-"));
@@ -1130,7 +1130,7 @@ test("managed ownership refuses foreign command collisions without changing eith
   }
 });
 
-test("managed ownership rejects a symlink-substituted bin-directory parent", () => {
+test("Command Ownership rejects a symlink-substituted bin-directory parent", () => {
   const root = mkdtempSync(join(tmpdir(), "managed-runtime-bin-parent-symlink-"));
   const dataRoot = join(root, "data");
   const foreign = join(root, "foreign");
@@ -1178,6 +1178,7 @@ test("an unowned symlink to Dispatcher source is still a hard collision", () => 
 test("managed disable retains the Compatibility Entrypoint and re-enable converges", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-reenable-"));
   const bin = mkdtempSync(join(tmpdir(), "managed-runtime-reenable-bin-"));
+  const stockBin = mkdtempSync(join(tmpdir(), "managed-runtime-reenable-stock-bin-"));
   const candidate = fixture();
   const home = mkdtempSync(join(tmpdir(), "managed-runtime-shared-home-"));
   const shared = join(home, ".pi", "agent", "session.jsonl");
@@ -1185,7 +1186,7 @@ test("managed disable retains the Compatibility Entrypoint and re-enable converg
     mkdirSync(dirname(shared), { recursive: true });
     writeFileSync(shared, "shared-user-data\n");
     activate(dataRoot, candidate);
-    const environment = { PATH: `${bin}:/usr/bin:/bin`, HOME: home };
+    const environment = { PATH: `${bin}:${stockBin}:/usr/bin:/bin`, HOME: home };
     assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
     assert.equal(readManagedOwnership(dataRoot).stock, null);
     const unavailableStock = runManager(dataRoot, ["managed", "stock", "--"], environment);
@@ -1221,12 +1222,15 @@ test("managed disable retains the Compatibility Entrypoint and re-enable converg
     const repeatedDisable = runDispatcher(dataRoot, ["managed", "disable"]);
     assert.equal(repeatedDisable.status, 0, repeatedDisable.stderr);
     assert.match(repeatedDisable.stdout, /already disabled/);
+    writeExecutable(join(stockBin, "pi"), "#!/bin/sh\necho newly-installed-stock\n");
     assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
     assert.equal(readlinkSync(join(bin, "pi")), join(dataRoot, "dispatcher", "managed-dispatcher.mjs"));
+    assert.equal(readManagedOwnership(dataRoot).stock.version, "newly-installed-stock");
     assert.equal(readFileSync(shared, "utf8"), "shared-user-data\n");
   } finally {
     destroy(dataRoot);
     destroy(bin);
+    destroy(stockBin);
     destroy(home);
     destroy(candidate.directory);
   }
