@@ -467,12 +467,12 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
         lifecycleCapability: options.lifecycleCapability,
       }));
       stage = "post-activation cleanup";
-      let cleanupError;
+      const cleanupErrors = [...(activation.cleanupIssues || [])];
       try {
         clearExactUpdateHold(dataRoot, checked.candidate.releaseId, options.lifecycleCapability, options.checkpoint);
         writeManagedStateJson(dataRoot, "update-status.json", activatedStatus(checked, checked.candidate, options.now || new Date()));
       } catch (error) {
-        cleanupError = errorMessage(error);
+        cleanupErrors.push(errorMessage(error));
         recordManagedUpdateDiagnostic(dataRoot, stage, error);
       }
       return {
@@ -480,8 +480,8 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
         active: checked.candidate,
         channel: checked.channel,
         activation,
-        cleanupPending: Boolean(cleanupError),
-        cleanupError,
+        cleanupPending: cleanupErrors.length > 0,
+        cleanupError: cleanupErrors.join("; ") || undefined,
       };
     });
   } catch (error) {

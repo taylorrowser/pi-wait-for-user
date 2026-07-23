@@ -40,6 +40,7 @@ import {
 
 const idPattern = /^[a-z0-9][a-z0-9.-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const supportedPlatforms = new Set(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
 const rootKeyProvenanceType = Object.freeze({ callerSelected: "caller-selected", installerPinned: "installer-pinned" });
 const managedDiagnosticLimit = 10;
@@ -1298,15 +1299,19 @@ function installAndActivateWithProvenance(options, provenanceType) {
         previous,
       };
       atomicWrite(paths.activation, activation);
+      const cleanupIssues = [];
       try {
         updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
       } catch (error) {
+        cleanupIssues.push(`Legacy Downstream Installation adoption: ${error instanceof Error ? error.message : String(error)}`);
         recordManagedUpdateDiagnostic(dataRoot, "post-activation Legacy Downstream Installation adoption", error);
       }
       checkpoint?.("after-activation-switch");
       try { pruneInstalledPairsLocked(dataRoot); } catch (error) {
+        cleanupIssues.push(`retention: ${error instanceof Error ? error.message : String(error)}`);
         recordManagedUpdateDiagnostic(dataRoot, "post-activation retention", error);
       }
+      if (cleanupIssues.length > 0) activation.cleanupIssues = cleanupIssues;
       return activation;
     } catch (error) {
       if (managerStage) removeStage(managerStage.stage);
@@ -1473,6 +1478,9 @@ function readUpdateHoldClearTransaction(paths) {
   validatePairShape(value.target, "Update Hold clear target");
   ensureIdentifier(value.releaseId, "Update Hold clear release ID");
   expectDate(value.createdAt, "Update Hold clear creation date");
+  if (value.releaseId !== value.target.downstreamReleaseId || samePair(value.source, value.target)) {
+    fail("Update Hold clear transaction pair mismatch");
+  }
   return value;
 }
 
@@ -1735,7 +1743,7 @@ function pairLeaseDirectory(paths, pair) {
   return join(paths.leases, `${pair.managerReleaseId}--${pair.downstreamReleaseId}`);
 }
 
-function livePairLeases(paths, pair) {
+function livePairLeases(paths, pair, { removeStale = true } = {}) {
   const directory = pairLeaseDirectory(paths, pair);
   if (!existsSync(directory)) return [];
   if (lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()) return [directory];
@@ -1763,7 +1771,7 @@ function livePairLeases(paths, pair) {
     const observed = managedProcessStatus(lease.pid);
     if (observed.status === "unknown" || (observed.status === "live" && observed.identity === lease.processStartIdentity)) {
       live.push(path);
-    } else unlinkSync(path);
+    } else if (removeStale) unlinkSync(path);
   }
   return live;
 }
@@ -1843,6 +1851,23 @@ function safeTemporaryOwner(path) {
   if (!existsSync(ownerPath) || lstatSync(ownerPath).isSymbolicLink()) return false;
   try {
     const owner = readJson(ownerPath, "temporary receipt");
+    if (owner.type === "managed-tombstone") {
+      exactObject(owner, "tombstone receipt", ["schemaVersion", "type", "ownedPath", "token", "scope"]);
+      exactObject(owner.scope, "tombstone scope", ["kind", "sourcePath", "identity"]);
+      ensureIdentifier(owner.scope.kind, "tombstone kind");
+      expectString(owner.scope.sourcePath, "tombstone source path");
+      expectString(owner.scope.identity, "tombstone identity", sha256Pattern);
+      const managedRoot = dirname(dirname(path));
+      const sourcePath = ensureInside(managedRoot, owner.scope.sourcePath, "Tombstone source path");
+      const expectedParent = owner.scope.kind === "downstream" ? join(managedRoot, "downstream-releases")
+        : owner.scope.kind === "manager" ? join(managedRoot, "managers")
+          : owner.scope.kind === "dispatcher" ? managedRoot : null;
+      if (!expectedParent || (owner.scope.kind === "dispatcher"
+        ? sourcePath !== join(managedRoot, "dispatcher")
+        : dirname(sourcePath) !== expectedParent)) return false;
+      return owner.schemaVersion === 1 && resolve(owner.ownedPath) === resolve(path) && uuidPattern.test(owner.token)
+        && basename(path).endsWith(owner.token);
+    }
     exactObject(owner, "temporary receipt", ["schemaVersion", "type", "ownedPath", "token"]);
     return owner.schemaVersion === 1 && owner.type === "managed-temporary" && resolve(owner.ownedPath) === resolve(path)
       && basename(path).endsWith(owner.token);
@@ -1890,19 +1915,24 @@ export function cleanupManagedState(dataRoot) {
   return removed;
 }
 
-function removeThroughTombstone(paths, source, kind) {
+function removeThroughTombstone(paths, source, kind, identity, checkpoint, checkpointPrefix = kind) {
+  expectString(identity, "tombstone receipt identity", sha256Pattern);
   const token = randomUUID();
   const tombstone = join(paths.temporary, `${kind}.tombstone-${token}`);
   mkdirSync(tombstone, { mode: 0o700 });
   writeFileSync(join(tombstone, ".owner.json"), serializeMetadata({
     schemaVersion: 1,
-    type: "managed-temporary",
+    type: "managed-tombstone",
     ownedPath: tombstone,
     token,
+    scope: { kind, sourcePath: resolve(source), identity },
   }), { flag: "wx", mode: 0o600 });
+  checkpoint?.(`${checkpointPrefix}-tombstone-created`);
   chmodSync(source, 0o700);
   renameSync(source, join(tombstone, "payload"));
+  checkpoint?.(`${checkpointPrefix}-tombstone-renamed`);
   removeStage(tombstone);
+  checkpoint?.(`${checkpointPrefix}-tombstone-removed`);
 }
 
 function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpoint } = {}) {
@@ -1925,7 +1955,14 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
   );
   if (existsSync(releasePath)) {
     readReceiptCopies(paths, "downstream", pair.downstreamReleaseId, releasePath, pair);
-    removeThroughTombstone(paths, releasePath, "downstream");
+    removeThroughTombstone(
+      paths,
+      releasePath,
+      "downstream",
+      metadataDigest({ kind: "downstream", pair }),
+      checkpoint,
+      "uninstall-downstream",
+    );
     checkpoint?.("uninstall-downstream-payload-removed");
     unlinkSync(centralReleaseReceipt);
     checkpoint?.("uninstall-downstream-receipt-removed");
@@ -1952,7 +1989,14 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
   if (!retainedManager && !installedManagerReference) {
     if (existsSync(managerPath)) {
       readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
-      removeThroughTombstone(paths, managerPath, "manager");
+      removeThroughTombstone(
+        paths,
+        managerPath,
+        "manager",
+        metadataDigest({ kind: "manager", pair }),
+        checkpoint,
+        "uninstall-manager",
+      );
       checkpoint?.("uninstall-manager-payload-removed");
       unlinkSync(centralManagerReceipt);
       checkpoint?.("uninstall-manager-receipt-removed");
@@ -2454,6 +2498,10 @@ function readUninstallPending(paths) {
     fail("Malformed pending uninstall state");
   }
   value.pairs.forEach((pair) => validatePairShape(pair, "pending uninstall pair"));
+  if (value.pairs.some((pair, index) => value.pairs.findIndex((candidate) => samePair(candidate, pair)) !== index)
+    || new Set(value.pairs.map((pair) => pair.downstreamReleaseId)).size !== value.pairs.length) {
+    fail("Malformed pending uninstall state");
+  }
   expectDate(value.createdAt, "pending uninstall creation date");
   return value;
 }
@@ -2464,6 +2512,22 @@ function writeUninstallPending(paths, pairs, createdAt = new Date().toISOString(
     return;
   }
   atomicWrite(paths.uninstallPending, { schemaVersion: 1, type: "pending-uninstall", pairs, createdAt });
+}
+
+function validateUninstallLeaseDirectory(paths, pair) {
+  const directory = pairLeaseDirectory(paths, pair);
+  for (const name of readdirSync(directory)) {
+    const path = ensureNoSymlinkPath(directory, join(directory, name), "Pair lease path");
+    if (!lstatSync(path).isFile() || !name.endsWith(".json")) fail(`Foreign pair lease path: ${name}`);
+    const lease = readJson(path, "pair lease");
+    exactObject(lease, "pair lease", ["schemaVersion", "pid", "processStartIdentity", "token", "createdAt"]);
+    if (lease.schemaVersion !== 1 || !Number.isSafeInteger(lease.pid) || lease.pid < 1
+      || !uuidPattern.test(lease.token) || name !== `${lease.token}.json`
+      || (lease.processStartIdentity !== null && (typeof lease.processStartIdentity !== "string" || !lease.processStartIdentity))) {
+      fail(`Foreign pair lease path: ${name}`);
+    }
+    expectDate(lease.createdAt, "pair lease creation date");
+  }
 }
 
 function validateUninstallReceiptsAndLeases(paths, pairs) {
@@ -2481,8 +2545,54 @@ function validateUninstallReceiptsAndLeases(paths, pairs) {
     if (!lstatSync(directory).isDirectory()) fail(`Foreign pair lease path: ${name}`);
     const pair = pairDirectories.get(name);
     if (!pair) fail(`Foreign pair lease path: ${name}`);
-    livePairLeases(paths, pair);
+    validateUninstallLeaseDirectory(paths, pair);
+    livePairLeases(paths, pair, { removeStale: false });
   }
+}
+
+function validateUninstallUpdateStatus(value) {
+  exactObject(value, "managed update status", ["schemaVersion", "type", "checkedAt", "active", "channel", "compatibleUpdate", "patchLag", "upstream"]);
+  if (value.schemaVersion !== 1 || value.type !== "managed-update-status") fail("Malformed managed update status");
+  expectDate(value.checkedAt, "managed update status date");
+  exactObject(value.active, "managed update active state", ["releaseId", "managerReleaseId", "upstreamVersion", "manifestSha256"]);
+  exactObject(value.channel, "managed update Channel state", ["sequence", "releaseId", "manifestSha256"]);
+  exactObject(value.upstream, "managed update upstream state", ["observedVersion", "error"]);
+  ensureIdentifier(value.active.releaseId, "managed update active release ID");
+  ensureIdentifier(value.active.managerReleaseId, "managed update active Manager Release ID");
+  ensureIdentifier(value.channel.releaseId, "managed update Channel release ID");
+  expectString(value.active.upstreamVersion, "managed update upstream version");
+  expectString(value.active.manifestSha256, "managed update active manifest digest", sha256Pattern);
+  expectString(value.channel.manifestSha256, "managed update Channel manifest digest", sha256Pattern);
+  if (!Number.isSafeInteger(value.channel.sequence) || value.channel.sequence < 1
+    || (value.upstream.observedVersion !== null && typeof value.upstream.observedVersion !== "string")
+    || (value.upstream.error !== null && typeof value.upstream.error !== "string")) fail("Malformed managed update status");
+  if (value.compatibleUpdate !== null) {
+    exactObject(value.compatibleUpdate, "compatible update state", ["releaseId", "managerReleaseId", "upstreamVersion", "sequence"]);
+    ensureIdentifier(value.compatibleUpdate.releaseId, "compatible update release ID");
+    ensureIdentifier(value.compatibleUpdate.managerReleaseId, "compatible update Manager Release ID");
+    expectString(value.compatibleUpdate.upstreamVersion, "compatible update upstream version");
+    if (!Number.isSafeInteger(value.compatibleUpdate.sequence) || value.compatibleUpdate.sequence < 1) fail("Malformed managed update status");
+  }
+  if (value.patchLag !== null) {
+    exactObject(value.patchLag, "Patch Lag state", ["currentReleaseId", "currentUpstreamVersion", "observedUpstreamVersion"]);
+    ensureIdentifier(value.patchLag.currentReleaseId, "Patch Lag release ID");
+    expectString(value.patchLag.currentUpstreamVersion, "Patch Lag current upstream version");
+    expectString(value.patchLag.observedUpstreamVersion, "Patch Lag observed upstream version");
+  }
+}
+
+function validateUninstallStartupState(name, value) {
+  if (name === "startup-check.json") {
+    exactObject(value, "startup check state", ["schemaVersion", "type", "lastAttemptAt"]);
+    if (value.schemaVersion !== 1 || value.type !== "managed-startup-check") fail("Malformed startup check state");
+    expectDate(value.lastAttemptAt, "startup check date");
+    return;
+  }
+  exactObject(value, "startup check lock", ["schemaVersion", "type", "pid", "processStartIdentity", "token", "createdAt"]);
+  if (value.schemaVersion !== 1 || value.type !== "managed-startup-check-lock"
+    || !Number.isSafeInteger(value.pid) || value.pid < 1 || !uuidPattern.test(value.token)) fail("Malformed startup check lock");
+  expectString(value.processStartIdentity, "startup check process identity");
+  expectDate(value.createdAt, "startup check lock date");
 }
 
 function validateUninstallState(dataRoot, paths, pairs) {
@@ -2513,6 +2623,10 @@ function validateUninstallState(dataRoot, paths, pairs) {
       for (const field of ["claimedByToken", "processStartIdentity", "claimantToken", "token"]) {
         if (field in recovery) expectString(recovery[field], `managed recovery ${field}`);
       }
+      const expectedName = recovery.type.startsWith("lifecycle-")
+        ? `lifecycle-recovery-${digestBytes(String(recovery.staleToken))}.${recovery.type.endsWith("owner") ? "owner" : "json"}`
+        : `startup-check-recovery-${recovery.staleToken}.${recovery.type.endsWith("owner") ? "owner" : "json"}`;
+      if (name !== expectedName) fail(`Managed recovery state filename mismatch: ${name}`);
     }
   }
   const uninstallPending = readUninstallPending(paths);
@@ -2552,9 +2666,11 @@ function validateUninstallState(dataRoot, paths, pairs) {
   readUpdateHoldClearTransaction(paths);
   readUpdateHoldRecord(paths);
   if (pathExists(join(paths.state, "legacy-adoption.json"))) readLegacyInstallationAdoption(dataRoot);
-  for (const name of ["update-status.json", "startup-check.json", "startup-check.lock"]) {
+  const statusPath = join(paths.state, "update-status.json");
+  if (pathExists(statusPath)) validateUninstallUpdateStatus(readJson(statusPath, "managed update status"));
+  for (const name of ["startup-check.json", "startup-check.lock"]) {
     const path = join(paths.state, name);
-    if (pathExists(path)) readJson(path, `managed ${name}`);
+    if (pathExists(path)) validateUninstallStartupState(name, readJson(path, `managed ${name}`));
   }
 }
 
@@ -2613,6 +2729,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
       receiptPath(paths, "downstream", pair.downstreamReleaseId),
       join(paths.managers, pair.managerReleaseId),
       receiptPath(paths, "manager", pair.managerReleaseId),
+      pairLeaseDirectory(paths, pair),
     ].some((path) => pathExists(path)));
     const pairs = [...installed, ...pendingWithOwnedState]
       .filter((pair, index, all) => all.findIndex((candidate) => samePair(candidate, pair)) === index);
@@ -2664,7 +2781,14 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
 
     if (dispatcher) {
       if (dispatcher.payloadExists) {
-        removeThroughTombstone(paths, dispatcher.destination, "dispatcher");
+        removeThroughTombstone(
+          paths,
+          dispatcher.destination,
+          "dispatcher",
+          metadataDigest(readJson(dispatcher.centralPath, "Managed Dispatcher receipt")),
+          options.checkpoint,
+          "uninstall-dispatcher",
+        );
         options.checkpoint?.("uninstall-dispatcher-payload-removed");
       }
       unlinkSync(dispatcher.centralPath);

@@ -254,6 +254,7 @@ try {
   } else if (args[0] === "managed" && args[1] === "activate") {
     const { activation, adoption } = activate(args.slice(2));
     console.log(`Activated ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
+    for (const issue of activation.cleanupIssues || []) console.error(`Post-activation cleanup is deferred: ${issue}`);
     for (const message of legacyInstallationAdoptionMessages(adoption)) console.log(message);
   } else if (args[0] === "managed" && args[1] === "install-compatibility") {
     installCompatibility(args.slice(2));
