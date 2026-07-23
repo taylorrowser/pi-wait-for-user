@@ -57,7 +57,4 @@ fi
 tar -xzf "$temporary/$asset" -C "$temporary"
 action=${1:-install}
 if [ "$#" -gt 0 ]; then shift; fi
-if [ "$action" = "--manage-pi" ]; then
-  exec sh "$temporary/pi-wait-for-user/install.sh" --manage-pi --release-archive "$temporary/$asset" "$@"
-fi
 exec sh "$temporary/pi-wait-for-user/install.sh" "$action" "$@"

@@ -183,7 +183,7 @@ function layout(dataRoot) {
     accepted: join(root, "state", "accepted-metadata.json"),
     config: join(root, "state", "config.json"),
     managers: join(root, "managers"),
-    releases: join(root, "managed-releases"),
+    releases: join(root, "downstream-releases"),
     receipts: join(root, "receipts"),
     artifacts: join(root, "artifacts"),
     leases: join(root, "leases"),
@@ -451,6 +451,20 @@ function adoptVerifiedLegacyPayload(stage, legacyPath, expected) {
   cpSync(legacyPath, packagedPayload, { recursive: true, dereference: false, preserveTimestamps: true });
   comparePayload(payloadWithoutManagerFiles(stage.payload), expected);
   return true;
+}
+
+function updateLegacyMigration(paths, { legacyFound, legacyAdopted, legacyPath, releaseId }) {
+  const migrationPath = join(paths.state, "legacy-migration.json");
+  if (legacyFound) {
+    atomicWrite(migrationPath, {
+      schemaVersion: 1,
+      type: "legacy-migration",
+      releaseId,
+      legacyPath,
+      disposition: legacyAdopted ? "adopted-after-signed-verification" : "fresh-install-legacy-untouched",
+      cleanup: `After confirming managed commands work, remove the legacy directory manually if desired: ${legacyPath}`,
+    });
+  } else if (pathExists(migrationPath)) unlinkSync(migrationPath);
 }
 
 function pairFor(manifest, platform) {
@@ -885,7 +899,10 @@ export function installAndActivate(options) {
       let previous = null;
       if (existsSync(paths.activation)) {
         const current = readActivation(dataRoot);
-        if (canonicalJson(current.active) === canonicalJson(pair)) return current;
+        if (canonicalJson(current.active) === canonicalJson(pair)) {
+          updateLegacyMigration(paths, { legacyFound, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
+          return current;
+        }
         previous = current.active;
       }
       const activation = {
@@ -896,17 +913,7 @@ export function installAndActivate(options) {
         previous,
       };
       atomicWrite(paths.activation, activation);
-      const migrationPath = join(paths.state, "legacy-migration.json");
-      if (legacyFound) {
-        atomicWrite(migrationPath, {
-          schemaVersion: 1,
-          type: "legacy-migration",
-          releaseId: manifest.releaseId,
-          legacyPath,
-          disposition: legacyAdopted ? "adopted-after-signed-verification" : "fresh-install-legacy-untouched",
-          cleanup: `After confirming managed commands work, remove the legacy directory manually if desired: ${legacyPath}`,
-        });
-      } else if (pathExists(migrationPath)) unlinkSync(migrationPath);
+      updateLegacyMigration(paths, { legacyFound, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
       checkpoint?.("after-activation-switch");
       return activation;
     } catch (error) {
@@ -1289,12 +1296,27 @@ function assertDispatcherIdentity(dispatcher) {
   if (found.sha256 !== dispatcher.sha256 || found.size !== dispatcher.size) fail("Managed Dispatcher identity changed");
 }
 
-export function preflightManagedCommandOwnership(dataRoot, options = {}) {
-  const environment = options.environment || process.env;
-  const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
+function validateBinDirectory(binDirectory) {
   if (pathExists(binDirectory) && (lstatSync(binDirectory).isSymbolicLink() || !lstatSync(binDirectory).isDirectory())) {
     fail(`Managed bin directory is foreign: ${binDirectory}`);
   }
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  let ancestor = dirname(binDirectory);
+  while (ancestor !== dirname(ancestor)) {
+    if (pathExists(ancestor)) {
+      const stat = lstatSync(ancestor);
+      if (stat.isSymbolicLink() && (uid === undefined || stat.uid === uid)) {
+        fail(`Managed bin directory ancestor is a foreign symbolic link: ${ancestor}`);
+      }
+    }
+    ancestor = dirname(ancestor);
+  }
+}
+
+export function preflightManagedCommandOwnership(dataRoot, options = {}) {
+  const environment = options.environment || process.env;
+  const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
+  validateBinDirectory(binDirectory);
   const paths = layout(dataRoot);
   const compatibilityPath = join(binDirectory, "pi-wait-for-user");
   if (pathExists(compatibilityPath)) {
@@ -1338,9 +1360,7 @@ export function installManagedCompatibility(dataRoot, options = {}) {
       assertEntrypointAvailable(existing);
     } else {
       if (pathExists(expected.path)) fail(`Unowned foreign command collision: ${expected.path}`);
-      if (pathExists(binDirectory) && (lstatSync(binDirectory).isSymbolicLink() || !lstatSync(binDirectory).isDirectory())) {
-        fail(`Managed bin directory is foreign: ${binDirectory}`);
-      }
+      validateBinDirectory(binDirectory);
     }
     const dispatcher = dispatcherIdentity(publishStableDispatcher(paths, selected));
     if (dispatcher.path !== expected.target) fail("Managed Dispatcher path mismatch");
@@ -1386,9 +1406,7 @@ export function enableManagedOwnership(dataRoot, options = {}) {
         if (resolve(installedCompatibility.path) !== compatibility.path || resolve(installedCompatibility.target) !== compatibility.target
           || !entrypointMatches(installedCompatibility)) fail(`Managed compatibility entrypoint ownership mismatch: ${compatibility.path}`);
       }
-      if (pathExists(binDirectory) && (lstatSync(binDirectory).isSymbolicLink() || !lstatSync(binDirectory).isDirectory())) {
-        fail(`Managed bin directory is foreign: ${binDirectory}`);
-      }
+      validateBinDirectory(binDirectory);
       const resolvedStock = commandPath("pi", environment);
       pendingOwnership = {
         entrypoints: { pi, compatibility },

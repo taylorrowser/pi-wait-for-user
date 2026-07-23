@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   legacyMigrationMessages,
-  nativeManagedPlatform,
-  parseRootKeyOption,
+  managedActivationOptions,
   readJsonFile,
+  shellHashRemediation,
 } from "./lib/managed-command.mjs";
 import {
   cleanupManagedState,
@@ -55,31 +55,18 @@ function options(args, booleans = []) {
   return values;
 }
 
-function required(values, flag) {
-  const value = values.get(flag);
-  if (!value) fail(`Missing required option: ${flag}`);
-  return value;
-}
-
 function activate(args) {
   const values = options(args);
   const allowed = new Set(["--data-root", "--platform", "--trust", "--channel", "--manifest", "--root-key", "--manager-archive", "--release-archive", "--now"]);
   for (const flag of values.keys()) if (!allowed.has(flag)) fail(`Unknown option: ${flag}`);
   const selectedDataRoot = values.get("--data-root") || dataRoot();
-  const activation = installAndActivate({
+  const activation = installAndActivate(managedActivationOptions(values, {
     dataRoot: selectedDataRoot,
-    platform: values.get("--platform") || nativeManagedPlatform(),
-    trustEnvelope: readJsonFile(required(values, "--trust")),
-    channelEnvelope: readJsonFile(required(values, "--channel")),
-    manifestEnvelope: readJsonFile(required(values, "--manifest")),
-    rootKeys: new Map([parseRootKeyOption(required(values, "--root-key"))]),
-    managerArchive: resolve(required(values, "--manager-archive")),
-    releaseArchive: resolve(required(values, "--release-archive")),
     now: values.has("--now") ? new Date(values.get("--now")) : new Date(),
     checkpoint: process.env.PI_MANAGED_INTERRUPT_AT
       ? (name) => { if (name === process.env.PI_MANAGED_INTERRUPT_AT) fail(`Interrupted at ${name}`); }
       : undefined,
-  });
+  }));
   return { activation, migration: readLegacyMigration(selectedDataRoot) };
 }
 
@@ -102,6 +89,7 @@ function enableOwnership(args) {
       : undefined,
   });
   console.log(`Managed command ownership ${result}.`);
+  console.log(shellHashRemediation);
 }
 
 function verifyInstallation(args) {

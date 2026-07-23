@@ -1,4 +1,4 @@
-# Managed runtime and command ownership
+# Managed Installation components and command ownership
 
 This local runtime implements the stable Managed Dispatcher, versioned Manager Release seam, and macOS/Linux command ownership defined by [`docs/design/managed-installation.md`](../design/managed-installation.md). GitHub issue [#59](https://github.com/taylorrowser/pi-wait-for-user/issues/59) delivered Activation; [#60](https://github.com/taylorrowser/pi-wait-for-user/issues/60) adds side-by-side compatibility setup, explicit ownership, Stock Pi identity, and legacy migration. Network update discovery and the complete retention/uninstall UX remain assigned to #61–#62.
 
@@ -8,7 +8,7 @@ This local runtime implements the stable Managed Dispatcher, versioned Manager R
 - `manager` is the immutable Manager Release executable in the release package. It invokes `scripts/managed-manager.mjs`.
 - `scripts/managed-manager.mjs` runs normal Pi with `-e <selected-release>/pi-wait-for-user/question-tool`, implements local activation, verification, compatibility setup, `managed enable`, and `managed stock`, and refuses to delegate unknown `managed` commands to Pi.
 
-`scripts/managed-installer.mjs` is the signed-payload installer engine projected behind the release `install.sh` flow. It accepts only an explicit `--manage-pi`; without that flag a signed installation publishes only the owned `pi-wait-for-user` compatibility entrypoint. It remains side-by-side until either `install.sh --manage-pi` is selected or the user runs:
+`scripts/managed-installer.mjs` is the signed-payload installer engine used by an extracted release's `install.sh` flow. Its explicit root-public-key input is for the checksum/attestation-first manual bootstrap: the caller must independently verify that public key, and the engine has no caller-controlled clock override. The production HTTPS bootstrap assembled by #63 instead supplies the #58 provisioned, installer-pinned root key and authenticated metadata URLs. The engine accepts only an explicit `--manage-pi`; without that flag a signed installation publishes only the owned `pi-wait-for-user` compatibility entrypoint. It remains side-by-side until either `install.sh --manage-pi` is selected or the user runs:
 
 ```text
 pi-wait-for-user managed enable [--bin-dir <directory>]
@@ -29,7 +29,7 @@ state/legacy-migration.json        adoption/fresh-install result and cleanup tex
 state/lifecycle.lock               exclusive mutating-operation owner
 dispatcher/                        immutable receipt-owned stage 0 copied from a verified Manager Release
 managers/<manager-release-id>/     immutable Manager Release payload
-managed-releases/<downstream-release-id>/ immutable Downstream Release payload
+downstream-releases/<downstream-release-id>/ immutable Downstream Release payload
 releases/<downstream-release-id>/         untouched legacy side-by-side installations
 receipts/{managers,releases}/      strict receipt projections
 artifacts/<sha256>/                verified artifact bytes for provenance audit
@@ -58,7 +58,7 @@ The previous successfully active pair is copied into the new Activation. The cra
 
 Unknown signed metadata schemas fail activation with reviewed re-bootstrap instructions, but stage 0 does not need to parse those envelopes during a cheap launch, so an already active pair remains usable.
 
-If the legacy side-by-side directory for the selected release exists, activation compares every file path, mode, size, and digest with the signed platform payload. Only an exact match is adopted into the managed staging tree. Otherwise activation installs the fresh signed archive under `managed-releases/`, leaves the legacy directory unchanged, and records exact manual cleanup guidance.
+If the legacy side-by-side directory for the selected release exists, activation compares every file path, mode, size, and digest with the signed platform payload. Only an exact match is adopted into the managed staging tree. Otherwise activation installs the fresh signed archive under `downstream-releases/`, leaves the legacy directory unchanged, and records exact manual cleanup guidance.
 
 ## Ownership safety and Stock Pi
 

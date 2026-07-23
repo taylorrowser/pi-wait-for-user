@@ -4,6 +4,7 @@ set -eu
 release_id="pi-v0.81.1-patch.6"
 pi_version="0.81.1"
 payload_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+usage="Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH] | install.sh --manage-pi <signed managed-install options>"
 action=${1:-install}
 if [ "$#" -gt 0 ]; then shift; fi
 
@@ -27,7 +28,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --install-dir) install_dir=$2; shift 2 ;;
     --bin-dir) bin_dir=$2; shift 2 ;;
-    *) echo "Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH] | install.sh --manage-pi <signed managed-install options>" >&2; exit 1 ;;
+    *) echo "$usage" >&2; exit 1 ;;
   esac
 done
 
@@ -63,17 +64,29 @@ verify_directory() {
   }
 }
 
+launcher_available() {
+  if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
+    return 0
+  fi
+  if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ]; then
+    return 0
+  fi
+  echo "pi-wait-for-user: unowned foreign command collision: $launcher" >&2
+  return 1
+}
+
 activate() {
+  launcher_available
   mkdir -p "$bin_dir"
-  temporary_link="$bin_dir/.pi-wait-for-user.tmp.$$"
-  rm -f "$temporary_link"
-  ln -s "$install_dir/pi-wait-for-user" "$temporary_link"
-  mv -f "$temporary_link" "$launcher"
+  if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
+    ln -s "$install_dir/pi-wait-for-user" "$launcher"
+  fi
 }
 
 case "$action" in
   install)
     verify_directory "$payload_dir"
+    launcher_available
     if [ -e "$install_dir" ]; then
       echo "pi-wait-for-user: install already exists: $install_dir" >&2
       exit 1
@@ -116,7 +129,7 @@ case "$action" in
     echo "Removed $release_id. Pi settings and sessions were left unchanged."
     ;;
   *)
-    echo "Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH] | install.sh --manage-pi <signed managed-install options>" >&2
+    echo "$usage" >&2
     exit 1
     ;;
 esac

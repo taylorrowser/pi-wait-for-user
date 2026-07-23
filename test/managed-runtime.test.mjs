@@ -268,7 +268,7 @@ test("one atomic Activation selects an immutable compatible pair and dispatches 
     assert.match(launched.stdout, /PI_ARGS: <-e> <.*question-tool> <--model> <fixture>/);
 
     assert.equal((readFileSync(join(dataRoot, "managers", "manager-v1", "package", "manager"))).length > 0, true);
-    assert.throws(() => writeFileSync(join(dataRoot, "managed-releases", "pi-v0.81.1-patch.6", "foreign"), "x"), /EACCES|EPERM/);
+    assert.throws(() => writeFileSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6", "foreign"), "x"), /EACCES|EPERM/);
   } finally {
     destroy(dataRoot);
     destroy(candidate.directory);
@@ -398,8 +398,8 @@ test("full verification detects payload changes; --all verifies the retained pre
     });
     assert.equal(cliVerification.status, 0, cliVerification.stderr);
     assert.match(cliVerification.stdout, /Verified 2 managed Activation pairs/);
-    chmodSync(join(dataRoot, "managed-releases", "pi-v0.81.1-patch.5", "pi-wait-for-user", "release.json"), 0o644);
-    writeFileSync(join(dataRoot, "managed-releases", "pi-v0.81.1-patch.5", "pi-wait-for-user", "release.json"), "tampered\n");
+    chmodSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.5", "pi-wait-for-user", "release.json"), 0o644);
+    writeFileSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.5", "pi-wait-for-user", "release.json"), "tampered\n");
     assert.doesNotThrow(() => verifyManagedInstallation(dataRoot));
     assert.throws(
       () => verifyManagedInstallation(dataRoot, { all: true }),
@@ -604,10 +604,10 @@ test("leased payload cleanup is deferred and receipt-scoped cleanup rejects fore
 
     const lease = acquirePairLease(dataRoot, oldPair);
     assert.equal(removeInstalledPair(dataRoot, oldPair), "deferred");
-    assert.equal(existsSync(join(dataRoot, "managed-releases", oldPair.downstreamReleaseId)), true);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", oldPair.downstreamReleaseId)), true);
     lease.release();
     assert.equal(cleanupManagedState(dataRoot) >= 1, true);
-    assert.equal(existsSync(join(dataRoot, "managed-releases", oldPair.downstreamReleaseId)), false);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", oldPair.downstreamReleaseId)), false);
     assert.equal(existsSync(join(dataRoot, "state", "pending-cleanup.json")), false);
   } finally {
     destroy(dataRoot);
@@ -628,7 +628,7 @@ test("leased cleanup retries converge after a tombstone was removed before its c
     activate(dataRoot, previous);
     activate(dataRoot, active);
 
-    destroy(join(dataRoot, "managed-releases", oldPair.downstreamReleaseId));
+    destroy(join(dataRoot, "downstream-releases", oldPair.downstreamReleaseId));
     writeFileSync(join(dataRoot, "state", "pending-cleanup.json"), serializeMetadata({
       schemaVersion: 1,
       pairs: [oldPair],
@@ -662,15 +662,19 @@ test("signed-payload-identical legacy installation is adopted only after complet
     const migration = readLegacyMigration(dataRoot);
     assert.equal(migration.disposition, "adopted-after-signed-verification");
     assert.equal(existsSync(legacy), true);
-    assert.equal(existsSync(join(dataRoot, "managed-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
     assert.match(migration.cleanup, /remove the legacy directory manually/);
+
+    destroy(legacy);
+    activate(dataRoot, candidate);
+    assert.equal(readLegacyMigration(dataRoot), null);
   } finally {
     destroy(dataRoot);
     destroy(candidate.directory);
   }
 });
 
-test("unverified legacy installation is untouched while a fresh manager-owned release is installed", () => {
+test("unverified legacy installation is untouched while a fresh Downstream Release is installed", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-legacy-fresh-"));
   const candidate = fixture();
   const legacy = join(dataRoot, "releases", "pi-v0.81.1-patch.6");
@@ -681,7 +685,7 @@ test("unverified legacy installation is untouched while a fresh manager-owned re
     const migration = readLegacyMigration(dataRoot);
     assert.equal(migration.disposition, "fresh-install-legacy-untouched");
     assert.equal(readFileSync(join(legacy, "keep-foreign"), "utf8"), "untouched\n");
-    assert.equal(existsSync(join(dataRoot, "managed-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
     assert.match(migration.cleanup, new RegExp(legacy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     destroy(dataRoot);
@@ -706,7 +710,6 @@ test("installer claims pi only with explicit --manage-pi", () => {
     "--root-key", `fixture-root=${join(keys, "root-public.pem")}`,
     "--manager-archive", candidate.managerArchive,
     "--release-archive", candidate.releaseArchive,
-    "--now", now.toISOString(),
   ];
   try {
     const sideBySideRoot = join(root, "side-by-side-data");
@@ -731,6 +734,8 @@ test("installer claims pi only with explicit --manage-pi", () => {
     assert.equal(managed.status, 0, managed.stderr);
     assert.equal(existsSync(join(managedBin, "pi")), true);
     assert.equal(existsSync(join(managedBin, "pi-wait-for-user")), true);
+    assert.match(managed.stdout, /hash -r/);
+    assert.match(managed.stdout, /command -v pi/);
 
     const collisionRoot = join(root, "collision-data");
     const collisionBin = join(root, "collision-bin");
@@ -939,6 +944,29 @@ test("managed ownership refuses foreign command collisions without changing eith
       destroy(bin);
       destroy(candidate.directory);
     }
+  }
+});
+
+test("managed ownership rejects a symlink-substituted bin-directory parent", () => {
+  const root = mkdtempSync(join(tmpdir(), "managed-runtime-bin-parent-symlink-"));
+  const dataRoot = join(root, "data");
+  const foreign = join(root, "foreign");
+  const linkedParent = join(root, "linked-parent");
+  const candidate = fixture();
+  try {
+    mkdirSync(foreign);
+    symlinkSync(foreign, linkedParent);
+    activate(dataRoot, candidate);
+    const result = runManager(dataRoot, ["managed", "enable", "--bin-dir", join(linkedParent, "bin")], {
+      PATH: `${join(linkedParent, "bin")}:/usr/bin:/bin`,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ancestor is a foreign symbolic link/);
+    assert.equal(existsSync(join(foreign, "bin")), false);
+    assert.equal(existsSync(join(dataRoot, "dispatcher")), false);
+  } finally {
+    destroy(root);
+    destroy(candidate.directory);
   }
 });
 

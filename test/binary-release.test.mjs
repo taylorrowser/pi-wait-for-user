@@ -54,8 +54,6 @@ test("the recommended bootstrap selects a platform binary without Git, npm, or N
   assert.match(bootstrap, /pi-wait-for-user-\$\{platform\}\.tar\.gz/);
   assert.match(bootstrap, /uname -s/);
   assert.match(bootstrap, /uname -m/);
-  assert.match(bootstrap, /"\$action" = "--manage-pi"/);
-  assert.match(bootstrap, /--release-archive "\$temporary\/\$asset"/);
 });
 
 test("the bootstrap verifies its downloaded platform archive before installation", () => {
@@ -150,6 +148,24 @@ test("binary installation does not invoke Git, npm, or a local build", () => {
   const installDirectory = join(fixture.root, "installed");
   const binDirectory = join(fixture.root, "user-bin");
   const argumentLog = join(fixture.root, "arguments");
+  mkdirSync(binDirectory);
+  const launcher = join(binDirectory, "pi-wait-for-user");
+  writeFileSync(launcher, "foreign\n");
+  const collision = spawnSync(
+    "sh",
+    [
+      join(fixture.installation, "install.sh"),
+      "install",
+      "--install-dir", installDirectory,
+      "--bin-dir", binDirectory,
+    ],
+    { encoding: "utf8", env: { ...process.env, HOME: join(fixture.root, "home"), PATH: `${fakeBin}:${process.env.PATH}` } },
+  );
+  assert.notEqual(collision.status, 0);
+  assert.equal(readFileSync(launcher, "utf8"), "foreign\n");
+  assert.equal(existsSync(installDirectory), false);
+  rmSync(launcher);
+
   const result = spawnSync(
     "sh",
     [
@@ -171,7 +187,6 @@ test("binary installation does not invoke Git, npm, or a local build", () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(forbidden), false);
-  const launcher = join(binDirectory, "pi-wait-for-user");
   assert.equal(readlinkSync(launcher), join(installDirectory, "pi-wait-for-user"));
   assert.equal(existsSync(join(installDirectory, "question-tool", "extensions", "question-tool.ts")), true);
 
