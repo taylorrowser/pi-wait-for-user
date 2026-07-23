@@ -238,7 +238,11 @@ try {
   } else {
     const route = classifyManagedUpdateArgs(args);
     if (route.type === "reject") fail("Unknown update syntax; refusing to delegate a possible upstream-only Pi update path");
-    if (route.type === "managed") await update(args.slice(1), route);
+    if (route.type === "help") {
+      console.log("Usage: pi update [pi|self] [--self|--all] [--force] [--approve|--no-approve]");
+      console.log("Managed self-inclusive forms activate only a verified compatible Downstream Release.");
+      console.log("Extension-only, model-only, and one-package forms are delegated to the active Pi.");
+    } else if (route.type === "managed") await update(args.slice(1), route);
     else {
       if (args[0] !== "update") {
         try {

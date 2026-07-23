@@ -306,8 +306,20 @@ export function managedProcessStartIdentity(pid) {
   return null;
 }
 
+export function managedProcessStatus(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") return { status: "dead", identity: null };
+    if (error?.code !== "EPERM") return { status: "unknown", identity: null };
+  }
+  const identity = managedProcessStartIdentity(pid);
+  return identity ? { status: "live", identity } : { status: "unknown", identity: null };
+}
+
 export function managedProcessIdentityIsLive(pid, startIdentity) {
-  return typeof startIdentity === "string" && managedProcessStartIdentity(pid) === startIdentity;
+  const observed = managedProcessStatus(pid);
+  return observed.status === "live" && observed.identity === startIdentity;
 }
 
 function currentManagedProcessStartIdentity() {
@@ -387,13 +399,19 @@ function acquireLifecycleLock(dataRoot, operation) {
   };
   if (!publishLifecycleLock(paths, lock)) {
     const active = readJson(paths.lock, "lifecycle lock");
-    exactObject(active, "lifecycle lock", ["schemaVersion", "pid", "processStartIdentity", "token", "operation", "startedAt"]);
+    const legacy = plainObject(active)
+      && canonicalJson(Object.keys(active).sort()) === canonicalJson(["schemaVersion", "pid", "token", "operation", "startedAt"].sort());
+    exactObject(active, "lifecycle lock", legacy
+      ? ["schemaVersion", "pid", "token", "operation", "startedAt"]
+      : ["schemaVersion", "pid", "processStartIdentity", "token", "operation", "startedAt"]);
     if (active.schemaVersion !== 1 || !Number.isSafeInteger(active.pid) || active.pid < 1) fail("Malformed lifecycle lock");
-    expectString(active.processStartIdentity, "lifecycle lock process identity");
+    if (!legacy) expectString(active.processStartIdentity, "lifecycle lock process identity");
     expectString(active.token, "lifecycle lock token");
     expectString(active.operation, "lifecycle lock operation");
     expectDate(active.startedAt, "lifecycle lock start date");
-    if (managedProcessIdentityIsLive(active.pid, active.processStartIdentity)) {
+    const activeProcess = managedProcessStatus(active.pid);
+    if ((legacy && activeProcess.status !== "dead")
+      || (!legacy && activeProcess.status === "live" && activeProcess.identity === active.processStartIdentity)) {
       fail(`Managed lifecycle operation already active: ${String(active.operation)}`);
     }
     const recoveryPath = join(paths.state, `lifecycle-recovery-${digestBytes(String(active.token))}.json`);
@@ -1262,6 +1280,40 @@ export function readManagedStartupContext(dataRoot) {
   };
 }
 
+export function managedCandidateIdentityConflict(dataRoot, manifest, manifestSha256, platform) {
+  const paths = layout(dataRoot);
+  const managerArtifact = manifest.manager.artifacts[0];
+  const managerPath = join(paths.managers, manifest.manager.releaseId);
+  const managerReceiptPath = receiptPath(paths, "manager", manifest.manager.releaseId);
+  if (pathExists(managerReceiptPath)) {
+    const receiptValue = readJson(managerReceiptPath, "manager receipt");
+    const receipt = validateReceipt(receiptValue, "manager", managerPath, {
+      managerReleaseId: manifest.manager.releaseId,
+      downstreamReleaseId: manifest.releaseId,
+      platform: receiptValue.platform,
+    });
+    if (canonicalJson(receipt.sourceArtifact) !== canonicalJson(managerArtifact)) {
+      return `signed candidate reuses immutable Manager Release identity ${manifest.manager.releaseId}`;
+    }
+  }
+  const downstreamPath = join(paths.releases, manifest.releaseId);
+  const downstreamReceiptPath = receiptPath(paths, "downstream", manifest.releaseId);
+  if (pathExists(downstreamReceiptPath)) {
+    const receiptValue = readJson(downstreamReceiptPath, "downstream receipt");
+    const receipt = validateReceipt(receiptValue, "downstream", downstreamPath, {
+      managerReleaseId: receiptValue.managerReleaseId,
+      downstreamReleaseId: manifest.releaseId,
+      platform: receiptValue.platform,
+    });
+    const archive = manifest.platformArchives.find((entry) => entry.platform === platform)?.artifact;
+    if (receipt.manifestSha256 !== manifestSha256
+      || !archive || canonicalJson(receipt.sourceArtifact) !== canonicalJson(archive)) {
+      return `signed candidate reuses immutable Downstream Release identity ${manifest.releaseId}`;
+    }
+  }
+  return null;
+}
+
 export function readManagedUpdateContext(dataRoot) {
   const selected = validateActivePair(dataRoot);
   if (selected.config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {
@@ -1391,9 +1443,10 @@ function livePairLeases(paths, pair) {
       live.push(path); // Ambiguous lease state must defer deletion.
       continue;
     }
-    const observedIdentity = managedProcessStartIdentity(lease.pid);
-    if (observedIdentity === null || observedIdentity === lease.processStartIdentity) live.push(path);
-    else unlinkSync(path);
+    const observed = managedProcessStatus(lease.pid);
+    if (observed.status === "unknown" || (observed.status === "live" && observed.identity === lease.processStartIdentity)) {
+      live.push(path);
+    } else unlinkSync(path);
   }
   return live;
 }
@@ -1416,7 +1469,9 @@ export function acquirePairLease(dataRoot, pair) {
   return {
     transfer(pid) {
       if (!Number.isSafeInteger(pid) || pid < 1) fail("Invalid pair lease process");
-      atomicWrite(path, { ...lease, pid, processStartIdentity: managedProcessStartIdentity(pid) });
+      const processStatus = managedProcessStatus(pid);
+      if (processStatus.status !== "live") fail("Cannot identify pair lease process");
+      atomicWrite(path, { ...lease, pid, processStartIdentity: processStatus.identity });
     },
     release() {
       try {

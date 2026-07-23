@@ -85,7 +85,7 @@ export function managedActivationOptions(values, { dataRoot, now = new Date(), c
 
 export function classifyManagedUpdateArgs(args) {
   if (args[0] !== "update") return { type: "delegate" };
-  if (args.slice(1).some((argument) => argument === "--help" || argument === "-h")) return { type: "delegate" };
+  if (args.slice(1).some((argument) => argument === "--help" || argument === "-h")) return { type: "help" };
   const flags = new Set();
   let source;
   let extensionSource;

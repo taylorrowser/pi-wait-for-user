@@ -1462,14 +1462,18 @@ function updateTransport(candidate, { upstreamVersion = candidate.manifestEnvelo
 
 test("signed Channel sequence and Downstream Release identity detect every compatible pair change", async () => {
   const variants = [
-    fixture({ releaseId: "pi-v0.81.1-patch.7" }),
-    fixture({ releaseId: "pi-v0.81.1-patch.8", managerId: "manager-v2" }),
-    fixture({ releaseId: "pi-v0.81.1-patch.9", questionVersion: "0.1.4" }),
-    fixture({ releaseId: "pi-v0.82.0-patch.1", upstreamVersion: "0.82.0", sequence: 10 }),
+    { releaseId: "pi-v0.81.1-patch.7" },
+    { releaseId: "pi-v0.81.1-patch.8", managerId: "manager-v2" },
+    { releaseId: "pi-v0.81.1-patch.9", questionVersion: "0.1.4" },
+    { releaseId: "pi-v0.82.0-patch.1", upstreamVersion: "0.82.0", sequence: 10 },
   ];
-  for (const candidate of variants) {
+  for (const options of variants) {
     const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-selection-"));
     const current = fixture();
+    const candidate = fixture({
+      ...options,
+      ...(!options.managerId && { managerArchive: current.managerArchive }),
+    });
     try {
       activate(dataRoot, current);
       const result = await checkManagedUpdate(dataRoot, { transport: updateTransport(candidate), now });
@@ -1824,13 +1828,20 @@ test("Managed Dispatcher never exposes upstream-only Pi updates while preserving
     activate(dataRoot, current);
     for (const args of [
       ["update", "--extensions"], ["update", "--extensions", "--extensions"], ["update", "--extensions", "--force"],
-      ["update", "--help"], ["update", "--models"], ["update", "npm:@foo/bar"],
+      ["update", "--models"], ["update", "npm:@foo/bar"],
       ["update", "--extension", "npm:@foo/bar"],
     ]) {
       const packages = runDispatcher(dataRoot, args, { PI_OFFLINE: "1" });
       assert.equal(packages.status, 0, packages.stderr);
       assert.match(packages.stdout, /^PI_ARGS: <update>/m);
       assert.doesNotMatch(packages.stdout, /PI_ARGS: <-e>/);
+    }
+
+    for (const args of [["update", "--help"], ["update", "--self", "--help"], ["update", "pi", "-h"]]) {
+      const help = runDispatcher(dataRoot, args, { PI_OFFLINE: "1" });
+      assert.equal(help.status, 0, help.stderr);
+      assert.match(help.stdout, /Managed self-inclusive forms activate only a verified compatible Downstream Release/);
+      assert.doesNotMatch(help.stdout, /PI_ARGS:/);
     }
 
     for (const args of [
@@ -2405,7 +2416,6 @@ test("stale lifecycle recovery resumes after interruption immediately after its 
     writeFileSync(lock, serializeMetadata({
       schemaVersion: 1,
       pid: 999_999_999,
-      processStartIdentity: "fixture-dead-process",
       token: staleToken,
       operation: "interrupted update",
       startedAt: "2020-01-01T00:00:00.000Z",

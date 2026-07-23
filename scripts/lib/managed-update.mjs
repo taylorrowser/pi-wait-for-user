@@ -19,6 +19,7 @@ import {
   assertLifecycleCapability,
   inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
+  managedCandidateIdentityConflict,
   managedProcessIdentityIsLive,
   managedProcessStartIdentity,
   managedStateDirectory,
@@ -336,12 +337,16 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   const candidateChanged = manifest.releaseId !== context.active.releaseId
     || manifest.manager.releaseId !== context.active.managerReleaseId
     || selection.manifestSha256 !== context.active.manifestSha256;
-  const immutableIdentityReuse = manifest.releaseId === context.active.releaseId
-    && selection.manifestSha256 !== context.active.manifestSha256;
+  const identityConflict = managedCandidateIdentityConflict(
+    dataRoot,
+    manifest,
+    selection.manifestSha256,
+    context.active.platform,
+  );
   const platformArchive = manifest.platformArchives.find((entry) => entry.platform === context.active.platform);
-  const candidateCompatible = !immutableIdentityReuse && Boolean(platformArchive) && manifest.manager.artifacts.length === 1;
+  const candidateCompatible = !identityConflict && Boolean(platformArchive) && manifest.manager.artifacts.length === 1;
   const status = updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError, candidateCompatible);
-  if (immutableIdentityReuse) status.patchLag = null;
+  if (identityConflict) status.patchLag = null;
   status.checkedAt = now.toISOString();
   if (options.cache !== false) writeManagedStateJson(dataRoot, "update-status.json", status);
   if (!candidateChanged) await withManagedUpdateStage("Update Hold cleanup", async () => clearExactUpdateHold(dataRoot, manifest.releaseId));
@@ -355,9 +360,8 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   if (status.compatibleUpdate) return { kind: "compatible-update", ...common, candidate: status.compatibleUpdate };
   if (status.patchLag) return { kind: "patch-lag", ...common, patchLag: status.patchLag };
   if (candidateChanged && !candidateCompatible) {
-    const incompatibility = immutableIdentityReuse
-      ? `signed candidate reuses immutable Downstream Release identity ${manifest.releaseId}`
-      : platformArchive ? "Release Manifest does not select one Manager Release artifact" : `platform is not declared: ${context.active.platform}`;
+    const incompatibility = identityConflict
+      || (platformArchive ? "Release Manifest does not select one Manager Release artifact" : `platform is not declared: ${context.active.platform}`);
     return { kind: "incompatible", ...common, incompatibility };
   }
   return { kind: "current", ...common };
@@ -628,6 +632,13 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
       const recovery = lstatSync(recoveryPath);
       if (current.dev !== recovery.dev || current.ino !== recovery.ino) fail("Startup check recovery record is foreign");
     }
+    const claimed = validateStartupCheckLock(readManagedStateJson(
+      dataRoot,
+      basename(recoveryPath),
+      "startup check recovery claim",
+      { maximumSize: metadataLimit },
+    ));
+    if (claimed.token !== active.token || claimed.processStartIdentity !== active.processStartIdentity) return false;
     const recoveryOwner = acquireStartupRecoveryOwner(dataRoot, active.token, now);
     if (!recoveryOwner) return false;
     try {
