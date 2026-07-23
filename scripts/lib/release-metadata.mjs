@@ -358,14 +358,10 @@ export function verifyReleaseManifest(envelope, { trust, now = new Date() }) {
   return envelope.signed;
 }
 
-export function verifyChannel(envelope, { trust, now = new Date(), manifest, accepted }) {
+export function verifyChannelSelection(envelope, { trust, now = new Date(), accepted } = {}) {
   validateChannel(envelope);
   verifyDelegated(envelope, trust, now);
   if (Date.parse(envelope.signed.expires) <= now.getTime()) fail("Release Channel expired");
-  verifyReleaseManifest(manifest, { trust, now });
-  const actualManifestDigest = createHash("sha256").update(serializeMetadata(manifest)).digest("hex");
-  if (actualManifestDigest !== envelope.signed.manifest.sha256) fail("Release Channel manifest digest mismatch");
-  if (manifest.signed.releaseId !== envelope.signed.manifest.releaseId) fail("Release Channel manifest identity mismatch");
   const acceptedState = {
     sequence: envelope.signed.sequence,
     releaseId: envelope.signed.manifest.releaseId,
@@ -383,6 +379,15 @@ export function verifyChannel(envelope, { trust, now = new Date(), manifest, acc
       fail("Equal Channel sequence is not an identical retry");
     }
   }
+  return acceptedState;
+}
+
+export function verifyChannel(envelope, { trust, now = new Date(), manifest, accepted }) {
+  const acceptedState = verifyChannelSelection(envelope, { trust, now, accepted });
+  verifyReleaseManifest(manifest, { trust, now });
+  const actualManifestDigest = createHash("sha256").update(serializeMetadata(manifest)).digest("hex");
+  if (actualManifestDigest !== envelope.signed.manifest.sha256) fail("Release Channel manifest digest mismatch");
+  if (manifest.signed.releaseId !== envelope.signed.manifest.releaseId) fail("Release Channel manifest identity mismatch");
   return acceptedState;
 }
 

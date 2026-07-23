@@ -79,6 +79,40 @@ export function managedActivationOptions(values, { dataRoot, now = new Date(), c
   return options;
 }
 
+export function classifyManagedUpdateArgs(args) {
+  if (args[0] !== "update") return { type: "delegate" };
+  const flags = new Set();
+  let source;
+  let extensionSource;
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--extension") {
+      const value = args[index + 1];
+      if (extensionSource || !value || value.startsWith("-")) return { type: "reject" };
+      extensionSource = value;
+      index += 1;
+    } else if (["--self", "--extensions", "--models", "--all", "--force", "--approve", "--no-approve", "-a", "-na"].includes(argument)) {
+      if (flags.has(argument)) return { type: "reject" };
+      flags.add(argument);
+    } else if (argument.startsWith("-")) return { type: "reject" };
+    else if (source) return { type: "reject" };
+    else source = argument;
+  }
+  const self = flags.has("--self");
+  const extensions = flags.has("--extensions");
+  const models = flags.has("--models");
+  const all = flags.has("--all");
+  if ((all && (self || extensions || models || extensionSource || source))
+    || (models && (self || extensions || extensionSource || source))
+    || (extensionSource && (self || extensions || source))) return { type: "reject" };
+  if (models || extensionSource) return { type: "delegate" };
+  if (source && !["pi", "self"].includes(source)) {
+    return self || extensions ? { type: "reject" } : { type: "delegate" };
+  }
+  if (extensions && !self && !source) return { type: "delegate" };
+  return { type: "managed", all: all || extensions };
+}
+
 export function legacyInstallationAdoptionMessages(adoption) {
   if (!adoption) return [];
   const result = adoption.disposition === "adopted-after-signed-verification"

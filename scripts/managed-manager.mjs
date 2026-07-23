@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  classifyManagedUpdateArgs,
   legacyInstallationAdoptionMessages,
   managedActivationOptions,
   parseManagedOptions,
@@ -25,6 +26,13 @@ import {
   recoverPrevious,
   verifyManagedInstallation,
 } from "./lib/managed-runtime.mjs";
+import {
+  cachedManagedStartupNotice,
+  checkManagedUpdate,
+  claimManagedStartupCheck,
+  formatManagedStatus,
+  runManagedUpdate,
+} from "./lib/managed-update.mjs";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -101,16 +109,87 @@ function verifyInstallation(args) {
   console.log(`Verified ${verified.length} managed Activation pair${verified.length === 1 ? "" : "s"}.`);
 }
 
+function piCommand(release, args) {
+  const pi = join(release, "pi-wait-for-user", "pi-core");
+  const questionTool = join(release, "pi-wait-for-user", "question-tool");
+  return { pi, piArgs: [pi, "-e", questionTool, ...args] };
+}
+
+function piEnvironment() {
+  return { ...process.env, PI_SKIP_VERSION_CHECK: "1" };
+}
+
 function executePi(args) {
   const release = process.env.PI_MANAGED_RELEASE_DIR;
   if (!release) fail("Manager Release was not selected by the Managed Dispatcher");
-  const pi = join(release, "pi-wait-for-user", "pi-core");
-  const questionTool = join(release, "pi-wait-for-user", "question-tool");
-  const piArgs = [pi, "-e", questionTool, ...args];
-  if (typeof process.execve === "function") process.execve(pi, piArgs, process.env);
-  const result = spawnSync(pi, piArgs.slice(1), { stdio: "inherit", env: process.env });
+  const { pi, piArgs } = piCommand(release, args);
+  const environment = piEnvironment();
+  if (typeof process.execve === "function") process.execve(pi, piArgs, environment);
+  const result = spawnSync(pi, piArgs.slice(1), { stdio: "inherit", env: environment });
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
+}
+
+function packageUpdate(selected) {
+  console.log("Package update phase (newly active Pi):");
+  const { pi, piArgs } = piCommand(selected.releasePath, ["update", "--extensions"]);
+  const result = spawnSync(pi, piArgs.slice(1), { stdio: "inherit", env: piEnvironment() });
+  if (result.error) throw result.error;
+  return result.status ?? 1;
+}
+
+function interactiveLaunch(args) {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) return false;
+  if (args.includes("-p") || args.includes("--print") || args.includes("--json") || args.includes("--rpc")) return false;
+  const mode = args.indexOf("--mode");
+  return mode < 0 || !["json", "rpc"].includes(args[mode + 1]);
+}
+
+function beginStartupCheck(args) {
+  const root = dataRoot();
+  const environment = process.env;
+  const offline = args.includes("--offline");
+  if (!claimManagedStartupCheck(root, { environment, offline })) return;
+  const manager = process.env.PI_MANAGED_MANAGER_DIR
+    ? join(process.env.PI_MANAGED_MANAGER_DIR, "package", "manager")
+    : process.execPath;
+  const managerArgs = process.env.PI_MANAGED_MANAGER_DIR
+    ? ["managed", "_startup-check"]
+    : [fileURLToPath(import.meta.url), "managed", "_startup-check"];
+  try {
+    const child = spawn(manager, managerArgs, { detached: true, stdio: "ignore", env: environment });
+    child.once("error", () => {});
+    child.unref();
+  } catch {
+    // A background status refresh can never prevent normal Pi launch.
+  }
+}
+
+function printManagedUpdate(result) {
+  if (result.kind === "activated") {
+    console.log(`Activated Downstream Release ${result.active.releaseId} (upstream Pi ${result.active.upstreamVersion}); Channel sequence ${result.channel.sequence}.`);
+  } else if (result.kind === "patch-lag") {
+    console.log(`Patch Lag: ${result.patchLag.currentReleaseId} is based on upstream Pi ${result.patchLag.currentUpstreamVersion}; observed upstream Pi ${result.patchLag.observedUpstreamVersion} is newer. The verified Activation remains active.`);
+  } else {
+    console.log(`Already current: ${result.active.releaseId} (upstream Pi ${result.active.upstreamVersion}); Channel sequence ${result.channel.sequence}.`);
+    if (result.upstreamError) console.log(`Upstream Pi status unavailable (informational only): ${result.upstreamError}`);
+  }
+}
+
+async function update(route) {
+  if (process.env.PI_OFFLINE) fail("Managed Update is unavailable while PI_OFFLINE is set");
+  console.log("Managed Update phase:");
+  const result = await runManagedUpdate(dataRoot(), {
+    all: route.all,
+    checkpoint: interruptionCheckpoint(),
+    packagePhase: packageUpdate,
+    managedPhaseComplete: printManagedUpdate,
+  });
+  if (route.all && result.partial) {
+    const detail = result.packageError ? `: ${result.packageError}` : "";
+    console.error(`Managed Update activated successfully, but the package update phase failed with exit code ${result.packageExitCode}${detail}; the verified release remains active.`);
+  }
+  process.exitCode = result.exitCode;
 }
 
 try {
@@ -127,6 +206,10 @@ try {
     enableOwnership(args.slice(2));
   } else if (args[0] === "managed" && args[1] === "verify") {
     verifyInstallation(args.slice(2));
+  } else if (args.length === 2 && args[0] === "managed" && args[1] === "status") {
+    console.log(formatManagedStatus(dataRoot()));
+  } else if (args.length === 2 && args[0] === "managed" && args[1] === "_startup-check") {
+    try { await checkManagedUpdate(dataRoot()); } catch { /* Startup refresh is silent and never delays launch. */ }
   } else if (args.length === 3 && args[0] === "managed" && args[1] === "recover" && args[2] === "--previous") {
     const activation = recoverPrevious(dataRoot());
     console.log(`Recovered ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
@@ -139,7 +222,23 @@ try {
   } else if (args[0] === "managed") {
     fail("Unknown managed command; refusing to delegate it to Pi");
   } else {
-    executePi(args);
+    const route = classifyManagedUpdateArgs(args);
+    if (route.type === "reject") fail("Unknown update syntax; refusing to delegate a possible Stock Pi self-update path");
+    if (route.type === "managed") await update(route);
+    else {
+      if (args[0] !== "update") {
+        try {
+          const notice = cachedManagedStartupNotice(dataRoot(), { interactive: interactiveLaunch(args) });
+          if (notice) console.error(notice);
+        } catch {
+          // Malformed cached status is unsafe to render but cannot block normal launch.
+        }
+        try { beginStartupCheck(args); } catch {
+          // An unavailable startup-check state cannot block normal launch.
+        }
+      }
+      executePi(args);
+    }
   }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);

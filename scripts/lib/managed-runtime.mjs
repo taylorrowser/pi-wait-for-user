@@ -41,6 +41,7 @@ const idPattern = /^[a-z0-9][a-z0-9.-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const supportedPlatforms = new Set(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
 const rootKeyProvenanceType = Object.freeze({ callerSelected: "caller-selected", installerPinned: "installer-pinned" });
+const managedDiagnosticLimit = 10;
 const receiptKeys = [
   "schemaVersion", "type", "ownedPath", "managerReleaseId", "downstreamReleaseId", "platform",
   "manifestSha256", "sourceArtifact", "verifiedAt", "payload",
@@ -835,9 +836,14 @@ function diagnostic(paths, error) {
     atomicWrite(join(paths.diagnostics, `${Date.now()}-${randomUUID()}.json`), {
       schemaVersion: 1,
       type: "activation-failure",
+      stage: "verification-and-activation",
       recordedAt: new Date().toISOString(),
-      error: error instanceof Error ? error.message : String(error),
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
     });
+    const diagnostics = readdirSync(paths.diagnostics).filter((name) => name.endsWith(".json")).sort();
+    for (const name of diagnostics.slice(0, Math.max(0, diagnostics.length - managedDiagnosticLimit))) {
+      unlinkSync(join(paths.diagnostics, name));
+    }
   } catch {
     // A diagnostic must never mask the original verification failure.
   }
@@ -989,8 +995,51 @@ function installAndActivateWithProvenance(options, provenanceType) {
   });
 }
 
+export function readManagedUpdateContext(dataRoot) {
+  const selected = validateActivePair(dataRoot);
+  if (selected.config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {
+    fail("Managed Update requires root keys pinned by the reviewed installer");
+  }
+  const metadataRoot = join(selected.releasePath, ".managed");
+  const trustEnvelope = readJson(join(metadataRoot, "release-trust.json"), "release trust metadata");
+  const channelEnvelope = readJson(join(metadataRoot, "release-channel.json"), "Release Channel");
+  const manifestEnvelope = readJson(join(metadataRoot, "release-manifest.json"), "Release Manifest");
+  const verificationTime = new Date(selected.releaseReceipt.verifiedAt);
+  const authority = verifyTrustMetadata(trustEnvelope, { trustedRootKeys: selected.config.rootKeys, now: verificationTime });
+  verifyChannel(channelEnvelope, { trust: authority, now: verificationTime, manifest: manifestEnvelope });
+  const manifest = verifyReleaseManifest(manifestEnvelope, { trust: authority, now: verificationTime });
+  if (manifest.releaseId !== selected.pair.downstreamReleaseId || manifest.manager.releaseId !== selected.pair.managerReleaseId) {
+    fail("Release Manifest pair mismatch");
+  }
+  const accepted = readAcceptedMetadataState(selected.paths);
+  if (!accepted) fail("Accepted metadata state is missing for existing Activation");
+  return {
+    active: {
+      releaseId: manifest.releaseId,
+      managerReleaseId: manifest.manager.releaseId,
+      upstreamVersion: manifest.upstream.packageVersion,
+      platform: selected.pair.platform,
+      manifestSha256: selected.pair.manifestSha256,
+      compatibility: manifest.compatibility,
+    },
+    accepted,
+    rootKeys: selected.config.rootKeys,
+    trustEnvelope,
+    channelEnvelope,
+    manifestEnvelope,
+  };
+}
+
 export function installAndActivate(options) {
   return installAndActivateWithProvenance(options, rootKeyProvenanceType.callerSelected);
+}
+
+export function installAndActivateFromManagedConfig(options) {
+  const config = readConfig(layout(options.dataRoot));
+  if (config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {
+    fail("Managed Update requires root keys pinned by the reviewed installer");
+  }
+  return installAndActivateWithProvenance({ ...options, platform: config.platform, rootKeys: config.rootKeys }, rootKeyProvenanceType.installerPinned);
 }
 
 export function installAndActivateFromPinnedRoot(options) {
