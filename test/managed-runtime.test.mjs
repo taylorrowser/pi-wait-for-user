@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -2290,6 +2290,56 @@ test("post-activation cleanup failure reports a partial Managed Update without r
     destroy(dataRoot);
     destroy(current.directory);
     destroy(candidate.directory);
+  }
+});
+
+test("concurrent stale lifecycle recovery never admits overlapping mutators", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-concurrent-stale-lifecycle-"));
+  const current = fixture();
+  try {
+    activate(dataRoot, current);
+    writeFileSync(join(dataRoot, "state", "lifecycle.lock"), serializeMetadata({
+      schemaVersion: 1,
+      pid: 999_999_999,
+      token: "concurrent-stale-owner-token",
+      operation: "interrupted update",
+      startedAt: "2020-01-01T00:00:00.000Z",
+    }));
+    const critical = join(dataRoot, "state", "test-critical-section");
+    const log = join(dataRoot, "state", "test-critical-section.log");
+    const runtimeUrl = new URL("../scripts/lib/managed-runtime.mjs", import.meta.url).href;
+    const workers = Array.from({ length: 6 }, (_, index) => new Promise((resolveWorker) => {
+      const script = `
+import { appendFileSync, closeSync, openSync, unlinkSync } from "node:fs";
+import { withLifecycleLock } from ${JSON.stringify(runtimeUrl)};
+try {
+  withLifecycleLock(${JSON.stringify(dataRoot)}, "concurrent recovery ${index}", () => {
+    let descriptor;
+    try {
+      descriptor = openSync(${JSON.stringify(critical)}, "wx", 0o600);
+    } catch (error) {
+      appendFileSync(${JSON.stringify(log)}, "VIOLATION\\n");
+      throw error;
+    }
+    appendFileSync(${JSON.stringify(log)}, "entered ${index}\\n");
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
+    closeSync(descriptor);
+    unlinkSync(${JSON.stringify(critical)});
+  });
+} catch (error) {
+  appendFileSync(${JSON.stringify(log)}, "blocked ${index}: " + error.message + "\\n");
+}
+`;
+      const child = spawn(process.execPath, ["--input-type=module", "--eval", script], { stdio: "ignore" });
+      child.on("exit", resolveWorker);
+    }));
+    await Promise.all(workers);
+    const result = readFileSync(log, "utf8");
+    assert.doesNotMatch(result, /VIOLATION/);
+    assert.match(result, /entered/);
+  } finally {
+    destroy(dataRoot);
+    destroy(current.directory);
   }
 });
 

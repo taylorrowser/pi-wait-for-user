@@ -299,6 +299,46 @@ function publishLifecycleLock(paths, lock) {
   return result.published;
 }
 
+function unlinkIfOwned(path, identity) {
+  try {
+    const stat = lstatSync(path);
+    if (stat.dev !== identity.dev || stat.ino !== identity.ino) return false;
+    unlinkSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken) {
+  const ownerPath = join(paths.state, `lifecycle-recovery-${digestBytes(String(staleToken))}.owner`);
+  const owner = {
+    schemaVersion: 1,
+    type: "lifecycle-lock-recovery-owner",
+    staleToken,
+    pid: process.pid,
+    claimantToken,
+    claimedAt: new Date().toISOString(),
+  };
+  const published = publishStateFileExclusive(paths.state, ownerPath, owner);
+  if (published.published) return { path: ownerPath, identity: published.identity };
+  const active = readJson(ownerPath, "lifecycle recovery owner");
+  exactObject(active, "lifecycle recovery owner", ["schemaVersion", "type", "staleToken", "pid", "claimantToken", "claimedAt"]);
+  if (active.schemaVersion !== 1 || active.type !== "lifecycle-lock-recovery-owner"
+    || active.staleToken !== staleToken || !Number.isSafeInteger(active.pid) || active.pid < 1) {
+    fail("Malformed lifecycle recovery owner");
+  }
+  expectString(active.claimantToken, "lifecycle recovery claimant token");
+  expectDate(active.claimedAt, "lifecycle recovery claim date");
+  if (processAlive(active.pid)) fail("Stale lifecycle lock recovery is already active");
+  const stat = lstatSync(ownerPath);
+  if (!unlinkIfOwned(ownerPath, { dev: stat.dev, ino: stat.ino })) {
+    return acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken);
+  }
+  return acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken);
+}
+
 function acquireLifecycleLock(dataRoot, operation) {
   expectString(operation, "lifecycle operation");
   const paths = initializeLayout(dataRoot);
@@ -325,18 +365,30 @@ function acquireLifecycleLock(dataRoot, operation) {
         fail("Stale lifecycle lock recovery record does not match the interrupted lock");
       }
     }
-    const current = readJson(paths.lock, "lifecycle lock");
-    const claimed = readJson(recoveryPath, "lifecycle recovery claim");
-    if (current.token !== active.token || claimed.token !== active.token) fail("Lifecycle lock changed during stale recovery");
-    unlinkSync(paths.lock);
-    atomicWrite(recoveryPath, {
-      schemaVersion: 1,
-      type: "lifecycle-lock-recovery",
-      staleToken: active.token,
-      claimedByToken: token,
-      claimedAt: new Date().toISOString(),
-    });
-    if (!publishLifecycleLock(paths, lock)) return acquireLifecycleLock(dataRoot, operation);
+    const recoveryOwner = acquireLifecycleRecoveryOwner(paths, active.token, token);
+    try {
+      const current = readJson(paths.lock, "lifecycle lock");
+      const claimed = readJson(recoveryPath, "lifecycle recovery claim");
+      const staleStat = lstatSync(paths.lock);
+      const recoveryStat = lstatSync(recoveryPath);
+      if (current.token !== active.token || claimed.token !== active.token
+        || staleStat.dev !== recoveryStat.dev || staleStat.ino !== recoveryStat.ino) {
+        fail("Lifecycle lock changed during stale recovery");
+      }
+      if (!unlinkIfOwned(paths.lock, { dev: staleStat.dev, ino: staleStat.ino })) {
+        return acquireLifecycleLock(dataRoot, operation);
+      }
+      atomicWrite(recoveryPath, {
+        schemaVersion: 1,
+        type: "lifecycle-lock-recovery",
+        staleToken: active.token,
+        claimedByToken: token,
+        claimedAt: new Date().toISOString(),
+      });
+      if (!publishLifecycleLock(paths, lock)) return acquireLifecycleLock(dataRoot, operation);
+    } finally {
+      unlinkIfOwned(recoveryOwner.path, recoveryOwner.identity);
+    }
   }
   const capability = Object.freeze({});
   activeLifecycleCapabilities.add(capability);
