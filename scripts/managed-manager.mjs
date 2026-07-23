@@ -7,9 +7,14 @@ import { fileURLToPath } from "node:url";
 
 import {
   cleanupManagedState,
+  defaultManagedBinDirectory,
   defaultManagedDataRoot,
   disableManagedEntrypoint,
+  enableManagedOwnership,
+  executeStockPi,
   installAndActivate,
+  installManagedCompatibility,
+  readLegacyMigration,
   recoverPrevious,
   verifyManagedInstallation,
 } from "./lib/managed-runtime.mjs";
@@ -73,8 +78,9 @@ function activate(args) {
   const values = options(args);
   const allowed = new Set(["--data-root", "--platform", "--trust", "--channel", "--manifest", "--root-key", "--manager-archive", "--release-archive", "--now"]);
   for (const flag of values.keys()) if (!allowed.has(flag)) fail(`Unknown option: ${flag}`);
-  return installAndActivate({
-    dataRoot: values.get("--data-root") || dataRoot(),
+  const selectedDataRoot = values.get("--data-root") || dataRoot();
+  const activation = installAndActivate({
+    dataRoot: selectedDataRoot,
     platform: values.get("--platform") || nativePlatform(),
     trustEnvelope: readJson(required(values, "--trust")),
     channelEnvelope: readJson(required(values, "--channel")),
@@ -87,6 +93,28 @@ function activate(args) {
       ? (name) => { if (name === process.env.PI_MANAGED_INTERRUPT_AT) fail(`Interrupted at ${name}`); }
       : undefined,
   });
+  return { activation, migration: readLegacyMigration(selectedDataRoot) };
+}
+
+function installCompatibility(args) {
+  const values = options(args);
+  for (const flag of values.keys()) if (!["--data-root", "--bin-dir"].includes(flag)) fail(`Unknown option: ${flag}`);
+  const result = installManagedCompatibility(values.get("--data-root") || dataRoot(), {
+    binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
+  });
+  console.log(`Managed compatibility command ${result}.`);
+}
+
+function enableOwnership(args) {
+  const values = options(args);
+  for (const flag of values.keys()) if (!["--data-root", "--bin-dir"].includes(flag)) fail(`Unknown option: ${flag}`);
+  const result = enableManagedOwnership(values.get("--data-root") || dataRoot(), {
+    binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
+    checkpoint: process.env.PI_MANAGED_INTERRUPT_AT
+      ? (name) => { if (name === process.env.PI_MANAGED_INTERRUPT_AT) fail(`Interrupted at ${name}`); }
+      : undefined,
+  });
+  console.log(`Managed command ownership ${result}.`);
 }
 
 function verifyInstallation(args) {
@@ -117,8 +145,18 @@ try {
   if (args.length === 1 && args[0] === "--manager-version") {
     console.log(packageIdentity());
   } else if (args[0] === "managed" && args[1] === "activate") {
-    const activation = activate(args.slice(2));
+    const { activation, migration } = activate(args.slice(2));
     console.log(`Activated ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
+    if (migration) {
+      console.log(migration.disposition === "adopted-after-signed-verification"
+        ? `Adopted verified legacy Downstream Release from ${migration.legacyPath}.`
+        : `Legacy Downstream Release was not signed-payload identical and was left untouched at ${migration.legacyPath}.`);
+      console.log(migration.cleanup);
+    }
+  } else if (args[0] === "managed" && args[1] === "install-compatibility") {
+    installCompatibility(args.slice(2));
+  } else if (args[0] === "managed" && args[1] === "enable") {
+    enableOwnership(args.slice(2));
   } else if (args[0] === "managed" && args[1] === "verify") {
     verifyInstallation(args.slice(2));
   } else if (args.length === 3 && args[0] === "managed" && args[1] === "recover" && args[2] === "--previous") {
@@ -128,6 +166,8 @@ try {
     console.log(`Managed command ownership ${disableManagedEntrypoint(dataRoot())}.`);
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "cleanup") {
     console.log(`Removed ${cleanupManagedState(dataRoot())} verified temporary path(s).`);
+  } else if (args[0] === "managed" && args[1] === "stock" && args[2] === "--") {
+    process.exitCode = executeStockPi(dataRoot(), args.slice(3));
   } else if (args[0] === "managed") {
     fail("Unknown managed command; refusing to delegate it to Pi");
   } else {

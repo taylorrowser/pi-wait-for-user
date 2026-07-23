@@ -4,6 +4,7 @@ import {
   chmodSync,
   closeSync,
   copyFileSync,
+  cpSync,
   existsSync,
   fsyncSync,
   lstatSync,
@@ -16,6 +17,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -167,6 +169,11 @@ export function defaultManagedDataRoot(environment = process.env, platform = pro
   fail("Managed Installation supports macOS and Linux");
 }
 
+export function defaultManagedBinDirectory(environment = process.env) {
+  if (!environment.HOME) fail("HOME is required to select the managed bin directory");
+  return join(environment.HOME, ".local", "bin");
+}
+
 function layout(dataRoot) {
   const root = resolve(dataRoot);
   return {
@@ -176,7 +183,7 @@ function layout(dataRoot) {
     accepted: join(root, "state", "accepted-metadata.json"),
     config: join(root, "state", "config.json"),
     managers: join(root, "managers"),
-    releases: join(root, "releases"),
+    releases: join(root, "managed-releases"),
     receipts: join(root, "receipts"),
     artifacts: join(root, "artifacts"),
     leases: join(root, "leases"),
@@ -357,6 +364,93 @@ function comparePayload(actual, expected) {
     if (found[index].sha256 !== declared[index].sha256) fail(`Payload digest mismatch: ${declared[index].path}`);
     if (found[index].mode !== declared[index].mode) fail(`Payload mode mismatch: ${declared[index].path}`);
   }
+}
+
+function publishStableDispatcher(paths, selected) {
+  const destination = join(paths.root, "dispatcher");
+  const receiptPath = join(paths.state, "dispatcher.json");
+  if (pathExists(destination)) {
+    if (lstatSync(destination).isSymbolicLink() || !lstatSync(destination).isDirectory()) fail("Managed Dispatcher path is foreign");
+    const embeddedPath = join(destination, ".managed", "receipt.json");
+    const receipt = readJson(embeddedPath, "Managed Dispatcher receipt");
+    exactObject(receipt, "Managed Dispatcher receipt", [
+      "schemaVersion", "type", "ownedPath", "managerReleaseId", "platform", "sourceArtifact", "createdAt", "payload",
+    ]);
+    if (receipt.schemaVersion !== 1 || receipt.type !== "managed-dispatcher" || resolve(receipt.ownedPath) !== destination
+      || !Array.isArray(receipt.payload)) fail("Malformed Managed Dispatcher receipt");
+    ensureIdentifier(receipt.managerReleaseId, "Dispatcher Manager Release ID");
+    ensurePlatform(receipt.platform);
+    exactObject(receipt.sourceArtifact, "Dispatcher source artifact", ["name", "sha256", "size"]);
+    ensureRelativePath(receipt.sourceArtifact.name, "Dispatcher source artifact name");
+    expectString(receipt.sourceArtifact.sha256, "Dispatcher source artifact digest", sha256Pattern);
+    if (!Number.isSafeInteger(receipt.sourceArtifact.size) || receipt.sourceArtifact.size < 0) fail("Malformed Dispatcher source artifact");
+    expectDate(receipt.createdAt, "Dispatcher creation date");
+    receipt.payload.forEach((entry, index) => validatePayloadEntry(entry, `Managed Dispatcher receipt payload[${index}]`));
+    comparePayload(createPayloadInventory(destination).filter((entry) => !entry.path.startsWith(".managed/")), receipt.payload);
+    if (pathExists(receiptPath)) {
+      const central = readJson(receiptPath, "Managed Dispatcher receipt");
+      if (canonicalJson(central) !== canonicalJson(receipt)) fail("Managed Dispatcher receipt copies mismatch");
+    } else atomicWrite(receiptPath, receipt);
+    return join(destination, "managed-dispatcher.mjs");
+  }
+  if (pathExists(receiptPath)) fail("Managed Dispatcher receipt exists without its owned payload");
+  const source = join(selected.managerPath, "package", "scripts");
+  const required = ["managed-dispatcher.mjs", "lib/managed-runtime.mjs", "lib/release-metadata.mjs"];
+  for (const relativePath of required) {
+    const sourcePath = ensureNoSymlinkPath(selected.managerPath, join(source, relativePath), "Manager Release Dispatcher source path");
+    const declaredPath = relative(selected.managerPath, sourcePath).split(sep).join("/");
+    if (!selected.managerReceipt.payload.some((entry) => entry.path === declaredPath)) fail(`Manager Release does not own Dispatcher source: ${relativePath}`);
+  }
+  const stage = createStage(paths, "dispatcher");
+  try {
+    for (const relativePath of required) {
+      const output = join(stage.payload, relativePath);
+      mkdir(dirname(output));
+      copyFileSync(join(source, relativePath), output);
+      chmodSync(output, relativePath === "managed-dispatcher.mjs" ? 0o755 : 0o444);
+    }
+    const payload = createPayloadInventory(stage.payload);
+    const receipt = {
+      schemaVersion: 1,
+      type: "managed-dispatcher",
+      ownedPath: destination,
+      managerReleaseId: selected.pair.managerReleaseId,
+      platform: selected.pair.platform,
+      sourceArtifact: selected.managerReceipt.sourceArtifact,
+      createdAt: new Date().toISOString(),
+      payload,
+    };
+    mkdir(join(stage.payload, ".managed"));
+    writeFileSync(join(stage.payload, ".managed", "receipt.json"), serializeMetadata(receipt), { flag: "wx", mode: 0o600 });
+    renameSync(stage.payload, destination);
+    immutableTree(destination);
+    removeStage(stage.stage);
+    atomicWrite(receiptPath, receipt);
+    return join(destination, "managed-dispatcher.mjs");
+  } catch (error) {
+    removeStage(stage.stage);
+    throw error;
+  }
+}
+
+function legacyPayloadInventory(legacyPath, expected) {
+  if (!pathExists(legacyPath) || lstatSync(legacyPath).isSymbolicLink() || !lstatSync(legacyPath).isDirectory()) return null;
+  if (!expected.every((entry) => entry.path.startsWith("pi-wait-for-user/"))) return null;
+  let actual;
+  try { actual = createPayloadInventory(legacyPath); } catch { return null; }
+  const declared = expected.map((entry) => ({ ...entry, path: entry.path.slice("pi-wait-for-user/".length) }));
+  try { comparePayload(actual, declared); } catch { return null; }
+  return actual;
+}
+
+function adoptVerifiedLegacyPayload(stage, legacyPath, expected) {
+  if (!legacyPayloadInventory(legacyPath, expected)) return false;
+  const packagedPayload = join(stage.payload, "pi-wait-for-user");
+  makeWritable(packagedPayload);
+  rmSync(packagedPayload, { recursive: true, force: true });
+  cpSync(legacyPath, packagedPayload, { recursive: true, dereference: false, preserveTimestamps: true });
+  comparePayload(payloadWithoutManagerFiles(stage.payload), expected);
+  return true;
 }
 
 function pairFor(manifest, platform) {
@@ -743,6 +837,9 @@ export function installAndActivate(options) {
       runChecked(core, ["--help"], "Pi smoke check");
       const conformance = runChecked(core, ["conformance"], "Pi conformance");
       if (!/conformance passed/i.test(conformance)) fail("Pi conformance did not report success");
+      const legacyPath = join(paths.root, "releases", manifest.releaseId);
+      const legacyFound = pathExists(legacyPath);
+      const legacyAdopted = legacyFound && adoptVerifiedLegacyPayload(releaseStage, legacyPath, downstream.payload);
       checkpoint?.("downstream-staged");
 
       atomicWrite(paths.accepted, { schemaVersion: 1, trust: authority.acceptedState, channel: selection });
@@ -799,6 +896,17 @@ export function installAndActivate(options) {
         previous,
       };
       atomicWrite(paths.activation, activation);
+      const migrationPath = join(paths.state, "legacy-migration.json");
+      if (legacyFound) {
+        atomicWrite(migrationPath, {
+          schemaVersion: 1,
+          type: "legacy-migration",
+          releaseId: manifest.releaseId,
+          legacyPath,
+          disposition: legacyAdopted ? "adopted-after-signed-verification" : "fresh-install-legacy-untouched",
+          cleanup: `After confirming managed commands work, remove the legacy directory manually if desired: ${legacyPath}`,
+        });
+      } else if (pathExists(migrationPath)) unlinkSync(migrationPath);
       checkpoint?.("after-activation-switch");
       return activation;
     } catch (error) {
@@ -1046,18 +1154,305 @@ export function removeInstalledPair(dataRoot, pair) {
   });
 }
 
+const ownershipKeys = [
+  "schemaVersion", "type", "binDirectory", "dispatcher", "entrypoints", "stock", "managerReleaseId",
+  "downstreamReleaseId", "platform", "manifestSha256", "createdAt",
+];
+const stockKeys = ["resolvedPath", "executablePath", "sha256", "size", "version"];
+
+function validateEntrypoint(value, label) {
+  exactObject(value, label, ["path", "target"]);
+  expectString(value.path, `${label} path`);
+  expectString(value.target, `${label} target`);
+  return value;
+}
+
+function validateStockIdentity(value) {
+  if (value === null) return null;
+  exactObject(value, "Stock Pi identity", stockKeys);
+  expectString(value.resolvedPath, "Stock Pi resolved path");
+  expectString(value.executablePath, "Stock Pi executable path");
+  expectString(value.sha256, "Stock Pi digest", sha256Pattern);
+  if (!Number.isSafeInteger(value.size) || value.size < 0) fail("Malformed Stock Pi identity");
+  expectString(value.version, "Stock Pi version");
+  return value;
+}
+
+export function readLegacyMigration(dataRoot) {
+  const migrationPath = join(layout(dataRoot).state, "legacy-migration.json");
+  if (!pathExists(migrationPath)) return null;
+  const migration = readJson(migrationPath, "legacy migration state");
+  exactObject(migration, "legacy migration state", ["schemaVersion", "type", "releaseId", "legacyPath", "disposition", "cleanup"]);
+  if (migration.schemaVersion !== 1 || migration.type !== "legacy-migration") fail("Malformed legacy migration state");
+  ensureIdentifier(migration.releaseId, "legacy migration release ID");
+  expectString(migration.legacyPath, "legacy migration path");
+  if (!["adopted-after-signed-verification", "fresh-install-legacy-untouched"].includes(migration.disposition)) fail("Malformed legacy migration state");
+  expectString(migration.cleanup, "legacy migration cleanup instructions");
+  return migration;
+}
+
+export function readManagedOwnership(dataRoot) {
+  const paths = layout(dataRoot);
+  const ownership = readJson(join(paths.state, "entrypoints.json"), "managed entrypoint receipt");
+  exactObject(ownership, "managed entrypoint receipt", ownershipKeys);
+  if (ownership.schemaVersion !== 1 || ownership.type !== "managed-command-ownership") fail("Malformed managed entrypoint receipt");
+  expectString(ownership.binDirectory, "managed bin directory");
+  ensureIdentifier(ownership.managerReleaseId, "ownership Manager Release ID");
+  ensureIdentifier(ownership.downstreamReleaseId, "ownership Downstream Release ID");
+  ensurePlatform(ownership.platform);
+  expectString(ownership.manifestSha256, "ownership manifest digest", sha256Pattern);
+  exactObject(ownership.dispatcher, "Managed Dispatcher identity", ["path", "sha256", "size"]);
+  expectString(ownership.dispatcher.path, "Managed Dispatcher path");
+  expectString(ownership.dispatcher.sha256, "Managed Dispatcher digest", sha256Pattern);
+  if (!Number.isSafeInteger(ownership.dispatcher.size) || ownership.dispatcher.size < 0) fail("Malformed Managed Dispatcher identity");
+  exactObject(ownership.entrypoints, "managed entrypoints", ["pi", "compatibility"]);
+  validateEntrypoint(ownership.entrypoints.pi, "managed pi entrypoint");
+  validateEntrypoint(ownership.entrypoints.compatibility, "managed compatibility entrypoint");
+  const binDirectory = resolve(ownership.binDirectory);
+  const dispatcherPath = join(paths.root, "dispatcher", "managed-dispatcher.mjs");
+  if (resolve(ownership.entrypoints.pi.path) !== join(binDirectory, "pi")
+    || resolve(ownership.entrypoints.compatibility.path) !== join(binDirectory, "pi-wait-for-user")
+    || resolve(ownership.entrypoints.pi.target) !== dispatcherPath
+    || resolve(ownership.entrypoints.compatibility.target) !== dispatcherPath
+    || resolve(ownership.dispatcher.path) !== dispatcherPath) {
+    fail("Managed entrypoint receipt escapes its owned paths");
+  }
+  validateStockIdentity(ownership.stock);
+  expectDate(ownership.createdAt, "managed ownership creation date");
+  return ownership;
+}
+
+function commandPath(name, environment) {
+  for (const directory of (environment.PATH || "").split(":")) {
+    if (!directory) continue;
+    const candidate = resolve(directory, name);
+    if (!pathExists(candidate)) continue;
+    let stat;
+    try { stat = lstatSync(realpathSync(candidate)); } catch { continue; }
+    if (stat.isFile() && (stat.mode & 0o111) !== 0) return candidate;
+  }
+  return null;
+}
+
+function executableIdentity(path, environment) {
+  const executablePath = realpathSync(path);
+  const stat = lstatSync(executablePath);
+  if (!stat.isFile() || (stat.mode & 0o111) === 0) fail(`Stock Pi is not executable: ${path}`);
+  const observed = spawnSync(path, ["--version"], { encoding: "utf8", env: environment });
+  if (observed.error || observed.status !== 0) fail(`Cannot read Stock Pi version from ${path}`);
+  const version = observed.stdout.trim();
+  if (!version) fail(`Stock Pi returned no version identity: ${path}`);
+  return { resolvedPath: resolve(path), executablePath, sha256: sha256File(executablePath), size: stat.size, version };
+}
+
+function entrypointMatches(entrypoint) {
+  if (!pathExists(entrypoint.path)) return false;
+  const stat = lstatSync(entrypoint.path);
+  return stat.isSymbolicLink() && resolve(dirname(entrypoint.path), readlinkSync(entrypoint.path)) === resolve(entrypoint.target);
+}
+
+function assertEntrypointAvailable(entrypoint) {
+  if (!pathExists(entrypoint.path)) return;
+  if (!entrypointMatches(entrypoint)) fail(`Unowned foreign command collision: ${entrypoint.path}`);
+}
+
+function publishEntrypoint(entrypoint) {
+  if (entrypointMatches(entrypoint)) return;
+  try {
+    symlinkSync(entrypoint.target, entrypoint.path);
+  } catch (error) {
+    if (error?.code === "EEXIST") fail(`Unowned foreign command collision: ${entrypoint.path}`);
+    throw error;
+  }
+}
+
+function compatibilityReceiptPath(paths) {
+  return join(paths.state, "compatibility-entrypoint.json");
+}
+
+function readCompatibilityEntrypoint(paths) {
+  const receipt = readJson(compatibilityReceiptPath(paths), "managed compatibility entrypoint receipt");
+  exactObject(receipt, "managed compatibility entrypoint receipt", [
+    "schemaVersion", "type", "path", "target", "managerReleaseId", "downstreamReleaseId", "platform", "manifestSha256", "createdAt",
+  ]);
+  if (receipt.schemaVersion !== 1 || receipt.type !== "managed-compatibility-entrypoint") fail("Malformed managed compatibility entrypoint receipt");
+  ensureIdentifier(receipt.managerReleaseId, "compatibility ownership Manager Release ID");
+  ensureIdentifier(receipt.downstreamReleaseId, "compatibility ownership Downstream Release ID");
+  ensurePlatform(receipt.platform);
+  expectString(receipt.manifestSha256, "compatibility ownership manifest digest", sha256Pattern);
+  expectDate(receipt.createdAt, "compatibility ownership creation date");
+  return validateEntrypoint({ path: receipt.path, target: receipt.target }, "managed compatibility entrypoint");
+}
+
+function dispatcherIdentity(path) {
+  const target = resolve(path);
+  const stat = lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) === 0) fail(`Managed Dispatcher is missing or not executable: ${target}`);
+  return { path: target, sha256: sha256File(target), size: stat.size };
+}
+
+function assertDispatcherIdentity(dispatcher) {
+  const found = dispatcherIdentity(dispatcher.path);
+  if (found.sha256 !== dispatcher.sha256 || found.size !== dispatcher.size) fail("Managed Dispatcher identity changed");
+}
+
+export function installManagedCompatibility(dataRoot, options = {}) {
+  const environment = options.environment || process.env;
+  const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
+  verifyManagedInstallation(dataRoot);
+  const selected = validateActivePair(dataRoot);
+  return withLifecycleLock(dataRoot, "install managed compatibility command", () => {
+    const paths = initializeLayout(dataRoot);
+    const expected = {
+      path: join(binDirectory, "pi-wait-for-user"),
+      target: join(paths.root, "dispatcher", "managed-dispatcher.mjs"),
+    };
+    const receiptPath = compatibilityReceiptPath(paths);
+    if (pathExists(receiptPath)) {
+      const existing = readCompatibilityEntrypoint(paths);
+      if (resolve(existing.path) !== expected.path || resolve(existing.target) !== expected.target) {
+        fail("Managed compatibility command configuration mismatch");
+      }
+      assertEntrypointAvailable(existing);
+    } else {
+      if (pathExists(expected.path)) fail(`Unowned foreign command collision: ${expected.path}`);
+      if (pathExists(binDirectory) && (lstatSync(binDirectory).isSymbolicLink() || !lstatSync(binDirectory).isDirectory())) {
+        fail(`Managed bin directory is foreign: ${binDirectory}`);
+      }
+    }
+    const dispatcher = dispatcherIdentity(publishStableDispatcher(paths, selected));
+    if (dispatcher.path !== expected.target) fail("Managed Dispatcher path mismatch");
+    mkdir(binDirectory);
+    if (!pathExists(receiptPath)) {
+      atomicWrite(receiptPath, {
+        schemaVersion: 1,
+        type: "managed-compatibility-entrypoint",
+        ...expected,
+        managerReleaseId: selected.pair.managerReleaseId,
+        downstreamReleaseId: selected.pair.downstreamReleaseId,
+        platform: selected.pair.platform,
+        manifestSha256: selected.pair.manifestSha256,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    publishEntrypoint(expected);
+    return "installed";
+  });
+}
+
+export function enableManagedOwnership(dataRoot, options = {}) {
+  const environment = options.environment || process.env;
+  const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
+  verifyManagedInstallation(dataRoot);
+  const selected = validateActivePair(dataRoot);
+  return withLifecycleLock(dataRoot, "enable managed command ownership", () => {
+    const paths = initializeLayout(dataRoot);
+    const ownershipPath = join(paths.state, "entrypoints.json");
+    const expectedDispatcherPath = join(paths.root, "dispatcher", "managed-dispatcher.mjs");
+    let ownership;
+    let pendingOwnership;
+    let alreadyEnabled = false;
+    if (pathExists(ownershipPath)) {
+      ownership = readManagedOwnership(dataRoot);
+      if (resolve(ownership.binDirectory) !== binDirectory || resolve(ownership.dispatcher.path) !== expectedDispatcherPath) {
+        fail("Managed command ownership configuration mismatch");
+      }
+    } else {
+      const pi = { path: join(binDirectory, "pi"), target: expectedDispatcherPath };
+      const compatibility = { path: join(binDirectory, "pi-wait-for-user"), target: expectedDispatcherPath };
+      if (pathExists(pi.path)) fail(`Unowned foreign command collision: ${pi.path}`);
+      if (pathExists(compatibility.path)) {
+        if (!pathExists(compatibilityReceiptPath(paths))) fail(`Unowned foreign command collision: ${compatibility.path}`);
+        const installedCompatibility = readCompatibilityEntrypoint(paths);
+        if (resolve(installedCompatibility.path) !== compatibility.path || resolve(installedCompatibility.target) !== compatibility.target
+          || !entrypointMatches(installedCompatibility)) fail(`Managed compatibility entrypoint ownership mismatch: ${compatibility.path}`);
+      }
+      if (pathExists(binDirectory) && (lstatSync(binDirectory).isSymbolicLink() || !lstatSync(binDirectory).isDirectory())) {
+        fail(`Managed bin directory is foreign: ${binDirectory}`);
+      }
+      const resolvedStock = commandPath("pi", environment);
+      pendingOwnership = {
+        entrypoints: { pi, compatibility },
+        stock: resolvedStock ? executableIdentity(resolvedStock, environment) : null,
+      };
+    }
+
+    const dispatcher = dispatcherIdentity(publishStableDispatcher(paths, selected));
+    if (ownership) {
+      if (ownership.dispatcher.sha256 !== dispatcher.sha256 || ownership.dispatcher.size !== dispatcher.size) {
+        fail("Managed Dispatcher identity changed");
+      }
+      assertDispatcherIdentity(ownership.dispatcher);
+      alreadyEnabled = entrypointMatches(ownership.entrypoints.pi) && entrypointMatches(ownership.entrypoints.compatibility);
+    } else {
+      ownership = {
+        schemaVersion: 1,
+        type: "managed-command-ownership",
+        binDirectory,
+        dispatcher,
+        entrypoints: pendingOwnership.entrypoints,
+        stock: pendingOwnership.stock,
+        managerReleaseId: selected.pair.managerReleaseId,
+        downstreamReleaseId: selected.pair.downstreamReleaseId,
+        platform: selected.pair.platform,
+        manifestSha256: selected.pair.manifestSha256,
+        createdAt: new Date().toISOString(),
+      };
+      mkdir(binDirectory);
+      atomicWrite(ownershipPath, ownership);
+    }
+    assertEntrypointAvailable(ownership.entrypoints.pi);
+    assertEntrypointAvailable(ownership.entrypoints.compatibility);
+    publishEntrypoint(ownership.entrypoints.compatibility);
+    options.checkpoint?.("compatibility-entrypoint-published");
+    publishEntrypoint(ownership.entrypoints.pi);
+    options.checkpoint?.("pi-entrypoint-published");
+
+    const resolvedCommand = commandPath("pi", environment);
+    if (resolvedCommand !== resolve(ownership.entrypoints.pi.path)) {
+      const selectedDirectory = resolvedCommand ? dirname(resolvedCommand) : "the currently selected command directory";
+      fail(`Managed Dispatcher is installed but current command resolution selects ${resolvedCommand || "no pi command"}. Put ${binDirectory} before ${selectedDirectory} in PATH, run \`hash -r\`, then rerun: pi-wait-for-user managed enable --bin-dir ${binDirectory}`);
+    }
+    return alreadyEnabled ? "already enabled" : "enabled";
+  });
+}
+
+export function executeStockPi(dataRoot, args, { environment = process.env } = {}) {
+  const ownership = readManagedOwnership(dataRoot);
+  if (!ownership.stock) fail("No Stock Pi executable was recorded when managed ownership was enabled");
+  const stock = ownership.stock;
+  if (resolve(stock.resolvedPath) === resolve(ownership.entrypoints.pi.path)
+    || resolve(stock.executablePath) === resolve(ownership.dispatcher.path)) {
+    fail("Refusing dispatcher recursion while executing Stock Pi");
+  }
+  let current;
+  try { current = executableIdentity(stock.resolvedPath, environment); } catch (error) {
+    fail(`Recorded Stock Pi is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (canonicalJson(current) !== canonicalJson(stock)) fail(`Stock Pi identity changed at ${stock.resolvedPath}`);
+  console.error("Warning: Stock Pi cannot open downstream session files. Use it only for Stock Pi sessions.");
+  if (typeof process.execve === "function") process.execve(stock.resolvedPath, [stock.resolvedPath, ...args], environment);
+  const result = spawnSync(stock.resolvedPath, args, { stdio: "inherit", env: environment });
+  if (result.error) throw result.error;
+  return result.status ?? 1;
+}
+
 export function disableManagedEntrypoint(dataRoot) {
   const paths = initializeLayout(dataRoot);
   const ownershipPath = join(paths.state, "entrypoints.json");
   if (!existsSync(ownershipPath)) return "already disabled";
   return withLifecycleLock(dataRoot, "disable managed command ownership", () => {
     const ownership = readJson(ownershipPath, "managed entrypoint receipt");
-    exactObject(ownership, "managed entrypoint receipt", ["schemaVersion", "type", "path", "target"]);
-    if (ownership.schemaVersion !== 1 || ownership.type !== "managed-pi-entrypoint") fail("Malformed managed entrypoint receipt");
-    const path = resolve(ownership.path);
-    if (!existsSync(path)) return "already disabled";
+    let entrypoint;
+    if (ownership.type === "managed-pi-entrypoint") {
+      exactObject(ownership, "managed entrypoint receipt", ["schemaVersion", "type", "path", "target"]);
+      if (ownership.schemaVersion !== 1) fail("Malformed managed entrypoint receipt");
+      entrypoint = { path: ownership.path, target: ownership.target };
+    } else entrypoint = readManagedOwnership(dataRoot).entrypoints.pi;
+    const path = resolve(entrypoint.path);
+    if (!pathExists(path)) return "already disabled";
     const stat = lstatSync(path);
-    if (!stat.isSymbolicLink() || resolve(dirname(path), readlinkSync(path)) !== resolve(ownership.target)) fail("Managed pi entrypoint ownership mismatch");
+    if (!stat.isSymbolicLink() || resolve(dirname(path), readlinkSync(path)) !== resolve(entrypoint.target)) fail("Managed pi entrypoint ownership mismatch");
     unlinkSync(path);
     return "disabled";
   });
