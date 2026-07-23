@@ -1,6 +1,6 @@
 # Managed Installation components and command ownership
 
-This local runtime implements the stable Managed Dispatcher, versioned Manager Release seam, macOS/Linux command ownership, and patch-aware Managed Update flow defined by [`docs/design/managed-installation.md`](../design/managed-installation.md). GitHub issue [#59](https://github.com/taylorrowser/pi-wait-for-user/issues/59) delivered Activation; [#60](https://github.com/taylorrowser/pi-wait-for-user/issues/60) added Command Ownership and Legacy Downstream Installation adoption; [#61](https://github.com/taylorrowser/pi-wait-for-user/issues/61) adds authenticated network discovery, update routing, startup status, and Patch Lag. The complete retention/uninstall UX remains assigned to #62.
+This local runtime implements the stable Managed Dispatcher, versioned Manager Release seam, macOS/Linux command ownership, patch-aware Managed Update flow, rollback, retention, recovery, and uninstall defined by [`docs/design/managed-installation.md`](../design/managed-installation.md). GitHub issue [#59](https://github.com/taylorrowser/pi-wait-for-user/issues/59) delivered Activation; [#60](https://github.com/taylorrowser/pi-wait-for-user/issues/60) added Command Ownership and Legacy Downstream Installation adoption; [#61](https://github.com/taylorrowser/pi-wait-for-user/issues/61) added authenticated network discovery, update routing, startup status, and Patch Lag; and [#62](https://github.com/taylorrowser/pi-wait-for-user/issues/62) completes the local lifecycle state machines.
 
 ## Entrypoints
 
@@ -30,9 +30,12 @@ state/lifecycle.lock               exclusive mutating-operation owner
 state/lifecycle-recovery-*.json    durable stale-owner recovery claims
 state/update-status.json           last safe authenticated Channel/upstream status
 state/startup-check.json           24-hour startup-check throttle
-state/update-hold.json             optional exact Downstream Release hold
+state/update-hold.json             exact Downstream Release hold projection
+state/rollback-transaction.json     crash-safe rollback pair/hold commit intent
+state/update-hold-clear-transaction.json crash-safe successful-reactivation hold clear
 state/pinned-releases.json          verified pairs exempt from automatic retention
 state/pending-cleanup.json          leased pairs awaiting a later lifecycle pass
+state/uninstall-pending.json        receipt-bound pairs awaiting uninstall cleanup
 dispatcher/                        immutable receipt-owned stage 0 copied from a verified Manager Release
 managers/<manager-release-id>/     immutable Manager Release payload
 downstream-releases/<downstream-release-id>/ immutable Downstream Release payload
@@ -85,7 +88,7 @@ If a Legacy Downstream Installation for the selected release exists, Activation 
 
 ## Rollback, retention, and recovery
 
-`pi managed rollback` fully re-verifies the retained previous local pair before one atomic Activation switch. `--to <release-id>` selects only an already installed, fully verified pair and performs no network work. A successful switch retains the pair being left as `previous`, warns about the session compatibility boundary, and records an Update Hold for exactly the release being left. `pi managed unhold` clears that hold; passive startup notices suppress only an exact held candidate, while explicit `pi update` continues to retry it.
+`pi managed rollback` fully re-verifies the retained previous local pair before one atomic Activation switch. `--to <release-id>` selects only an already installed, fully verified pair and performs no network work. Before switching, rollback durably records one receipt-bound transaction containing the source pair, target pair, and exact Update Hold. The old stable Dispatcher continues to read the schema-v1 Activation, while hold readers interpret the transaction only after its target is selected. A crash before the switch therefore leaves the old pair and prior hold behavior; a crash after it exposes the complete target pair and exact new hold. The separate `state/update-hold.json` is then projected and the transaction retired. `pi managed unhold` clears the hold; passive startup notices suppress only an exact held candidate, while explicit `pi update` uses the symmetric hold-clear transaction so successful reactivation clears it at the same commit boundary.
 
 Automatic post-activation retention keeps the active pair, previous pair, every Pinned Release pair, and every live-leased pair. `pi managed pin [release-id]` and `unpin [release-id]` default to the active release. `pi managed prune` removes older receipt-proven pairs and records leased pairs for retry. Cleanup starts only after the Activation switch, and a later activation, prune, or explicit cleanup pass converges deferred work after leases end.
 

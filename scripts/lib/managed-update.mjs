@@ -17,6 +17,7 @@ import { enabledEnvironmentFlag } from "./managed-command.mjs";
 import {
   acceptManagedUpdateMetadata,
   assertLifecycleCapability,
+  clearManagedUpdateHoldForRelease,
   inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
   managedCandidateIdentityConflict,
@@ -350,7 +351,11 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   if (identityConflict) status.patchLag = null;
   status.checkedAt = now.toISOString();
   if (options.cache !== false) writeManagedStateJson(dataRoot, "update-status.json", status);
-  if (!candidateChanged) await withManagedUpdateStage("Update Hold cleanup", async () => clearExactUpdateHold(dataRoot, manifest.releaseId));
+  if (!candidateChanged) await withManagedUpdateStage("Update Hold cleanup", async () => clearExactUpdateHold(
+    dataRoot,
+    manifest.releaseId,
+    options.lifecycleCapability,
+  ));
   const common = {
     active: status.active,
     channel: status.channel,
@@ -383,9 +388,8 @@ function failureStage(error, fallback) {
   return errorMessage(error).match(/^Managed Update failed during ([^:]+):/)?.[1] || fallback;
 }
 
-function clearExactUpdateHold(dataRoot, releaseId) {
-  const hold = readUpdateHold(dataRoot);
-  if (hold?.releaseId === releaseId) unlinkSync(paths(dataRoot).hold);
+function clearExactUpdateHold(dataRoot, releaseId, lifecycleCapability) {
+  return clearManagedUpdateHoldForRelease(dataRoot, releaseId, { lifecycleCapability });
 }
 
 function activatedStatus(checked, candidate, now) {
@@ -462,7 +466,7 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
         lifecycleCapability: options.lifecycleCapability,
       }));
       stage = "post-activation cleanup";
-      clearExactUpdateHold(dataRoot, checked.candidate.releaseId);
+      clearExactUpdateHold(dataRoot, checked.candidate.releaseId, options.lifecycleCapability);
       writeManagedStateJson(dataRoot, "update-status.json", activatedStatus(checked, checked.candidate, options.now || new Date()));
       return { kind: "activated", active: checked.candidate, channel: checked.channel, activation };
     });
