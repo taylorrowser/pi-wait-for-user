@@ -2,29 +2,31 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
-  mkdtempSync,
   openSync,
   readFileSync,
-  readdirSync,
   renameSync,
   rmSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import {
+  acceptManagedUpdateMetadata,
+  inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
   readActivation,
-  readManagedOwnership,
   readManagedUpdateContext,
+  recordManagedUpdateDiagnostic,
   validateActivePair,
+  withLifecycleLockAsync,
+  withManagedTemporaryDirectory,
 } from "./managed-runtime.mjs";
 import {
   serializeMetadata,
@@ -37,7 +39,6 @@ import {
 const upstreamLatestVersionUrl = "https://pi.dev/api/latest-version";
 const startupThrottleMilliseconds = 24 * 60 * 60 * 1_000;
 const metadataLimit = 2 * 1024 * 1024;
-const diagnosticLimit = 10;
 const idPattern = /^[a-z0-9][a-z0-9.-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const versionPattern = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -55,23 +56,42 @@ function paths(dataRoot) {
     startup: join(root, "state", "startup-check.json"),
     startupLock: join(root, "state", "startup-check.lock"),
     hold: join(root, "state", "update-hold.json"),
-    diagnostics: join(root, "diagnostics"),
   };
 }
 
+function safeParent(path, label) {
+  const parent = dirname(path);
+  if (!existsSync(parent)) mkdirSync(parent, { recursive: true, mode: 0o700 });
+  const parentStat = lstatSync(parent);
+  if (parentStat.isSymbolicLink() || !parentStat.isDirectory()) fail(`${label} parent is foreign`);
+  if (existsSync(path)) {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) fail(`${label} path is foreign`);
+  }
+  return parent;
+}
+
 function atomicWrite(path, value) {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = join(dirname(path), `.${basename(path)}.tmp-${randomUUID()}`);
+  const parent = safeParent(path, "managed state");
+  const temporary = join(parent, `.${basename(path)}.tmp-${randomUUID()}`);
   const fd = openSync(temporary, "wx", 0o600);
   try {
     writeSync(fd, serializeMetadata(value));
+    fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
   renameSync(temporary, path);
+  try {
+    const directory = openSync(parent, "r");
+    try { fsyncSync(directory); } finally { closeSync(directory); }
+  } catch {
+    // Atomic rename remains safe on filesystems that do not support directory fsync.
+  }
 }
 
 function readJson(path, label) {
+  safeParent(path, label);
   try {
     const stat = lstatSync(path);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > metadataLimit) fail(`Malformed ${label}`);
@@ -124,18 +144,24 @@ function defaultTransport() {
       const declaredSize = Number(fetched.headers.get("content-length"));
       if (Number.isFinite(declaredSize) && declaredSize !== expected.size) fail(`${label} download size mismatch`);
       if (!fetched.body) fail(`${label} response has no body`);
-      await pipeline(Readable.fromWeb(fetched.body), writeFileStream(destination));
+      await pipeline(Readable.fromWeb(fetched.body), writeFileStream(destination, expected.size));
       const size = lstatSync(destination).size;
       if (size !== expected.size) fail(`${label} download size mismatch`);
     },
   };
 }
 
-function writeFileStream(path) {
+function writeFileStream(path, maximumSize) {
   const descriptor = openSync(path, "wx", 0o600);
   let closed = false;
+  let size = 0;
   return new Writable({
     write(chunk, _encoding, callback) {
+      size += chunk.length;
+      if (size > maximumSize) {
+        callback(new Error("Artifact response is larger than its signed size"));
+        return;
+      }
       try { writeSync(descriptor, chunk); callback(); } catch (error) { callback(error); }
     },
     final(callback) {
@@ -175,10 +201,10 @@ function compareVersions(left, right) {
   return 0;
 }
 
-function updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError) {
-  const candidateDiffers = manifest.releaseId !== context.active.releaseId
+function updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError, candidateCompatible) {
+  const candidateDiffers = candidateCompatible && (manifest.releaseId !== context.active.releaseId
     || manifest.manager.releaseId !== context.active.managerReleaseId
-    || selection.manifestSha256 !== context.active.manifestSha256;
+    || selection.manifestSha256 !== context.active.manifestSha256);
   const compatibleUpdate = candidateDiffers ? {
     releaseId: manifest.releaseId,
     managerReleaseId: manifest.manager.releaseId,
@@ -257,7 +283,7 @@ export function readManagedUpdateStatus(dataRoot) {
   return validateStatus(readJson(path, "managed update status"));
 }
 
-export async function checkManagedUpdate(dataRoot, options = {}) {
+async function checkManagedUpdateLocked(dataRoot, options = {}) {
   const transport = options.transport || defaultTransport();
   const now = options.now || new Date();
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("Invalid Managed Update check date");
@@ -286,6 +312,11 @@ export async function checkManagedUpdate(dataRoot, options = {}) {
     accepted: context.accepted.channel,
   }));
   const manifest = await during("Release Manifest verification", async () => verifyReleaseManifest(manifestEnvelope, { trust: authority, now }));
+  await during("metadata acceptance", async () => acceptManagedUpdateMetadata(dataRoot, {
+    trustEnvelope,
+    channelEnvelope,
+    manifestEnvelope,
+  }, { now, lifecycleLockHeld: true }));
 
   let observedUpstreamVersion;
   let upstreamError;
@@ -297,7 +328,12 @@ export async function checkManagedUpdate(dataRoot, options = {}) {
     upstreamError = errorMessage(error);
   }
 
-  const status = updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError);
+  const candidateChanged = manifest.releaseId !== context.active.releaseId
+    || manifest.manager.releaseId !== context.active.managerReleaseId
+    || selection.manifestSha256 !== context.active.manifestSha256;
+  const platformArchive = manifest.platformArchives.find((entry) => entry.platform === context.active.platform);
+  const candidateCompatible = Boolean(platformArchive) && manifest.manager.artifacts.length === 1;
+  const status = updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError, candidateCompatible);
   status.checkedAt = now.toISOString();
   if (options.cache !== false) atomicWrite(paths(dataRoot).status, status);
   const common = {
@@ -308,30 +344,24 @@ export async function checkManagedUpdate(dataRoot, options = {}) {
     source: { trustEnvelope, channelEnvelope, manifestEnvelope, manifestUrl },
   };
   if (status.compatibleUpdate) return { kind: "compatible-update", ...common, candidate: status.compatibleUpdate };
+  if (candidateChanged && !candidateCompatible) {
+    const incompatibility = platformArchive ? "Release Manifest does not select one Manager Release artifact" : `platform is not declared: ${context.active.platform}`;
+    return { kind: "incompatible", ...common, incompatibility };
+  }
   if (status.patchLag) return { kind: "patch-lag", ...common, patchLag: status.patchLag };
   return { kind: "current", ...common };
 }
 
-function failureStage(error, fallback) {
-  return errorMessage(error).match(/^Managed Update failed during ([^:]+):/)?.[1] || fallback;
+export async function checkManagedUpdate(dataRoot, options = {}) {
+  if (options.lifecycleLockHeld) return checkManagedUpdateLocked(dataRoot, options);
+  return withLifecycleLockAsync(dataRoot, "check Managed Update", () => checkManagedUpdateLocked(dataRoot, {
+    ...options,
+    lifecycleLockHeld: true,
+  }));
 }
 
-function recordDiagnostic(dataRoot, stage, error) {
-  const directory = paths(dataRoot).diagnostics;
-  try {
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    atomicWrite(join(directory, `${Date.now()}-${randomUUID()}.json`), {
-      schemaVersion: 1,
-      type: "managed-update-failure",
-      stage,
-      recordedAt: new Date().toISOString(),
-      error: errorMessage(error),
-    });
-    const diagnostics = readdirSync(directory).filter((name) => name.endsWith(".json")).sort();
-    for (const name of diagnostics.slice(0, Math.max(0, diagnostics.length - diagnosticLimit))) unlinkSync(join(directory, name));
-  } catch {
-    // Diagnostics must never hide the Managed Update failure.
-  }
+function failureStage(error, fallback) {
+  return errorMessage(error).match(/^Managed Update failed during ([^:]+):/)?.[1] || fallback;
 }
 
 function clearExactUpdateHold(dataRoot, releaseId) {
@@ -368,55 +398,64 @@ function activatedStatus(checked, candidate, now) {
   };
 }
 
-export async function performManagedUpdate(dataRoot, options = {}) {
+async function performManagedUpdateLocked(dataRoot, options = {}) {
   let stage = "discovery";
-  let temporary;
   try {
-    const checked = await checkManagedUpdate(dataRoot, options);
+    const checked = await checkManagedUpdate(dataRoot, { ...options, lifecycleLockHeld: true });
+    if (checked.kind === "incompatible") fail(`Managed Update failed during candidate compatibility: ${checked.incompatibility}`);
     if (checked.kind !== "compatible-update") return checked;
     const manifest = checked.source.manifestEnvelope.signed;
     const platform = readActivation(dataRoot).active.platform;
     const downstream = manifest.platformArchives.find((entry) => entry.platform === platform);
-    if (!downstream) fail(`Managed Update failed during candidate selection: platform is not declared: ${platform}`);
-    if (manifest.manager.artifacts.length !== 1) fail("Managed Update failed during candidate selection: Release Manifest must select one Manager Release artifact");
     const managerArtifact = manifest.manager.artifacts[0];
-    temporary = mkdtempSync(join(tmpdir(), "pi-managed-update-"));
-    const managerArchive = join(temporary, basename(managerArtifact.name));
-    const releaseArchive = join(temporary, basename(downstream.artifact.name));
-    stage = "Manager Release download";
-    await during(stage, () => (options.transport || defaultTransport()).artifact(
-      new URL(managerArtifact.name, checked.source.manifestUrl).href,
-      managerArchive,
-      "Manager Release",
-      managerArtifact,
-    ));
-    stage = "Downstream Release download";
-    await during(stage, () => (options.transport || defaultTransport()).artifact(
-      new URL(downstream.artifact.name, checked.source.manifestUrl).href,
-      releaseArchive,
-      "Downstream Release",
-      downstream.artifact,
-    ));
-    stage = "verification and activation";
-    const activation = await during(stage, async () => installAndActivateFromManagedConfig({
-      dataRoot,
-      trustEnvelope: checked.source.trustEnvelope,
-      channelEnvelope: checked.source.channelEnvelope,
-      manifestEnvelope: checked.source.manifestEnvelope,
-      managerArchive,
-      releaseArchive,
-      now: options.now || new Date(),
-      checkpoint: options.checkpoint,
-    }));
-    clearExactUpdateHold(dataRoot, checked.candidate.releaseId);
-    atomicWrite(paths(dataRoot).status, activatedStatus(checked, checked.candidate, options.now || new Date()));
-    return { kind: "activated", active: checked.candidate, channel: checked.channel, activation };
+    if (basename(managerArtifact.name) !== managerArtifact.name || basename(downstream.artifact.name) !== downstream.artifact.name) {
+      fail("Managed Update failed during candidate compatibility: artifact names must be flat paths");
+    }
+    const transport = options.transport || defaultTransport();
+    return await withManagedTemporaryDirectory(dataRoot, "update", async (temporary) => {
+      const managerArchive = join(temporary, managerArtifact.name);
+      const releaseArchive = join(temporary, downstream.artifact.name);
+      stage = "Manager Release download";
+      await during(stage, () => transport.artifact(
+        new URL(managerArtifact.name, checked.source.manifestUrl).href,
+        managerArchive,
+        "Manager Release",
+        managerArtifact,
+      ));
+      stage = "Downstream Release download";
+      await during(stage, () => transport.artifact(
+        new URL(downstream.artifact.name, checked.source.manifestUrl).href,
+        releaseArchive,
+        "Downstream Release",
+        downstream.artifact,
+      ));
+      stage = "verification and activation";
+      const activation = await during(stage, async () => installAndActivateFromManagedConfig({
+        dataRoot,
+        trustEnvelope: checked.source.trustEnvelope,
+        channelEnvelope: checked.source.channelEnvelope,
+        manifestEnvelope: checked.source.manifestEnvelope,
+        managerArchive,
+        releaseArchive,
+        now: options.now || new Date(),
+        checkpoint: options.checkpoint,
+        lifecycleLockHeld: true,
+      }));
+      clearExactUpdateHold(dataRoot, checked.candidate.releaseId);
+      atomicWrite(paths(dataRoot).status, activatedStatus(checked, checked.candidate, options.now || new Date()));
+      return { kind: "activated", active: checked.candidate, channel: checked.channel, activation };
+    });
   } catch (error) {
-    recordDiagnostic(dataRoot, failureStage(error, stage), error);
+    recordManagedUpdateDiagnostic(dataRoot, failureStage(error, stage), error);
     throw error;
-  } finally {
-    if (temporary) rmSync(temporary, { recursive: true, force: true });
   }
+}
+
+export async function performManagedUpdate(dataRoot, options = {}) {
+  return withLifecycleLockAsync(dataRoot, "perform Managed Update", () => performManagedUpdateLocked(dataRoot, {
+    ...options,
+    lifecycleLockHeld: true,
+  }));
 }
 
 export async function runManagedUpdate(dataRoot, options = {}) {
@@ -472,11 +511,15 @@ export function claimManagedStartupCheck(dataRoot, options = {}) {
   if (environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE || options.offline) return false;
   const now = options.now || new Date();
   const selected = paths(dataRoot);
-  mkdirSync(selected.state, { recursive: true, mode: 0o700 });
+  safeParent(selected.startupLock, "startup check lock");
   let lock;
   try { lock = openSync(selected.startupLock, "wx", 0o600); } catch (error) {
-    if (error?.code === "EEXIST") return false;
-    throw error;
+    if (error?.code !== "EEXIST") throw error;
+    const stat = lstatSync(selected.startupLock);
+    if (stat.isSymbolicLink() || !stat.isFile()) fail("Startup check lock is foreign");
+    if (now.getTime() - stat.mtimeMs <= 5 * 60 * 1_000) return false;
+    unlinkSync(selected.startupLock);
+    lock = openSync(selected.startupLock, "wx", 0o600);
   }
   closeSync(lock);
   try {
@@ -505,8 +548,9 @@ export function formatManagedStatus(dataRoot) {
   const hold = readUpdateHold(dataRoot);
   let stock = "not recorded";
   if (existsSync(join(paths(dataRoot).state, "entrypoints.json"))) {
-    const identity = readManagedOwnership(dataRoot).stock;
-    stock = identity ? `${identity.version} at ${identity.resolvedPath}` : "none recorded";
+    const identity = inspectStockPiIdentity(dataRoot);
+    stock = identity.recorded ? `${identity.recorded.version} at ${identity.recorded.resolvedPath}` : "none recorded";
+    if (identity.divergence) stock += `; divergence: ${identity.divergence}`;
   }
   const sessions = context.active.compatibility.sessions.identities.map((entry) => `${entry.id}@${entry.version}`).join(", ");
   const protocols = context.active.compatibility.sessions.readableCoreProtocolVersions.join(", ");

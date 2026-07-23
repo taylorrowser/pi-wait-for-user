@@ -135,7 +135,10 @@ case "\${1:-}" in
   --version) echo "${upstreamVersion}" ;;
   --help) echo "Pi fixture help" ;;
   conformance) echo "Deferred conformance passed (8/8)" ;;
-  *) printf 'PI_ARGS:'; printf ' <%s>' "$@"; printf '\n' ;;
+  *)
+    printf 'PI_ARGS:'; printf ' <%s>' "$@"; printf '\n'
+    case " $* " in *" update --extensions "*) exit "\${PI_TEST_PACKAGE_EXIT:-0}" ;; esac
+    ;;
 esac
 `);
   writeFileSync(join(releasePayload, "pi-wait-for-user", "question-tool", "extensions", "question-tool.ts"), "export {};\n");
@@ -1339,6 +1342,44 @@ test("stage-0 managed disable works without trusting a broken Activation and rem
   }
 });
 
+function managedNetworkEnvironment(candidate, directory, upstreamVersion = candidate.manifestEnvelope.signed.upstream.packageVersion) {
+  const files = {
+    trust: join(directory, "network-trust.json"),
+    channel: join(directory, "network-channel.json"),
+    manifest: join(directory, "network-manifest.json"),
+    upstream: join(directory, "network-upstream.json"),
+  };
+  writeFileSync(files.trust, serializeMetadata(candidate.trustEnvelope));
+  writeFileSync(files.channel, serializeMetadata(candidate.channelEnvelope));
+  writeFileSync(files.manifest, serializeMetadata(candidate.manifestEnvelope));
+  writeFileSync(files.upstream, serializeMetadata({ version: upstreamVersion }));
+  const manifestUrl = candidate.channelEnvelope.signed.manifest.url;
+  const mapping = {
+    "https://example.test/release-trust.json": files.trust,
+    [candidate.trustEnvelope.signed.channelUrl]: files.channel,
+    [manifestUrl]: files.manifest,
+    "https://pi.dev/api/latest-version": files.upstream,
+    [new URL(basename(candidate.managerArchive), manifestUrl).href]: candidate.managerArchive,
+    [new URL(basename(candidate.releaseArchive), manifestUrl).href]: candidate.releaseArchive,
+  };
+  const hook = join(directory, "managed-fetch-hook.mjs");
+  writeFileSync(hook, `
+import { readFileSync } from "node:fs";
+const mapping = JSON.parse(process.env.PI_MANAGED_NETWORK_MAP);
+globalThis.fetch = async (input) => {
+  const url = String(input);
+  const path = mapping[url];
+  if (!path) return new Response("not found", { status: 404 });
+  const body = readFileSync(path);
+  return new Response(body, { status: 200, headers: { "content-length": String(body.length) } });
+};
+`);
+  return {
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --import=${hook}`.trim(),
+    PI_MANAGED_NETWORK_MAP: JSON.stringify(mapping),
+  };
+}
+
 function updateTransport(candidate, { upstreamVersion = candidate.manifestEnvelope.signed.upstream.packageVersion, fail = new Map() } = {}) {
   const manifestUrl = candidate.channelEnvelope.signed.manifest.url;
   const documents = new Map([
@@ -1556,6 +1597,7 @@ test("cached startup status is throttled, isolated to interactive output, and re
     assert.equal(cachedManagedStartupNotice(dataRoot, { interactive: true, environment: { PI_OFFLINE: "1" } }), null);
     assert.equal(claimManagedStartupCheck(dataRoot, { now, environment: { PI_SKIP_VERSION_CHECK: "1" } }), false);
     assert.equal(claimManagedStartupCheck(dataRoot, { now, environment: { PI_OFFLINE: "1" } }), false);
+    writeFileSync(join(dataRoot, "state", "startup-check.lock"), "interrupted\n");
     assert.equal(claimManagedStartupCheck(dataRoot, { now }), true);
     assert.equal(claimManagedStartupCheck(dataRoot, { now: new Date(now.getTime() + 60_000) }), false);
     assert.equal(claimManagedStartupCheck(dataRoot, { now: new Date(now.getTime() + 86_400_001) }), true);
@@ -1631,25 +1673,220 @@ test("candidate verification failure removes temporary payloads, bounds diagnost
     activate(dataRoot, current);
     const diagnostics = join(dataRoot, "diagnostics");
     for (let index = 0; index < 12; index += 1) writeFileSync(join(diagnostics, `000-${String(index).padStart(2, "0")}.json`), "{}\n");
-    const before = new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("pi-managed-update-")));
     const transport = updateTransport(candidate);
     const artifact = transport.artifact.bind(transport);
+    const destinations = [];
     transport.artifact = async (url, destination, label) => {
+      destinations.push(destination);
       await artifact(url, destination, label);
       if (label === "Downstream Release") writeFileSync(destination, "untrusted executable payload");
     };
     await assert.rejects(performManagedUpdate(dataRoot, { transport, now }), /Downstream Release artifact size mismatch/);
     assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
-    assert.deepEqual(
-      new Set(readdirSync(tmpdir()).filter((name) => name.startsWith("pi-managed-update-") && !before.has(name))),
-      new Set(),
-    );
-    const retained = readdirSync(diagnostics).filter((name) => name.endsWith(".json"));
+    assert.ok(destinations.every((destination) => destination.startsWith(join(dataRoot, "tmp", "update.tmp-"))));
+    assert.equal(readdirSync(join(dataRoot, "tmp")).some((name) => name.startsWith("update.tmp-")), false);
+    let retained = readdirSync(diagnostics).filter((name) => name.endsWith(".json"));
     assert.ok(retained.length <= 10);
-    assert.ok(retained.some((name) => {
-      const value = JSON.parse(readFileSync(join(diagnostics, name), "utf8"));
-      return value.type === "managed-update-failure" && value.stage === "verification and activation";
-    }));
+    const diagnosticValues = retained.map((name) => JSON.parse(readFileSync(join(diagnostics, name), "utf8")));
+    assert.ok(diagnosticValues.some(
+      (value) => value.type === "managed-update-failure" && value.stage === "verification and activation",
+    ), JSON.stringify(diagnosticValues));
+    await assert.rejects(
+      performManagedUpdate(dataRoot, { transport: updateTransport(current), now }),
+      /Channel sequence replay/,
+    );
+    retained = readdirSync(diagnostics).filter((name) => name.endsWith(".json"));
+    assert.ok(retained.length <= 10);
+  } finally {
+    destroy(dataRoot);
+    destroy(current.directory);
+    destroy(candidate.directory);
+  }
+});
+
+test("startup never advertises a signed Channel candidate incompatible with the active platform", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-incompatible-"));
+  const current = fixture();
+  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7" });
+  try {
+    activate(dataRoot, current);
+    const manifest = structuredClone(candidate.manifestEnvelope.signed);
+    manifest.platformArchives[0].platform = "linux-arm64";
+    candidate.manifestEnvelope = signMetadata(manifest, "fixture-release", releasePrivate);
+    candidate.channelEnvelope = signMetadata({
+      ...candidate.channelEnvelope.signed,
+      manifest: {
+        ...candidate.channelEnvelope.signed.manifest,
+        sha256: digest(serializeMetadata(candidate.manifestEnvelope)),
+      },
+    }, "fixture-release", releasePrivate);
+    const checked = await checkManagedUpdate(dataRoot, { transport: updateTransport(candidate), now });
+    assert.equal(checked.kind, "incompatible");
+    assert.equal(readManagedUpdateStatus(dataRoot).compatibleUpdate, null);
+    assert.equal(cachedManagedStartupNotice(dataRoot, { interactive: true }), null);
+    await assert.rejects(
+      performManagedUpdate(dataRoot, { transport: updateTransport(candidate), now }),
+      /candidate compatibility: platform is not declared: linux-x64/,
+    );
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
+  } finally {
+    destroy(dataRoot);
+    destroy(current.directory);
+    destroy(candidate.directory);
+  }
+});
+
+test("managed status reports recorded Stock Pi identity divergence", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-stock-status-"));
+  const bin = mkdtempSync(join(tmpdir(), "managed-update-stock-status-bin-"));
+  const stockBin = mkdtempSync(join(tmpdir(), "managed-update-stock-status-command-"));
+  const current = fixture();
+  try {
+    activate(dataRoot, current);
+    const stock = join(stockBin, "pi");
+    writeExecutable(stock, "#!/bin/sh\nif [ \"${1:-}\" = --version ]; then echo stock-2.4; fi\n");
+    const environment = { PATH: `${bin}:${stockBin}:${dirname(process.execPath)}:/usr/bin:/bin` };
+    assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
+    assert.match(formatManagedStatus(dataRoot), new RegExp(`Stock Pi: stock-2.4 at ${stock.replaceAll("/", "\\/")}`));
+    writeExecutable(stock, "#!/bin/sh\necho changed\n");
+    assert.match(formatManagedStatus(dataRoot), /Stock Pi: stock-2.4.*divergence: Stock Pi identity changed/s);
+  } finally {
+    destroy(dataRoot);
+    destroy(bin);
+    destroy(stockBin);
+    destroy(current.directory);
+  }
+});
+
+test("explicit CLI renders current, Patch Lag, ordered --all success, and nonzero partial output", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-cli-all-"));
+  const current = fixture();
+  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7", managerArchive: current.managerArchive });
+  const later = fixture({ releaseId: "pi-v0.81.1-patch.8", managerArchive: current.managerArchive });
+  try {
+    activate(dataRoot, current);
+    const currentEnvironment = managedNetworkEnvironment(current, current.directory);
+    const currentResult = runDispatcher(dataRoot, ["update"], currentEnvironment);
+    assert.equal(currentResult.status, 0, currentResult.stderr);
+    assert.match(currentResult.stdout, /Already current: pi-v0\.81\.1-patch\.6/);
+
+    const lagEnvironment = managedNetworkEnvironment(current, current.directory, "0.82.0");
+    const lag = runDispatcher(dataRoot, ["update"], lagEnvironment);
+    assert.equal(lag.status, 0, lag.stderr);
+    assert.match(lag.stdout, /Patch Lag: pi-v0\.81\.1-patch\.6.*0\.81\.1.*0\.82\.0/s);
+
+    const allEnvironment = managedNetworkEnvironment(candidate, candidate.directory);
+    const all = runDispatcher(dataRoot, ["update", "--all"], allEnvironment);
+    assert.equal(all.status, 0, all.stderr);
+    const managedPhase = all.stdout.indexOf("Managed Update phase:");
+    const activated = all.stdout.indexOf("Activated Downstream Release pi-v0.81.1-patch.7");
+    const packagePhase = all.stdout.indexOf("Package update phase (newly active Pi):");
+    const packageInvocation = all.stdout.indexOf("<update> <--extensions>");
+    assert.ok(managedPhase >= 0 && managedPhase < activated && activated < packagePhase && packagePhase < packageInvocation, all.stdout);
+
+    const laterEnvironment = managedNetworkEnvironment(later, later.directory);
+    const partial = runDispatcher(dataRoot, ["update", "--all"], { ...laterEnvironment, PI_TEST_PACKAGE_EXIT: "17" });
+    assert.equal(partial.status, 17, `${partial.stdout}\n${partial.stderr}`);
+    assert.match(partial.stderr, /package update phase failed with exit code 17.*verified release remains active/i);
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.8");
+
+    const next = fixture({ releaseId: "pi-v0.81.1-patch.9", managerArchive: current.managerArchive });
+    try {
+      await checkManagedUpdate(dataRoot, { transport: updateTransport(next), now });
+      for (const args of [["--print", "hello"], ["--mode", "json"], ["--mode", "rpc"]]) {
+        const output = runDispatcher(dataRoot, args, { PI_SKIP_VERSION_CHECK: "" });
+        assert.equal(output.status, 0, output.stderr);
+        assert.doesNotMatch(`${output.stdout}${output.stderr}`, /compatible Downstream Release is available/);
+      }
+    } finally {
+      destroy(next.directory);
+    }
+  } finally {
+    destroy(dataRoot);
+    destroy(current.directory);
+    destroy(candidate.directory);
+    destroy(later.directory);
+  }
+});
+
+test("Managed Update serializes lifecycle work and refuses symlink-substituted status state", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-state-safety-"));
+  const foreignRoot = mkdtempSync(join(tmpdir(), "managed-update-state-foreign-"));
+  const current = fixture();
+  try {
+    activate(dataRoot, current);
+    const blocked = withLifecycleLock(dataRoot, "held for update test", () => (
+      checkManagedUpdate(dataRoot, { transport: updateTransport(current), now })
+    ));
+    await assert.rejects(blocked, /Managed lifecycle operation already active: held for update test/);
+
+    const foreign = join(foreignRoot, "foreign.json");
+    writeFileSync(foreign, "foreign\n");
+    symlinkSync(foreign, join(dataRoot, "state", "update-status.json"));
+    await assert.rejects(
+      performManagedUpdate(dataRoot, { transport: updateTransport(current), now }),
+      /managed state path is foreign/,
+    );
+    assert.equal(readFileSync(foreign, "utf8"), "foreign\n");
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
+  } finally {
+    destroy(dataRoot);
+    destroy(foreignRoot);
+    destroy(current.directory);
+  }
+});
+
+test("Managed Update preserves the old or complete new pair at every updater activation boundary", async () => {
+  const boundaries = [
+    "manager-staged", "downstream-staged", "metadata-accepted", "manager-published",
+    "downstream-published", "before-activation-switch", "after-activation-switch",
+  ];
+  for (const boundary of boundaries) {
+    const dataRoot = mkdtempSync(join(tmpdir(), `managed-update-boundary-${boundary}-`));
+    const current = fixture();
+    const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7", managerArchive: current.managerArchive });
+    try {
+      activate(dataRoot, current);
+      await assert.rejects(
+        performManagedUpdate(dataRoot, {
+          transport: updateTransport(candidate),
+          now,
+          checkpoint(name) { if (name === boundary) throw new Error(`Interrupted at ${name}`); },
+        }),
+        new RegExp(`Interrupted at ${boundary}`),
+      );
+      const active = readActivation(dataRoot).active.downstreamReleaseId;
+      assert.equal(active, boundary === "after-activation-switch" ? "pi-v0.81.1-patch.7" : "pi-v0.81.1-patch.6");
+    } finally {
+      destroy(dataRoot);
+      destroy(current.directory);
+      destroy(candidate.directory);
+    }
+  }
+});
+
+test("Manager and Downstream Release download failures are stage-specific and never switch Activation", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-download-failure-"));
+  const current = fixture();
+  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7", managerArchive: current.managerArchive });
+  try {
+    activate(dataRoot, current);
+    const manifestUrl = candidate.channelEnvelope.signed.manifest.url;
+    for (const [archivePath, expected] of [
+      [candidate.managerArchive, /Manager Release download: manager unavailable/],
+      [candidate.releaseArchive, /Downstream Release download: downstream unavailable/],
+    ]) {
+      const url = new URL(basename(archivePath), manifestUrl).href;
+      await assert.rejects(
+        performManagedUpdate(dataRoot, {
+          transport: updateTransport(candidate, { fail: new Map([[url, expected.source.includes("Manager") ? "manager unavailable" : "downstream unavailable"]]) }),
+          now,
+        }),
+        expected,
+      );
+      assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
+      assert.equal(readdirSync(join(dataRoot, "tmp")).some((name) => name.startsWith("update.tmp-")), false);
+    }
   } finally {
     destroy(dataRoot);
     destroy(current.directory);

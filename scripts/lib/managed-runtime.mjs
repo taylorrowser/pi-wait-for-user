@@ -215,7 +215,7 @@ function processAlive(pid) {
   }
 }
 
-export function withLifecycleLock(dataRoot, operation, callback) {
+function acquireLifecycleLock(dataRoot, operation) {
   expectString(operation, "lifecycle operation");
   const paths = initializeLayout(dataRoot);
   const token = randomUUID();
@@ -236,16 +236,24 @@ export function withLifecycleLock(dataRoot, operation, callback) {
   writeSync(fd, serializeMetadata(lock));
   fsyncSync(fd);
   closeSync(fd);
-  try {
-    return callback();
-  } finally {
+  return () => {
     try {
       const current = readJson(paths.lock, "lifecycle lock");
       if (current.token === token) unlinkSync(paths.lock);
     } catch {
       // Never remove a lock that no longer proves this operation owns it.
     }
-  }
+  };
+}
+
+export function withLifecycleLock(dataRoot, operation, callback) {
+  const release = acquireLifecycleLock(dataRoot, operation);
+  try { return callback(); } finally { release(); }
+}
+
+export async function withLifecycleLockAsync(dataRoot, operation, callback) {
+  const release = acquireLifecycleLock(dataRoot, operation);
+  try { return await callback(); } finally { release(); }
 }
 
 function validateArtifactBytes(path, expected, label) {
@@ -315,6 +323,12 @@ function removeStage(stage) {
   if (!existsSync(stage)) return;
   makeWritable(stage);
   rmSync(stage, { recursive: true, force: true });
+}
+
+export async function withManagedTemporaryDirectory(dataRoot, kind, callback) {
+  ensureIdentifier(kind, "managed temporary kind");
+  const stage = createStage(initializeLayout(dataRoot), kind);
+  try { return await callback(stage.payload); } finally { removeStage(stage.stage); }
 }
 
 function immutableTree(path) {
@@ -831,12 +845,12 @@ function saveArtifact(paths, source, expected) {
   return destination;
 }
 
-function diagnostic(paths, error) {
+function writeManagedDiagnostic(paths, type, stage, error) {
   try {
     atomicWrite(join(paths.diagnostics, `${Date.now()}-${randomUUID()}.json`), {
       schemaVersion: 1,
-      type: "activation-failure",
-      stage: "verification-and-activation",
+      type,
+      stage,
       recordedAt: new Date().toISOString(),
       error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
     });
@@ -847,6 +861,15 @@ function diagnostic(paths, error) {
   } catch {
     // A diagnostic must never mask the original verification failure.
   }
+}
+
+function diagnostic(paths, error) {
+  writeManagedDiagnostic(paths, "activation-failure", "verification-and-activation", error);
+}
+
+export function recordManagedUpdateDiagnostic(dataRoot, stage, error) {
+  expectString(stage, "Managed Update diagnostic stage");
+  writeManagedDiagnostic(initializeLayout(dataRoot), "managed-update-failure", stage, error);
 }
 
 function installAndActivateWithProvenance(options, provenanceType) {
@@ -862,11 +885,12 @@ function installAndActivateWithProvenance(options, provenanceType) {
     now = new Date(),
     checkpoint,
     legacyDirectories = [],
+    lifecycleLockHeld = false,
   } = options;
   ensurePlatform(platform);
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("Invalid activation verification date");
   if (!(rootKeys instanceof Map) || rootKeys.size === 0) fail("No pinned root keys configured");
-  return withLifecycleLock(dataRoot, `activate ${manifestEnvelope?.signed?.releaseId ?? "candidate"}`, () => {
+  const activate = () => {
     const paths = initializeLayout(dataRoot);
     let managerStage;
     let releaseStage;
@@ -992,7 +1016,10 @@ function installAndActivateWithProvenance(options, provenanceType) {
       diagnostic(paths, error);
       throw error;
     }
-  });
+  };
+  return lifecycleLockHeld
+    ? activate()
+    : withLifecycleLock(dataRoot, `activate ${manifestEnvelope?.signed?.releaseId ?? "candidate"}`, activate);
 }
 
 export function readManagedUpdateContext(dataRoot) {
@@ -1028,6 +1055,33 @@ export function readManagedUpdateContext(dataRoot) {
     channelEnvelope,
     manifestEnvelope,
   };
+}
+
+export function acceptManagedUpdateMetadata(dataRoot, metadata, options = {}) {
+  const accept = () => {
+    const selected = validateActivePair(dataRoot);
+    if (selected.config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {
+      fail("Managed Update requires root keys pinned by the reviewed installer");
+    }
+    const accepted = readAcceptedMetadataState(selected.paths);
+    if (!accepted) fail("Accepted metadata state is missing for existing Activation");
+    const authority = verifyTrustMetadata(metadata.trustEnvelope, {
+      trustedRootKeys: selected.config.rootKeys,
+      now: options.now || new Date(),
+      accepted: accepted.trust,
+    });
+    const channel = verifyChannel(metadata.channelEnvelope, {
+      trust: authority,
+      now: options.now || new Date(),
+      manifest: metadata.manifestEnvelope,
+      accepted: accepted.channel,
+    });
+    atomicWrite(selected.paths.accepted, { schemaVersion: 1, trust: authority.acceptedState, channel });
+    return { trust: authority.acceptedState, channel };
+  };
+  return options.lifecycleLockHeld
+    ? accept()
+    : withLifecycleLock(dataRoot, "accept Managed Update metadata", accept);
 }
 
 export function installAndActivate(options) {
@@ -1630,6 +1684,17 @@ export function enableManagedOwnership(dataRoot, options = {}) {
     }
     return alreadyEnabled ? "already enabled" : "enabled";
   });
+}
+
+export function inspectStockPiIdentity(dataRoot, { environment = process.env } = {}) {
+  const recorded = readManagedOwnership(dataRoot).stock;
+  if (!recorded) return { recorded: null, divergence: null };
+  try {
+    const current = executableIdentity(recorded.resolvedPath, environment, recorded);
+    return { recorded, divergence: canonicalJson(current) === canonicalJson(recorded) ? null : "Stock Pi identity changed" };
+  } catch (error) {
+    return { recorded, divergence: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export function executeStockPi(dataRoot, args, { environment = process.env } = {}) {
