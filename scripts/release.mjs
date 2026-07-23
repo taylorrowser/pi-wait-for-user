@@ -15,7 +15,7 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { loadReleaseInput } from "./lib/release-input.mjs";
+import { loadReleaseCandidateInput } from "./lib/release-input.mjs";
 import { createArchiveMetadata } from "./lib/release-metadata.mjs";
 
 const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -65,8 +65,8 @@ function readShellVariable(path, variable, label) {
 }
 
 function verifyRelease(root) {
-  const { releaseId, manifest } = loadReleaseInput(root);
-  expectEqual(manifest.schemaVersion, 1, "Release input schema");
+  const { releaseId, manifest } = loadReleaseCandidateInput(root);
+  expectEqual(manifest.schemaVersion, 1, "Release candidate input schema");
   expectEqual(manifest.releaseId, releaseId, "Package-derived release ID");
   expectEqual(manifest.tag, releaseId, "Release tag");
   expectEqual(JSON.stringify(manifest.binaryPlatforms), JSON.stringify(binaryPlatforms), "Binary platforms");
@@ -113,14 +113,14 @@ function verifyRelease(root) {
   expectEqual(sha256(fixtureGatePath), manifest.fixtureGate.sha256, "Fixture gate SHA-256");
 
   if (!manifest.sessionCompatibility || !manifest.manager || !manifest.provenance) {
-    fail("Release input must declare session, Manager Release, and provenance compatibility");
+    fail("Release candidate input must declare session, Manager Release, and provenance compatibility");
   }
 
   const releaseNotes = readFileSync(join(root, "releases", releaseId, "RELEASE_NOTES.md"), "utf8");
   expectIncludes(releaseNotes, `# Pi Wait for User · \`${releaseId}\``, "Release notes heading");
   expectIncludes(releaseNotes, `/download/${releaseId}/install.sh`, "Release notes install identity");
   const readme = readFileSync(join(root, "README.md"), "utf8");
-  expectIncludes(readme, `The active release is **\`${releaseId}\`**`, "README release identity");
+  expectIncludes(readme, `The packaged release candidate is **\`${releaseId}\`**`, "README release candidate identity");
   expectIncludes(readme, `/download/${releaseId}/install.sh`, "README install identity");
 
   const questionManifestPath = safePath(root, manifest.questionTool.manifestPath);
@@ -183,7 +183,7 @@ function bundleRelease(root, outputArgument, binaryDirectoryArgument) {
   const requiredCategories = gate.categories.map((category) => category.name);
   expectEqual(JSON.stringify(reportedCategories), JSON.stringify(requiredCategories), "Release report fixture categories");
 
-  if (!binaryDirectoryArgument) fail("Binary assets are required for the selected release");
+  if (!binaryDirectoryArgument) fail("Binary assets are required for the release candidate");
   const binaryDirectory = resolve(binaryDirectoryArgument);
   for (const name of binaryAssetNames) {
     if (!existsSync(join(binaryDirectory, name))) fail(`Missing required binary asset: ${name}`);
@@ -233,18 +233,22 @@ function bundleRelease(root, outputArgument, binaryDirectoryArgument) {
     copyFileSync(join(root, "releases", manifest.releaseId, "RELEASE_NOTES.md"), notesOutput);
 
     const questionManifestPath = safePath(root, manifest.questionTool.manifestPath);
-    const managerArtifacts = [
-      artifact(releaseAsset),
-      artifact(questionPackage),
-      artifact(installPath),
-      artifact(fixtureGateOutput),
-    ].sort((left, right) => left.name.localeCompare(right.name));
-    const releaseGates = [{ name: "release-candidate", status: "passed", report: artifact(candidateOutput) }];
+    const managerArtifacts = [artifact(releaseAsset)];
+    const questionToolPackage = artifact(questionPackage);
+    const bootstrap = { installer: artifact(installPath) };
+    const releaseGates = [{
+      name: "release-candidate",
+      status: "passed",
+      definition: artifact(fixtureGateOutput),
+      report: artifact(candidateOutput),
+    }];
     const releaseNotes = artifact(notesOutput);
     const provenanceArtifacts = [
       ...managerArtifacts,
+      questionToolPackage,
+      bootstrap.installer,
       ...platformArchives.map((entry) => entry.artifact),
-      ...releaseGates.map((entry) => entry.report),
+      ...releaseGates.flatMap((entry) => [entry.definition, entry.report]),
       releaseNotes,
     ].sort((left, right) => left.name.localeCompare(right.name)).map(({ name, sha256: digest }) => ({ name, sha256: digest }));
     const sourceCommit = process.env.GITHUB_SHA ?? process.env.RELEASE_SOURCE_COMMIT;
@@ -269,6 +273,7 @@ function bundleRelease(root, outputArgument, binaryDirectoryArgument) {
           name: manifest.questionTool.name,
           version: manifest.questionTool.version,
           manifest: artifact(questionManifestPath, manifest.questionTool.manifestPath),
+          package: questionToolPackage,
           coreProtocolVersions: manifest.questionTool.coreProtocolVersions,
           handlerId: manifest.questionTool.handlerId,
           handlerVersion: manifest.questionTool.handlerVersion,
@@ -281,6 +286,7 @@ function bundleRelease(root, outputArgument, binaryDirectoryArgument) {
         compatibleReleaseManifestVersions: manifest.manager.compatibleReleaseManifestVersions,
         artifacts: managerArtifacts,
       },
+      bootstrap,
       platformArchives,
       releaseGates,
       provenance: {

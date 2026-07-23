@@ -99,7 +99,7 @@ A package manager or version manager remains free to update or remove Stock Pi i
 
 A generated, signed `channel.json` at a stable raw GitHub repository URL is the sole mutable promotion pointer. It supersedes `releases/active.json`. During migration, any `active.json` compatibility output must be generated from the channel and verified; it must not remain an independent authority.
 
-The Release Channel has a monotonic sequence and selects one Release Manifest. The manager persists the highest accepted sequence and rejects lower signed sequences as replay. Equal sequence retries are allowed. A deliberate local rollback does not lower this value.
+The Release Channel has a monotonic sequence and selects one Release Manifest. The manager persists the highest accepted sequence, selected manifest identity, and canonical complete-envelope digest. It rejects lower signed sequences as replay and accepts an equal sequence only for a canonical-envelope-identical retry. A deliberate local rollback does not lower this value.
 
 The channel URL is carried by authenticated trust metadata so hosting can migrate without changing release identity. GitHub Releases continue to host immutable artifacts.
 
@@ -110,21 +110,22 @@ One signed immutable Release Manifest is authoritative for:
 - release ID and tag;
 - exact upstream repository, tag, commit, and package version;
 - ordered patch paths and digests;
-- Question Tool package, manifest, schema, protocol, handler identity, and versions;
+- the exact Question Tool package separately from its manifest, schema, protocol, handler identity, and versions;
 - downstream session identities and readable protocol/handler versions;
-- Manager Release compatibility and manager artifacts;
+- Manager Release compatibility and only artifacts that implement that named Manager Release;
+- bootstrap installer and release-gate definitions/reports in their explicit roles;
 - platform binary artifacts, extracted payload inventory, digests, and sizes;
 - required release-gate and conformance results;
 - provenance repository/workflow identity; and
 - release notes needed for user-facing compatibility status.
 
-`SHA256SUMS`, archive `release.json`, receipts, launch checks, docs, and package/bootstrap identity lines are generated projections. They are not independent identity authorities. #46 first makes current duplicated values fail closed; this design then removes those manual copies.
+`SHA256SUMS`, archive `release.json`, receipts, launch checks, docs, and package/bootstrap identity lines are generated projections. They are not independent identity authorities. Packaging and payload verification share one filesystem inventory contract, including normalized paths, symlink/file-kind rejection, size, digest, and declared mode. #46 first makes current duplicated values fail closed; this design then removes those manual copies.
 
 ### Signing keys
 
 The Managed Dispatcher pins an offline root public key. Versioned root-signed trust metadata authorizes expiring release keys. Authorized release keys sign Release Channels and Release Manifests.
 
-- Routine release-key rotation or revocation uses newer root-signed trust metadata.
+- Routine release-key rotation or revocation uses newer root-signed trust metadata. The manager persists the highest accepted trust version and canonical complete-envelope digest, rejecting lower versions and non-identical equal-version retries.
 - Normal root rotation is cross-signed by old and new roots and distributed through a compatible dispatcher update.
 - Suspected root compromise requires an explicitly reviewed new bootstrap. A remote chain trusted only because the compromised root signed it cannot repair that trust boundary.
 - Unknown trust, channel, or release-manifest schemas fail closed while leaving the active pair usable. The user is instructed to rerun the reviewed bootstrap.

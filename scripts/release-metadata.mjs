@@ -9,10 +9,12 @@ import {
   createArtifactManifest,
   createChecksums,
   createCompatibilityActiveRelease,
+  createReceipt,
   serializeMetadata,
   signMetadata,
   verifyChannel,
   verifyProvenance,
+  verifyReleaseIdentityProjections,
   verifyReleaseManifest,
   verifyTrustMetadata,
 } from "./lib/release-metadata.mjs";
@@ -64,13 +66,16 @@ function authority(options) {
     trust: verifyTrustMetadata(readJson(trustPath), {
       trustedRootKeys: new Map([[keyId, publicKey]]),
       now,
+      accepted: options.has("--accepted-trust-state")
+        ? readJson(resolve(options.get("--accepted-trust-state")))
+        : undefined,
     }),
     now,
   };
 }
 
 function signManifest(options) {
-  allowed(options, ["--input", "--provenance", "--trust", "--root-key", "--now", "--key-id", "--private-key", "--output"]);
+  allowed(options, ["--input", "--provenance", "--trust", "--root-key", "--accepted-trust-state", "--now", "--key-id", "--private-key", "--release-root", "--output"]);
   const unsigned = readJson(resolve(required(options, "--input")));
   const provenance = readJson(resolve(required(options, "--provenance")));
   verifyProvenance(unsigned, provenance);
@@ -80,7 +85,8 @@ function signManifest(options) {
     readFileSync(resolve(required(options, "--private-key")), "utf8"),
   );
   const { trust, now } = authority(options);
-  verifyReleaseManifest(envelope, { trust, now });
+  const verifiedManifest = verifyReleaseManifest(envelope, { trust, now });
+  if (options.has("--release-root")) verifyReleaseIdentityProjections(verifiedManifest, resolve(options.get("--release-root")));
   const output = resolve(required(options, "--output"));
   writeJson(output, envelope);
   console.log(`Signed and verified Release Manifest ${unsigned.releaseId}: ${output}`);
@@ -89,7 +95,7 @@ function signManifest(options) {
 function promote(options) {
   allowed(options, [
     "--manifest", "--trust", "--root-key", "--now", "--key-id", "--private-key", "--sequence", "--expires",
-    "--manifest-url", "--output", "--accepted-state", "--bootstrap",
+    "--manifest-url", "--output", "--accepted-state", "--accepted-trust-state", "--bootstrap",
   ]);
   const manifest = readJson(resolve(required(options, "--manifest")));
   const { trust, now } = authority(options);
@@ -111,7 +117,7 @@ function promote(options) {
   if (options.has("--accepted-state")) {
     accepted = readJson(resolve(options.get("--accepted-state")));
   } else if (options.get("--bootstrap") === "true" && sequence === 1) {
-    accepted = { sequence: 0, sha256: "bootstrap" };
+    accepted = undefined;
   } else {
     fail("Promotion requires --accepted-state, or --bootstrap true for Channel sequence 1");
   }
@@ -119,6 +125,7 @@ function promote(options) {
 
   const output = resolve(required(options, "--output"));
   mkdirSync(output, { recursive: true });
+  writeJson(join(output, "trust-state.json"), trust.acceptedState);
   writeJson(join(output, "channel.json"), channel);
   writeJson(join(output, "channel-state.json"), selection);
   writeJson(join(output, "active.json"), createCompatibilityActiveRelease(channel.signed, manifest));
@@ -130,10 +137,27 @@ function promote(options) {
   console.log(`Promoted ${signedManifest.releaseId} at Channel sequence ${sequence}: ${output}`);
 }
 
+function createVerifiedReceipt(options) {
+  allowed(options, [
+    "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--platform", "--owned-path", "--output",
+  ]);
+  const manifest = readJson(resolve(required(options, "--manifest")));
+  const { trust, now } = authority(options);
+  const signedManifest = verifyReleaseManifest(manifest, { trust, now });
+  const receipt = createReceipt(
+    signedManifest,
+    required(options, "--platform"),
+    required(options, "--owned-path"),
+  );
+  const output = resolve(required(options, "--output"));
+  writeJson(output, receipt);
+  console.log(`Generated verified receipt for ${signedManifest.releaseId}: ${output}`);
+}
+
 function verifyMetadata(options) {
   allowed(options, [
-    "--manifest", "--channel", "--trust", "--root-key", "--now", "--accepted-state", "--active",
-    "--artifact-manifest", "--checksums", "--archive-metadata-dir",
+    "--manifest", "--channel", "--trust", "--root-key", "--accepted-trust-state", "--now", "--accepted-state", "--active",
+    "--artifact-manifest", "--checksums", "--archive-metadata-dir", "--release-root",
   ]);
   const manifest = readJson(resolve(required(options, "--manifest")));
   const channel = readJson(resolve(required(options, "--channel")));
@@ -141,6 +165,7 @@ function verifyMetadata(options) {
   const accepted = options.has("--accepted-state") ? readJson(resolve(options.get("--accepted-state"))) : undefined;
   const selection = verifyChannel(channel, { trust, now, manifest, accepted });
   const signedManifest = manifest.signed;
+  if (options.has("--release-root")) verifyReleaseIdentityProjections(signedManifest, resolve(options.get("--release-root")));
   if (options.has("--active")) {
     createCompatibilityActiveRelease(channel.signed, manifest, { existing: readJson(resolve(options.get("--active"))) });
   }
@@ -164,9 +189,10 @@ function verifyMetadata(options) {
 function usage() {
   return [
     "Usage:",
-    "  release-metadata.mjs sign-manifest --input FILE --provenance FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --output FILE [--now DATE]",
-    "  release-metadata.mjs promote --manifest FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --sequence N --expires DATE --manifest-url URL --output DIR (--accepted-state FILE | --bootstrap true) [--now DATE]",
-    "  release-metadata.mjs verify --manifest FILE --channel FILE --trust FILE --root-key ID=FILE [--accepted-state FILE] [--active FILE --artifact-manifest FILE --checksums FILE --archive-metadata-dir DIR] [--now DATE]",
+    "  release-metadata.mjs sign-manifest --input FILE --provenance FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --output FILE [--release-root DIR] [--accepted-trust-state FILE] [--now DATE]",
+    "  release-metadata.mjs promote --manifest FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --sequence N --expires DATE --manifest-url URL --output DIR (--accepted-state FILE | --bootstrap true) [--accepted-trust-state FILE] [--now DATE]",
+    "  release-metadata.mjs receipt --manifest FILE --trust FILE --root-key ID=FILE --platform PLATFORM --owned-path PATH --output FILE [--accepted-trust-state FILE] [--now DATE]",
+    "  release-metadata.mjs verify --manifest FILE --channel FILE --trust FILE --root-key ID=FILE [--accepted-trust-state FILE] [--accepted-state FILE] [--active FILE --artifact-manifest FILE --checksums FILE --archive-metadata-dir DIR --release-root DIR] [--now DATE]",
   ].join("\n");
 }
 
@@ -175,6 +201,7 @@ try {
   const options = parseOptions(args);
   if (command === "sign-manifest") signManifest(options);
   else if (command === "promote") promote(options);
+  else if (command === "receipt") createVerifiedReceipt(options);
   else if (command === "verify") verifyMetadata(options);
   else fail(usage());
 } catch (error) {

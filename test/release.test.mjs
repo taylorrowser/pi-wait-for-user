@@ -22,9 +22,9 @@ const releaseCli = join(repositoryRoot, "scripts", "release.mjs");
 const releaseGateCli = join(repositoryRoot, "scripts", "release-gate.mjs");
 const releaseMetadataCli = join(repositoryRoot, "scripts", "release-metadata.mjs");
 const fixtureKeys = join(repositoryRoot, "test", "fixtures", "release-keys");
-const activeReleaseId = `pi-v${JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")).version}`;
-const activeManifest = JSON.parse(
-  readFileSync(join(repositoryRoot, "releases", activeReleaseId, "manifest.json"), "utf8"),
+const releaseCandidateId = `pi-v${JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")).version}`;
+const releaseCandidateInput = JSON.parse(
+  readFileSync(join(repositoryRoot, "releases", releaseCandidateId, "manifest.json"), "utf8"),
 );
 const temporaryRoots = [];
 
@@ -74,7 +74,7 @@ function copyBundleFixture() {
   ]) {
     cpSync(join(repositoryRoot, path), join(root, path), { recursive: true });
   }
-  const manifest = JSON.parse(readFileSync(join(root, "releases", activeReleaseId, "manifest.json"), "utf8"));
+  const manifest = JSON.parse(readFileSync(join(root, "releases", releaseCandidateId, "manifest.json"), "utf8"));
   const gate = JSON.parse(readFileSync(join(root, manifest.fixtureGate.path), "utf8"));
   const stages = gate.requiredStages.map((name) => ({
     name,
@@ -104,13 +104,13 @@ function verify(root) {
   });
 }
 
-test("the package-selected release manifest verifies every pinned input without an independent active pointer", () => {
+test("the release candidate input verifies every pinned identity without becoming an active Channel pointer", () => {
   const result = verify(repositoryRoot);
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(
     result.stdout,
-    new RegExp(`Verified ${activeReleaseId.replaceAll(".", "\\.")}: Pi v0\\.81\\.1, 13 patches, Question Tool ${activeManifest.questionTool.version.replaceAll(".", "\\.")}`),
+    new RegExp(`Verified ${releaseCandidateId.replaceAll(".", "\\.")}: Pi v0\\.81\\.1, 13 patches, Question Tool ${releaseCandidateInput.questionTool.version.replaceAll(".", "\\.")}`),
   );
 });
 
@@ -121,7 +121,7 @@ test("the repository does not carry an independent active release pointer", () =
 
   assert.equal(existsSync(join(root, "releases", "active.json")), false);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, new RegExp(`Verified ${activeReleaseId.replaceAll(".", "\\.")}`));
+  assert.match(result.stdout, new RegExp(`Verified ${releaseCandidateId.replaceAll(".", "\\.")}`));
 });
 
 test("the release gate lists every required fixture category", () => {
@@ -166,10 +166,10 @@ test("a passing release stages complete artifacts and a manifest for signing", (
       },
       archiveMetadata: {
         schemaVersion: 1,
-        releaseId: activeReleaseId,
-        upstream: activeManifest.upstream,
+        releaseId: releaseCandidateId,
+        upstream: releaseCandidateInput.upstream,
         platform,
-        questionTool: { name: activeManifest.questionTool.name, version: activeManifest.questionTool.version },
+        questionTool: { name: releaseCandidateInput.questionTool.name, version: releaseCandidateInput.questionTool.version },
       },
       payload: [{
         path: "pi-wait-for-user/pi-core",
@@ -216,6 +216,7 @@ test("a passing release stages complete artifacts and a manifest for signing", (
     ...authority,
     "--key-id", "fixture-release",
     "--private-key", join(fixtureKeys, "release-private.pem"),
+    "--release-root", root,
     "--output", manifestPath,
   ], { cwd: root, encoding: "utf8" });
   assert.equal(signed.status, 0, signed.stderr);
@@ -226,34 +227,59 @@ test("a passing release stages complete artifacts and a manifest for signing", (
     "--private-key", join(fixtureKeys, "release-private.pem"),
     "--sequence", "1",
     "--expires", "2026-08-01T00:00:00.000Z",
-    "--manifest-url", `https://example.test/${activeReleaseId}/release-manifest.json`,
+    "--manifest-url", `https://example.test/${releaseCandidateId}/release-manifest.json`,
     "--bootstrap", "true",
     "--output", output,
   ], { cwd: root, encoding: "utf8" });
   assert.equal(promoted.status, 0, promoted.stderr);
 
   const files = readdirSync(output);
-  assert.ok(files.includes(`pi-wait-for-user-${activeReleaseId}.tgz`));
-  assert.ok(files.includes(`taylorrowser-pi-question-tool-${activeManifest.questionTool.version}.tgz`));
+  assert.ok(files.includes(`pi-wait-for-user-${releaseCandidateId}.tgz`));
+  const packageListing = spawnSync("tar", ["-tzf", join(output, `pi-wait-for-user-${releaseCandidateId}.tgz`)], { encoding: "utf8" });
+  assert.equal(packageListing.status, 0, packageListing.stderr);
+  assert.doesNotMatch(packageListing.stdout, /release-keys|private\.pem/);
+  assert.ok(files.includes(`taylorrowser-pi-question-tool-${releaseCandidateInput.questionTool.version}.tgz`));
   assert.ok(files.includes("install.sh"));
   assert.ok(files.includes("pi-wait-for-user-darwin-arm64.tar.gz"));
   assert.ok(files.includes("pi-wait-for-user-linux-x64.tar.gz"));
   const unsigned = JSON.parse(readFileSync(join(output, ".release-metadata", "unsigned-manifest.json"), "utf8"));
-  assert.equal(unsigned.releaseId, activeReleaseId);
+  assert.equal(unsigned.releaseId, releaseCandidateId);
   assert.equal(unsigned.platformArchives.length, 6);
+  assert.deepEqual(unsigned.manager.artifacts.map((entry) => entry.name), [`pi-wait-for-user-${releaseCandidateId}.tgz`]);
+  assert.equal(unsigned.compatibility.questionTool.package.name, `taylorrowser-pi-question-tool-${releaseCandidateInput.questionTool.version}.tgz`);
+  assert.equal(unsigned.bootstrap.installer.name, "install.sh");
+  assert.equal(unsigned.releaseGates[0].definition.name, "fixture-gate.json");
   assert.equal(unsigned.provenance.repository, "taylorrowser/pi-wait-for-user");
   assert.equal(existsSync(join(output, "SHA256SUMS")), true);
   assert.equal(existsSync(join(output, "artifact-manifest.json")), true);
   assert.equal(existsSync(join(output, "active.json")), true);
+
+  const verified = spawnSync(process.execPath, [releaseMetadataCli, "verify",
+    "--manifest", manifestPath,
+    "--channel", join(output, "channel.json"),
+    ...authority,
+    "--release-root", root,
+  ], { cwd: root, encoding: "utf8" });
+  assert.equal(verified.status, 0, verified.stderr);
+
+  writeFileSync(join(root, "scripts", "bootstrap.sh"), `${readFileSync(join(root, "scripts", "bootstrap.sh"), "utf8")}\n# drift\n`);
+  const drifted = spawnSync(process.execPath, [releaseMetadataCli, "verify",
+    "--manifest", manifestPath,
+    "--channel", join(output, "channel.json"),
+    ...authority,
+    "--release-root", root,
+  ], { cwd: root, encoding: "utf8" });
+  assert.notEqual(drifted.status, 0);
+  assert.match(drifted.stderr, /bootstrap installer projection drift/i);
 });
 
 test("bundling refuses an incomplete required gate even if marked passed", () => {
   const root = copyReleaseFixture();
   mkdirSync(join(root, "scripts"), { recursive: true });
   cpSync(releaseCli, join(root, "scripts", "release.mjs"));
-  const manifest = JSON.parse(readFileSync(join(root, "releases", activeReleaseId, "manifest.json"), "utf8"));
+  const manifest = JSON.parse(readFileSync(join(root, "releases", releaseCandidateId, "manifest.json"), "utf8"));
   const gate = JSON.parse(readFileSync(join(root, manifest.fixtureGate.path), "utf8"));
-  const reportDirectory = join(root, "releases", activeReleaseId, "reports");
+  const reportDirectory = join(root, "releases", releaseCandidateId, "reports");
   mkdirSync(reportDirectory, { recursive: true });
   writeFileSync(join(reportDirectory, "release-candidate.json"), JSON.stringify({
     schemaVersion: 1,
@@ -279,11 +305,11 @@ test("bundling refuses a release-candidate report that did not pass", () => {
   const root = copyReleaseFixture();
   mkdirSync(join(root, "scripts"), { recursive: true });
   cpSync(releaseCli, join(root, "scripts", "release.mjs"));
-  const reportDirectory = join(root, "releases", activeReleaseId, "reports");
+  const reportDirectory = join(root, "releases", releaseCandidateId, "reports");
   mkdirSync(reportDirectory, { recursive: true });
   writeFileSync(join(reportDirectory, "release-candidate.json"), JSON.stringify({
     schemaVersion: 1,
-    releaseId: activeReleaseId,
+    releaseId: releaseCandidateId,
     result: "failed",
   }));
   const output = join(root, "dist");
@@ -308,22 +334,22 @@ for (const {
   {
     name: "bootstrap release ID",
     script: "bootstrap.sh",
-    original: `release_id="${activeReleaseId}"`,
-    replacement: `release_id="${activeReleaseId}-stale"`,
+    original: `release_id="${releaseCandidateId}"`,
+    replacement: `release_id="${releaseCandidateId}-stale"`,
     expectedError: /Bootstrap release ID/,
   },
   {
     name: "binary installer release ID",
     script: "install-binary.sh",
-    original: `release_id="${activeReleaseId}"`,
-    replacement: `release_id="${activeReleaseId}-stale"`,
+    original: `release_id="${releaseCandidateId}"`,
+    replacement: `release_id="${releaseCandidateId}-stale"`,
     expectedError: /Binary installer release ID/,
   },
   {
     name: "binary installer Pi version",
     script: "install-binary.sh",
-    original: `pi_version="${activeManifest.upstream.packageVersion}"`,
-    replacement: `pi_version="${activeManifest.upstream.packageVersion}-stale"`,
+    original: `pi_version="${releaseCandidateInput.upstream.packageVersion}"`,
+    replacement: `pi_version="${releaseCandidateInput.upstream.packageVersion}-stale"`,
     expectedError: /Binary installer Pi version/,
   },
 ]) {
@@ -343,8 +369,8 @@ for (const {
 
 test("release verification rejects release documentation identity drift", () => {
   const root = copyReleaseFixture();
-  const notes = join(root, "releases", activeReleaseId, "RELEASE_NOTES.md");
-  writeFileSync(notes, readFileSync(notes, "utf8").replace(`# Pi Wait for User · \`${activeReleaseId}\``, "# stale release"));
+  const notes = join(root, "releases", releaseCandidateId, "RELEASE_NOTES.md");
+  writeFileSync(notes, readFileSync(notes, "utf8").replace(`# Pi Wait for User · \`${releaseCandidateId}\``, "# stale release"));
 
   const result = verify(root);
 

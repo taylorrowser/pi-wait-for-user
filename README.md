@@ -2,7 +2,7 @@
 
 A maintained downstream Pi release that can stop an Agent Thread for durable human input, survive complete process teardown, and continue through an explicit Response, Interruption, Cancellation, resume, or abandonment path.
 
-The active release is **`pi-v0.81.1-patch.6`**. It combines:
+The packaged release candidate is **`pi-v0.81.1-patch.6`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 - the thirteen ordered durable-deferral patches in [`patches/active`](patches/active); and

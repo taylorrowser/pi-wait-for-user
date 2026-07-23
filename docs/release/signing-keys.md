@@ -9,6 +9,8 @@ The dispatcher or reviewed bootstrap pins the root public key. GitHub, TLS, the 
 
 No production private key belongs in this repository, a release archive, an Actions artifact, a log, or a fixture. Keys under `test/fixtures/release-keys/` are intentionally public test material and have no production authority.
 
+Clients persist two anti-replay checkpoints. Accepted trust state contains the highest root-signed trust version and the canonical complete-envelope digest; lower versions and non-identical equal-version retries fail closed. Accepted Channel state contains the highest sequence, selected manifest identity, and canonical complete-envelope digest; lower sequences and non-identical equal-sequence retries fail closed. These checkpoints are local state, never an independent release authority.
+
 ## Bootstrap boundary
 
 A fast `curl | sh` installation is an initial trust decision in the bytes returned over HTTPS. It does not authenticate itself. The reviewable bootstrap must pin the root public key and verify root-signed trust metadata before accepting a Release Channel, Release Manifest, or payload.
@@ -98,8 +100,8 @@ For each promotion:
 3. verify GitHub build provenance for **every payload artifact**, requiring `taylorrowser/pi-wait-for-user` and `.github/workflows/release.yml`;
 4. record each artifact name/digest plus that repository, workflow, and source commit in the Release Manifest;
 5. sign and verify the complete immutable manifest;
-6. generate `artifact-manifest.json`, `SHA256SUMS`, archive metadata, receipts, package/shell identities, and release documentation from (or check each against) that manifest;
-7. create a Channel with a higher sequence, or byte-for-byte retry the already accepted equal sequence;
+6. generate `artifact-manifest.json`, `SHA256SUMS`, archive metadata, receipts, and compatibility metadata from that manifest, and verify package, installer, shell, and release-documentation identities against it;
+7. create a Channel with a higher sequence, or canonical-envelope-identically retry the already accepted equal sequence;
 8. sign and verify the Channel, including its manifest digest; and
 9. publish the Channel atomically only after immutable artifacts and manifest are available.
 
