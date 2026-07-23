@@ -3,9 +3,24 @@ import { resolve } from "node:path";
 
 export const shellHashRemediation = "Run `hash -r`, then confirm this shell with: command -v pi";
 
-export function nativeManagedPlatform(platform = process.platform, architecture = process.arch) {
-  const os = platform === "darwin" ? "darwin" : platform;
-  const arch = architecture === "x64" ? "x64" : architecture;
+export function parseManagedOptions(args, { booleanFlags = [] } = {}) {
+  const values = new Map();
+  while (args.length > 0) {
+    const flag = args.shift();
+    if (!flag?.startsWith("--") || values.has(flag)) throw new Error("Malformed managed command options");
+    if (booleanFlags.includes(flag)) values.set(flag, true);
+    else {
+      const value = args.shift();
+      if (!value) throw new Error(`Missing value for ${flag}`);
+      values.set(flag, value);
+    }
+  }
+  return values;
+}
+
+export function nativeManagedPlatform() {
+  const os = process.platform === "darwin" ? "darwin" : process.platform;
+  const arch = process.arch === "x64" ? "x64" : process.arch;
   const identity = `${os}-${arch}`;
   if (!/^(?:darwin|linux)-(?:arm64|x64)$/.test(identity)) throw new Error(`Unsupported managed platform: ${identity}`);
   return identity;
@@ -27,16 +42,33 @@ function required(values, flag) {
   return value;
 }
 
-export function managedActivationOptions(values, { dataRoot, now = new Date(), checkpoint } = {}) {
+export function readPinnedRootKeys(path) {
+  const document = readJsonFile(path);
+  if (document?.schemaVersion !== 1 || !Array.isArray(document.rootKeys) || document.rootKeys.length === 0
+    || Object.keys(document).sort().join(",") !== "rootKeys,schemaVersion") {
+    throw new Error("Malformed pinned root-key configuration");
+  }
+  const keys = new Map();
+  for (const entry of document.rootKeys) {
+    if (!entry || Object.keys(entry).sort().join(",") !== "keyId,publicKey"
+      || typeof entry.keyId !== "string" || !entry.keyId || typeof entry.publicKey !== "string" || !entry.publicKey
+      || keys.has(entry.keyId)) throw new Error("Malformed pinned root-key configuration");
+    keys.set(entry.keyId, entry.publicKey);
+  }
+  return keys;
+}
+
+export function managedActivationOptions(values, { dataRoot, now = new Date(), checkpoint, rootKeys } = {}) {
   return {
     dataRoot,
     platform: values.get("--platform") || nativeManagedPlatform(),
     trustEnvelope: readJsonFile(required(values, "--trust")),
     channelEnvelope: readJsonFile(required(values, "--channel")),
     manifestEnvelope: readJsonFile(required(values, "--manifest")),
-    rootKeys: new Map([parseRootKeyOption(required(values, "--root-key"))]),
+    rootKeys: rootKeys || new Map([parseRootKeyOption(required(values, "--root-key"))]),
     managerArchive: resolve(required(values, "--manager-archive")),
     releaseArchive: resolve(required(values, "--release-archive")),
+    legacyDirectories: values.has("--legacy-dir") ? [resolve(values.get("--legacy-dir"))] : [],
     now,
     checkpoint,
   };

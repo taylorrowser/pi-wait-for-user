@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   legacyMigrationMessages,
   managedActivationOptions,
+  parseManagedOptions,
+  readPinnedRootKeys,
   shellHashRemediation,
 } from "./lib/managed-command.mjs";
 import {
@@ -22,30 +24,17 @@ function fail(message) {
 }
 
 function parseArguments(args) {
-  const values = new Map();
-  let managePi = false;
-  while (args.length > 0) {
-    const flag = args.shift();
-    if (flag === "--manage-pi") {
-      if (managePi) fail("Duplicate option: --manage-pi");
-      managePi = true;
-      continue;
-    }
-    if (!flag?.startsWith("--") || values.has(flag)) fail(usage());
-    const value = args.shift();
-    if (!value) fail(`Missing value for ${flag}`);
-    values.set(flag, value);
-  }
+  const values = parseManagedOptions(args, { booleanFlags: ["--manage-pi"] });
   const allowed = new Set([
-    "--data-root", "--bin-dir", "--platform", "--trust", "--channel", "--manifest",
-    "--root-key", "--manager-archive", "--release-archive",
+    "--manage-pi", "--data-root", "--bin-dir", "--platform", "--trust", "--channel", "--manifest",
+    "--manager-archive", "--release-archive", "--legacy-dir",
   ]);
   for (const flag of values.keys()) if (!allowed.has(flag)) fail(`Unknown option: ${flag}`);
-  return { values, managePi };
+  return { values, managePi: values.has("--manage-pi") };
 }
 
 function usage() {
-  return "Usage: managed-installer.mjs [--manage-pi] --trust PATH --channel PATH --manifest PATH --root-key KEY_ID=PUBLIC_KEY_PATH --manager-archive PATH --release-archive PATH [--data-root PATH] [--bin-dir PATH] [--platform PLATFORM]";
+  return "Usage: managed-installer.mjs [--manage-pi] --trust PATH --channel PATH --manifest PATH --manager-archive PATH --release-archive PATH [--data-root PATH] [--bin-dir PATH] [--legacy-dir PATH] [--platform PLATFORM]";
 }
 
 try {
@@ -53,7 +42,8 @@ try {
   const dataRoot = resolve(values.get("--data-root") || defaultManagedDataRoot());
   const binDirectory = resolve(values.get("--bin-dir") || defaultManagedBinDirectory());
   preflightManagedCommandOwnership(dataRoot, { binDirectory, managePi });
-  const activation = installAndActivate(managedActivationOptions(values, { dataRoot }));
+  const rootKeys = readPinnedRootKeys(join(import.meta.dirname, "managed-root-keys.json"));
+  const activation = installAndActivate(managedActivationOptions(values, { dataRoot, rootKeys }));
   installManagedCompatibility(dataRoot, { binDirectory });
   if (managePi) enableManagedOwnership(dataRoot, { binDirectory });
   console.log(`${managePi ? "Managed" : "Side-by-side"} installation ready: ${activation.active.downstreamReleaseId}.`);

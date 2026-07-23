@@ -663,7 +663,7 @@ test("signed-payload-identical legacy installation is adopted only after complet
     assert.equal(migration.disposition, "adopted-after-signed-verification");
     assert.equal(existsSync(legacy), true);
     assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
-    assert.match(migration.cleanup, /remove the legacy directory manually/);
+    assert.match(migration.cleanup, /remove legacy directories manually/);
 
     destroy(legacy);
     activate(dataRoot, candidate);
@@ -678,15 +678,20 @@ test("unverified legacy installation is untouched while a fresh Downstream Relea
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-legacy-fresh-"));
   const candidate = fixture();
   const legacy = join(dataRoot, "releases", "pi-v0.81.1-patch.6");
+  const olderLegacy = join(dataRoot, "releases", "pi-v0.81.1-patch.5");
   try {
     mkdirSync(legacy, { recursive: true });
+    mkdirSync(olderLegacy, { recursive: true });
     writeFileSync(join(legacy, "keep-foreign"), "untouched\n");
+    writeFileSync(join(olderLegacy, "keep-older"), "older\n");
     activate(dataRoot, candidate);
     const migration = readLegacyMigration(dataRoot);
     assert.equal(migration.disposition, "fresh-install-legacy-untouched");
     assert.equal(readFileSync(join(legacy, "keep-foreign"), "utf8"), "untouched\n");
+    assert.equal(readFileSync(join(olderLegacy, "keep-older"), "utf8"), "older\n");
     assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
     assert.match(migration.cleanup, new RegExp(legacy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(migration.cleanup, new RegExp(olderLegacy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     destroy(dataRoot);
     destroy(candidate.directory);
@@ -699,6 +704,17 @@ test("installer claims pi only with explicit --manage-pi", () => {
   const trust = join(root, "trust.json");
   const channel = join(root, "channel.json");
   const manifest = join(root, "manifest.json");
+  const installerRoot = join(root, "pinned-installer");
+  const pinnedInstaller = join(installerRoot, "managed-installer.mjs");
+  mkdirSync(join(installerRoot, "lib"), { recursive: true });
+  cpSync(managedInstaller, pinnedInstaller);
+  for (const library of ["managed-command.mjs", "managed-runtime.mjs", "release-metadata.mjs"]) {
+    cpSync(join(repositoryRoot, "scripts", "lib", library), join(installerRoot, "lib", library));
+  }
+  writeFileSync(join(installerRoot, "managed-root-keys.json"), serializeMetadata({
+    schemaVersion: 1,
+    rootKeys: [{ keyId: "fixture-root", publicKey: rootPublic }],
+  }));
   writeFileSync(trust, serializeMetadata(candidate.trustEnvelope));
   writeFileSync(channel, serializeMetadata(candidate.channelEnvelope));
   writeFileSync(manifest, serializeMetadata(candidate.manifestEnvelope));
@@ -707,7 +723,6 @@ test("installer claims pi only with explicit --manage-pi", () => {
     "--trust", trust,
     "--channel", channel,
     "--manifest", manifest,
-    "--root-key", `fixture-root=${join(keys, "root-public.pem")}`,
     "--manager-archive", candidate.managerArchive,
     "--release-archive", candidate.releaseArchive,
   ];
@@ -717,18 +732,18 @@ test("installer claims pi only with explicit --manage-pi", () => {
     const legacy = join(sideBySideRoot, "releases", "pi-v0.81.1-patch.6");
     mkdirSync(dirname(legacy), { recursive: true });
     cpSync(join(candidate.directory, "release-payload", "pi-wait-for-user"), legacy, { recursive: true });
-    const sideBySide = spawnSync(process.execPath, [managedInstaller,
+    const sideBySide = spawnSync(process.execPath, [pinnedInstaller,
       ...common, "--data-root", sideBySideRoot, "--bin-dir", sideBySideBin,
     ], { encoding: "utf8", env: { ...process.env, PATH: `${sideBySideBin}:${dirname(process.execPath)}:/usr/bin:/bin` } });
     assert.equal(sideBySide.status, 0, sideBySide.stderr);
     assert.equal(existsSync(join(sideBySideBin, "pi")), false);
     assert.equal(existsSync(join(sideBySideBin, "pi-wait-for-user")), true);
     assert.match(sideBySide.stdout, /Adopted verified legacy Downstream Release/);
-    assert.match(sideBySide.stdout, /remove the legacy directory manually/);
+    assert.match(sideBySide.stdout, /remove legacy directories manually/);
 
     const managedRoot = join(root, "managed-data");
     const managedBin = join(root, "managed-bin");
-    const managed = spawnSync(process.execPath, [managedInstaller,
+    const managed = spawnSync(process.execPath, [pinnedInstaller,
       "--manage-pi", ...common, "--data-root", managedRoot, "--bin-dir", managedBin,
     ], { encoding: "utf8", env: { ...process.env, PATH: `${managedBin}:${dirname(process.execPath)}:/usr/bin:/bin` } });
     assert.equal(managed.status, 0, managed.stderr);
@@ -741,7 +756,7 @@ test("installer claims pi only with explicit --manage-pi", () => {
     const collisionBin = join(root, "collision-bin");
     mkdirSync(collisionBin);
     writeFileSync(join(collisionBin, "pi"), "foreign\n");
-    const collided = spawnSync(process.execPath, [managedInstaller,
+    const collided = spawnSync(process.execPath, [pinnedInstaller,
       "--manage-pi", ...common, "--data-root", collisionRoot, "--bin-dir", collisionBin,
     ], { encoding: "utf8", env: { ...process.env, PATH: `${collisionBin}:${dirname(process.execPath)}:/usr/bin:/bin` } });
     assert.notEqual(collided.status, 0);
@@ -761,7 +776,6 @@ test("plain side-by-side setup publishes only compatibility, which can explicitl
   const environment = {
     ...process.env,
     PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
-    PI_MANAGED_DATA_ROOT: dataRoot,
     PI_MANAGED_PLATFORM: "linux-x64",
   };
   try {
@@ -877,6 +891,33 @@ test("managed enable records npm, pnpm, Bun, and mise-style Stock Pi paths witho
       destroy(root);
       destroy(candidate.directory);
     }
+  }
+});
+
+test("managed enable never records another Managed Dispatcher as Stock Pi", () => {
+  const root = mkdtempSync(join(tmpdir(), "managed-runtime-other-dispatcher-"));
+  const firstDataRoot = join(root, "first-data");
+  const secondDataRoot = join(root, "second-data");
+  const firstBin = join(root, "first-bin");
+  const secondBin = join(root, "second-bin");
+  const first = fixture();
+  const second = fixture();
+  try {
+    activate(firstDataRoot, first);
+    assert.equal(runManager(firstDataRoot, ["managed", "enable", "--bin-dir", firstBin], {
+      PATH: `${firstBin}:/usr/bin:/bin`,
+    }).status, 0);
+    activate(secondDataRoot, second);
+    const result = runManager(secondDataRoot, ["managed", "enable", "--bin-dir", secondBin], {
+      PATH: `${secondBin}:${firstBin}:/usr/bin:/bin`,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /another Managed Dispatcher, not Stock Pi/);
+    assert.equal(existsSync(join(secondDataRoot, "state", "entrypoints.json")), false);
+  } finally {
+    destroy(root);
+    destroy(first.directory);
+    destroy(second.directory);
   }
 });
 

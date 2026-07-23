@@ -453,16 +453,30 @@ function adoptVerifiedLegacyPayload(stage, legacyPath, expected) {
   return true;
 }
 
-function updateLegacyMigration(paths, { legacyFound, legacyAdopted, legacyPath, releaseId }) {
+function discoverLegacyPaths(paths, releaseId, explicitPaths = []) {
+  if (!Array.isArray(explicitPaths) || explicitPaths.some((path) => typeof path !== "string" || !path)) {
+    fail("Malformed legacy installation paths");
+  }
+  const legacyRoot = join(paths.root, "releases");
+  const defaultPath = join(legacyRoot, releaseId);
+  const discovered = [defaultPath, ...explicitPaths.map((path) => resolve(path))];
+  if (pathExists(legacyRoot) && !lstatSync(legacyRoot).isSymbolicLink() && lstatSync(legacyRoot).isDirectory()) {
+    discovered.push(...readdirSync(legacyRoot).sort().map((name) => join(legacyRoot, name)));
+  }
+  return discovered.filter((path, index) => pathExists(path) && discovered.indexOf(path) === index);
+}
+
+function updateLegacyMigration(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId }) {
   const migrationPath = join(paths.state, "legacy-migration.json");
-  if (legacyFound) {
+  if (legacyPaths.length > 0) {
+    const listedPaths = legacyPaths.join(", ");
     atomicWrite(migrationPath, {
       schemaVersion: 1,
       type: "legacy-migration",
       releaseId,
       legacyPath,
       disposition: legacyAdopted ? "adopted-after-signed-verification" : "fresh-install-legacy-untouched",
-      cleanup: `After confirming managed commands work, remove the legacy directory manually if desired: ${legacyPath}`,
+      cleanup: `After confirming managed commands work, remove legacy directories manually if desired: ${listedPaths}`,
     });
   } else if (pathExists(migrationPath)) unlinkSync(migrationPath);
 }
@@ -794,6 +808,7 @@ export function installAndActivate(options) {
     releaseArchive,
     now = new Date(),
     checkpoint,
+    legacyDirectories = [],
   } = options;
   ensurePlatform(platform);
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("Invalid activation verification date");
@@ -851,9 +866,11 @@ export function installAndActivate(options) {
       runChecked(core, ["--help"], "Pi smoke check");
       const conformance = runChecked(core, ["conformance"], "Pi conformance");
       if (!/conformance passed/i.test(conformance)) fail("Pi conformance did not report success");
-      const legacyPath = join(paths.root, "releases", manifest.releaseId);
-      const legacyFound = pathExists(legacyPath);
-      const legacyAdopted = legacyFound && adoptVerifiedLegacyPayload(releaseStage, legacyPath, downstream.payload);
+      const legacyPaths = discoverLegacyPaths(paths, manifest.releaseId, legacyDirectories);
+      const candidateLegacyPath = join(paths.root, "releases", manifest.releaseId);
+      const legacyAdopted = legacyPaths.includes(candidateLegacyPath)
+        && adoptVerifiedLegacyPayload(releaseStage, candidateLegacyPath, downstream.payload);
+      const legacyPath = legacyAdopted ? candidateLegacyPath : legacyPaths[0];
       checkpoint?.("downstream-staged");
 
       atomicWrite(paths.accepted, { schemaVersion: 1, trust: authority.acceptedState, channel: selection });
@@ -900,7 +917,7 @@ export function installAndActivate(options) {
       if (existsSync(paths.activation)) {
         const current = readActivation(dataRoot);
         if (canonicalJson(current.active) === canonicalJson(pair)) {
-          updateLegacyMigration(paths, { legacyFound, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
+          updateLegacyMigration(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
           return current;
         }
         previous = current.active;
@@ -913,7 +930,7 @@ export function installAndActivate(options) {
         previous,
       };
       atomicWrite(paths.activation, activation);
-      updateLegacyMigration(paths, { legacyFound, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
+      updateLegacyMigration(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
       checkpoint?.("after-activation-switch");
       return activation;
     } catch (error) {
@@ -1237,6 +1254,21 @@ function commandPath(name, environment) {
   return null;
 }
 
+function isManagedDispatcherExecutable(path) {
+  let executablePath;
+  try { executablePath = realpathSync(path); } catch { return false; }
+  const dispatcherDirectory = dirname(executablePath);
+  if (basename(executablePath) !== "managed-dispatcher.mjs" || basename(dispatcherDirectory) !== "dispatcher") return false;
+  const receiptPath = join(dispatcherDirectory, ".managed", "receipt.json");
+  if (!pathExists(receiptPath)) return true; // A damaged Dispatcher-shaped target must still never become Stock Pi.
+  try {
+    const receipt = readJson(receiptPath, "Managed Dispatcher receipt");
+    return receipt.type === "managed-dispatcher" && realpathSync(resolve(receipt.ownedPath)) === realpathSync(dispatcherDirectory);
+  } catch {
+    return true;
+  }
+}
+
 function executableIdentity(path, environment) {
   const executablePath = realpathSync(path);
   const stat = lstatSync(executablePath);
@@ -1408,6 +1440,9 @@ export function enableManagedOwnership(dataRoot, options = {}) {
       }
       validateBinDirectory(binDirectory);
       const resolvedStock = commandPath("pi", environment);
+      if (resolvedStock && isManagedDispatcherExecutable(resolvedStock)) {
+        fail(`Resolved pi is another Managed Dispatcher, not Stock Pi: ${resolvedStock}`);
+      }
       pendingOwnership = {
         entrypoints: { pi, compatibility },
         stock: resolvedStock ? executableIdentity(resolvedStock, environment) : null,
@@ -1456,7 +1491,8 @@ export function executeStockPi(dataRoot, args, { environment = process.env } = {
   if (!ownership.stock) fail("No Stock Pi executable was recorded when managed ownership was enabled");
   const stock = ownership.stock;
   if (resolve(stock.resolvedPath) === resolve(ownership.entrypoints.pi.path)
-    || resolve(stock.executablePath) === resolve(ownership.dispatcher.path)) {
+    || resolve(stock.executablePath) === resolve(ownership.dispatcher.path)
+    || isManagedDispatcherExecutable(stock.resolvedPath)) {
     fail("Refusing dispatcher recursion while executing Stock Pi");
   }
   let current;

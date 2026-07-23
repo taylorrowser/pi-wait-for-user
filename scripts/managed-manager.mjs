@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import {
   legacyMigrationMessages,
   managedActivationOptions,
+  parseManagedOptions,
   readJsonFile,
   shellHashRemediation,
 } from "./lib/managed-command.mjs";
@@ -40,24 +41,9 @@ function packageIdentity() {
 function dataRoot() {
   return process.env.PI_MANAGED_DATA_ROOT || defaultManagedDataRoot();
 }
-function options(args, booleans = []) {
-  const values = new Map();
-  while (args.length > 0) {
-    const flag = args.shift();
-    if (!flag?.startsWith("--") || values.has(flag)) fail("Malformed managed command options");
-    if (booleans.includes(flag)) values.set(flag, true);
-    else {
-      const value = args.shift();
-      if (!value) fail(`Missing value for ${flag}`);
-      values.set(flag, value);
-    }
-  }
-  return values;
-}
-
 function activate(args) {
-  const values = options(args);
-  const allowed = new Set(["--data-root", "--platform", "--trust", "--channel", "--manifest", "--root-key", "--manager-archive", "--release-archive", "--now"]);
+  const values = parseManagedOptions(args);
+  const allowed = new Set(["--data-root", "--platform", "--trust", "--channel", "--manifest", "--root-key", "--manager-archive", "--release-archive", "--legacy-dir", "--now"]);
   for (const flag of values.keys()) if (!allowed.has(flag)) fail(`Unknown option: ${flag}`);
   const selectedDataRoot = values.get("--data-root") || dataRoot();
   const activation = installAndActivate(managedActivationOptions(values, {
@@ -71,7 +57,7 @@ function activate(args) {
 }
 
 function installCompatibility(args) {
-  const values = options(args);
+  const values = parseManagedOptions(args);
   for (const flag of values.keys()) if (!["--data-root", "--bin-dir"].includes(flag)) fail(`Unknown option: ${flag}`);
   const result = installManagedCompatibility(values.get("--data-root") || dataRoot(), {
     binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
@@ -80,7 +66,7 @@ function installCompatibility(args) {
 }
 
 function enableOwnership(args) {
-  const values = options(args);
+  const values = parseManagedOptions(args);
   for (const flag of values.keys()) if (!["--data-root", "--bin-dir"].includes(flag)) fail(`Unknown option: ${flag}`);
   const result = enableManagedOwnership(values.get("--data-root") || dataRoot(), {
     binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
@@ -93,7 +79,7 @@ function enableOwnership(args) {
 }
 
 function verifyInstallation(args) {
-  const values = options(args, ["--all", "--provenance"]);
+  const values = parseManagedOptions(args, { booleanFlags: ["--all", "--provenance"] });
   for (const flag of values.keys()) if (!["--all", "--provenance", "--data-root", "--gh"].includes(flag)) fail(`Unknown option: ${flag}`);
   const verified = verifyManagedInstallation(values.get("--data-root") || dataRoot(), {
     all: values.has("--all"),

@@ -64,29 +64,53 @@ verify_directory() {
   }
 }
 
-launcher_available() {
+inspect_launcher() {
+  launcher_status=absent
   if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
     return 0
   fi
-  if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ]; then
-    return 0
+  if [ -L "$launcher" ]; then
+    launcher_target=$(readlink "$launcher")
+    if [ "$launcher_target" = "$install_dir/pi-wait-for-user" ]; then
+      launcher_status=current
+      return 0
+    fi
+    case "$launcher_target" in
+      "$data_root/pi-wait-for-user/releases/"*/pi-wait-for-user)
+        legacy_directory=$(dirname "$launcher_target")
+        if [ -x "$launcher_target" ] && [ -f "$legacy_directory/release.json" ]; then
+          launcher_status=legacy-owned
+          return 0
+        fi
+        ;;
+    esac
   fi
   echo "pi-wait-for-user: unowned foreign command collision: $launcher" >&2
   return 1
 }
 
 activate() {
-  launcher_available
+  inspect_launcher
   mkdir -p "$bin_dir"
-  if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
+  if [ "$launcher_status" = absent ]; then
     ln -s "$install_dir/pi-wait-for-user" "$launcher"
+  elif [ "$launcher_status" = legacy-owned ]; then
+    temporary_link="$bin_dir/.pi-wait-for-user.tmp.$$"
+    rm -f "$temporary_link"
+    ln -s "$install_dir/pi-wait-for-user" "$temporary_link"
+    if [ "$(readlink "$launcher")" != "$launcher_target" ]; then
+      rm -f "$temporary_link"
+      echo "pi-wait-for-user: launcher changed during activation: $launcher" >&2
+      return 1
+    fi
+    mv -f "$temporary_link" "$launcher"
   fi
 }
 
 case "$action" in
   install)
     verify_directory "$payload_dir"
-    launcher_available
+    inspect_launcher
     if [ -e "$install_dir" ]; then
       echo "pi-wait-for-user: install already exists: $install_dir" >&2
       exit 1
