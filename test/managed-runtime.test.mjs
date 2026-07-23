@@ -1670,7 +1670,7 @@ test("--all keeps a verified activation when the newly active Pi package phase f
 test("cached startup status is throttled, isolated to interactive output, and respects check controls", async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-startup-"));
   const current = fixture();
-  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7" });
+  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7", managerArchive: current.managerArchive });
   try {
     activate(dataRoot, current);
     await checkManagedUpdate(dataRoot, { transport: updateTransport(candidate), now, cache: true });
@@ -1924,7 +1924,11 @@ test("Managed Update fails closed at reported identity, smoke, and conformance b
   for (const [fixtureOptions, expected] of cases) {
     const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-verification-boundary-"));
     const current = fixture();
-    const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7", ...fixtureOptions });
+    const candidate = fixture({
+      releaseId: "pi-v0.81.1-patch.7",
+      ...fixtureOptions,
+      ...(!fixtureOptions.managerId && { managerArchive: current.managerArchive }),
+    });
     try {
       activate(dataRoot, current);
       const result = runDispatcher(dataRoot, ["update"], managedNetworkEnvironment(candidate, candidate.directory));
@@ -1947,7 +1951,7 @@ test("Managed Update fails closed at reported identity, smoke, and conformance b
 test("startup never advertises a signed Channel candidate incompatible with the active platform", async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-incompatible-"));
   const current = fixture();
-  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7" });
+  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7", managerArchive: current.managerArchive });
   try {
     activate(dataRoot, current);
     const manifest = structuredClone(candidate.manifestEnvelope.signed);
@@ -2080,7 +2084,7 @@ test("explicit CLI renders current, Patch Lag, ordered --all success, and nonzer
 test("interactive startup notices do not pollute TTY metadata and package-command output", async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-interactive-output-"));
   const current = fixture();
-  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7" });
+  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7", managerArchive: current.managerArchive });
   try {
     activate(dataRoot, current);
     await checkManagedUpdate(dataRoot, { transport: updateTransport(candidate), now });
