@@ -1452,11 +1452,15 @@ export function preflightManagedCommandOwnership(dataRoot, options = {}) {
   return { binDirectory };
 }
 
+function verifiedActiveSelection(dataRoot) {
+  verifyManagedInstallation(dataRoot);
+  return validateActivePair(dataRoot);
+}
+
 export function installManagedCompatibility(dataRoot, options = {}) {
   const environment = options.environment || process.env;
   const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
-  verifyManagedInstallation(dataRoot);
-  const selected = validateActivePair(dataRoot);
+  const selected = verifiedActiveSelection(dataRoot);
   return withLifecycleLock(dataRoot, "install Compatibility Entrypoint", () => {
     const paths = initializeLayout(dataRoot);
     const expected = {
@@ -1489,8 +1493,7 @@ export function installManagedCompatibility(dataRoot, options = {}) {
 export function enableManagedOwnership(dataRoot, options = {}) {
   const environment = options.environment || process.env;
   const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
-  verifyManagedInstallation(dataRoot);
-  const selected = validateActivePair(dataRoot);
+  const selected = verifiedActiveSelection(dataRoot);
   return withLifecycleLock(dataRoot, "enable Command Ownership", () => {
     const paths = initializeLayout(dataRoot);
     const ownershipPath = join(paths.state, "entrypoints.json");
