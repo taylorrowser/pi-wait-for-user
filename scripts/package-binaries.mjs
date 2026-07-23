@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { loadReleaseInput } from "./lib/release-input.mjs";
+import { loadReleaseCandidateInput } from "./lib/release-input.mjs";
+import { createPayloadInventory, sha256File } from "./lib/release-metadata.mjs";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const supportedPlatforms = [
@@ -87,32 +87,6 @@ function windowsLauncher(releaseId, platform) {
   return `@echo off\r\nset DIR=%~dp0\r\nif /I not "%PROCESSOR_ARCHITECTURE%"=="${architecture}" (echo pi-wait-for-user: binary platform mismatch 1>&2 & exit /b 1)\r\nfindstr /C:"\\"releaseId\\": \\"${releaseId}\\"" "%DIR%release.json" >nul || (echo pi-wait-for-user: release identity mismatch 1>&2 & exit /b 1)\r\nfindstr /C:"\\"platform\\": \\"${platform}\\"" "%DIR%release.json" >nul || (echo pi-wait-for-user: binary platform mismatch 1>&2 & exit /b 1)\r\nif not exist "%DIR%question-tool\\extensions\\question-tool.ts" (echo pi-wait-for-user: Question Tool is missing 1>&2 & exit /b 1)\r\nif "%~1"=="conformance" (\r\n  "%DIR%pi-core.exe" %*\r\n) else (\r\n  "%DIR%pi-core.exe" -e "%DIR%question-tool" %*\r\n)\r\n`;
 }
 
-function sha256(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-function payloadInventory(root) {
-  const files = [];
-  function visit(directory) {
-    for (const name of readdirSync(directory).sort()) {
-      const path = join(directory, name);
-      const stat = lstatSync(path);
-      if (stat.isSymbolicLink()) fail(`Payload must not contain symbolic links: ${path}`);
-      if (stat.isDirectory()) visit(path);
-      else if (stat.isFile()) {
-        files.push({
-          path: `pi-wait-for-user/${relative(root, path).split(sep).join("/")}`,
-          sha256: sha256(path),
-          size: stat.size,
-          mode: stat.mode & 0o777,
-        });
-      } else fail(`Unsupported payload entry: ${path}`);
-    }
-  }
-  visit(root);
-  return files;
-}
-
 function packagePlatform(input, output, platform, release, question) {
   const source = join(input, platform);
   if (!existsSync(source)) fail(`Missing upstream binary directory: ${source}`);
@@ -149,7 +123,7 @@ function packagePlatform(input, output, platform, release, question) {
       chmodSync(join(payload, "install.sh"), 0o755);
     }
 
-    const inventory = payloadInventory(join(temporaryRoot, "pi-wait-for-user"));
+    const inventory = createPayloadInventory(temporaryRoot);
     mkdirSync(output, { recursive: true });
     const assetName = `pi-wait-for-user-${platform}.${windows ? "zip" : "tar.gz"}`;
     const assetPath = join(output, assetName);
@@ -162,7 +136,7 @@ function packagePlatform(input, output, platform, release, question) {
     writeFileSync(join(output, `${assetName}.metadata.json`), `${JSON.stringify({
       schemaVersion: 1,
       platform,
-      artifact: { name: assetName, sha256: sha256(assetPath), size: stat.size },
+      artifact: { name: assetName, sha256: sha256File(assetPath), size: stat.size },
       archiveMetadata,
       payload: inventory,
     }, null, 2)}\n`);
@@ -173,9 +147,9 @@ function packagePlatform(input, output, platform, release, question) {
 
 try {
   const options = parseArguments(process.argv.slice(2));
-  const { manifest: release } = loadReleaseInput(projectRoot);
+  const { manifest: release } = loadReleaseCandidateInput(projectRoot);
   const question = JSON.parse(readFileSync(join(projectRoot, "packages", "question-tool", "package.json"), "utf8"));
-  if (release.questionTool.version !== question.version) fail("Question Tool version does not match the package-selected release");
+  if (release.questionTool.version !== question.version) fail("Question Tool version does not match the release candidate input");
   if (existsSync(options.output)) fail(`Output already exists: ${options.output}`);
   for (const platform of options.platforms) packagePlatform(options.input, options.output, platform, release, question);
   console.log(`Packaged ${options.platforms.length} binary release${options.platforms.length === 1 ? "" : "s"}.`);

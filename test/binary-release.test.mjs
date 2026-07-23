@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
+import { verifyReleasePayloads } from "../scripts/lib/release-metadata.mjs";
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const expectedQuestionVersion = JSON.parse(
@@ -41,6 +42,8 @@ function createPackagedBinary(prefix) {
   const extracted = join(root, "extracted");
   mkdirSync(extracted);
   execFileSync("tar", ["-xzf", asset, "-C", extracted]);
+  const metadata = JSON.parse(readFileSync(join(output, `${assetName}.metadata.json`), "utf8"));
+  verifyReleasePayloads(extracted, metadata.payload);
   return { root, output, assetName, asset, installation: join(extracted, "pi-wait-for-user") };
 }
 

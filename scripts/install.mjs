@@ -15,10 +15,10 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { loadReleaseInput } from "./lib/release-input.mjs";
+import { loadReleaseCandidateInput } from "./lib/release-input.mjs";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const { releaseId, manifest } = loadReleaseInput(projectRoot);
+const { releaseId, manifest } = loadReleaseCandidateInput(projectRoot);
 const releaseDirectory = join(projectRoot, "releases", releaseId);
 
 function readJson(path) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -12,8 +12,8 @@ import {
   createArchiveMetadata,
   createChecksums,
   createCompatibilityActiveRelease,
+  createPayloadInventory,
   createReceipt,
-  sha256File,
   serializeMetadata,
   signMetadata,
   verifyChannel,
@@ -62,6 +62,9 @@ function trust(overrides = {}) {
 function manifest(overrides = {}) {
   const archive = artifact("pi-wait-for-user-linux-x64.tar.gz", "archive");
   const manager = artifact("pi-wait-for-user-pi-v0.81.1-patch.6.tgz", "manager");
+  const questionPackage = artifact("taylorrowser-pi-question-tool-0.1.3.tgz", "question package");
+  const installer = artifact("install.sh", "installer");
+  const gateDefinition = artifact("fixture-gate.json", "gate definition");
   const report = artifact("release-candidate.json", "report");
   const notes = artifact("RELEASE_NOTES.md", "notes");
   return signMetadata({
@@ -85,6 +88,7 @@ function manifest(overrides = {}) {
         name: "@taylorrowser/pi-question-tool",
         version: "0.1.3",
         manifest: artifact("packages/question-tool/package.json", "question manifest"),
+        package: questionPackage,
         coreProtocolVersions: [1],
         handlerId: "dev.taylorrowser.pi-question-tool.question",
         handlerVersion: 1,
@@ -101,6 +105,7 @@ function manifest(overrides = {}) {
       compatibleReleaseManifestVersions: [1],
       artifacts: [manager],
     },
+    bootstrap: { installer },
     platformArchives: [{
       platform: "linux-x64",
       artifact: archive,
@@ -109,12 +114,12 @@ function manifest(overrides = {}) {
         { path: "pi-wait-for-user/release.json", sha256: digest("metadata"), size: 8, mode: 420 },
       ],
     }],
-    releaseGates: [{ name: "release-candidate", status: "passed", report }],
+    releaseGates: [{ name: "release-candidate", status: "passed", definition: gateDefinition, report }],
     provenance: {
       repository: "taylorrowser/pi-wait-for-user",
       workflow: ".github/workflows/release.yml",
       sourceCommit: "0123456789abcdef0123456789abcdef01234567",
-      artifacts: [manager, archive, report, notes]
+      artifacts: [manager, questionPackage, installer, gateDefinition, archive, report, notes]
         .map(({ name, sha256 }) => ({ name, sha256 }))
         .sort((left, right) => left.name.localeCompare(right.name)),
     },
@@ -150,19 +155,19 @@ test("authorized root and release signatures verify complete metadata", () => {
   const authority = verifiedTrust();
   const releaseManifest = manifest();
   const verifiedManifest = verifyReleaseManifest(releaseManifest, { trust: authority, now });
+  const previous = channel(releaseManifest, { sequence: 10 });
   const selected = verifyChannel(channel(releaseManifest), {
     trust: authority,
     now,
     manifest: releaseManifest,
-    accepted: { sequence: 10, sha256: "previous" },
+    accepted: verifyChannel(previous, { trust: authority, now, manifest: releaseManifest }),
   });
 
   assert.equal(verifiedManifest.releaseId, "pi-v0.81.1-patch.6");
-  assert.deepEqual(selected, {
-    sequence: 11,
-    sha256: channel(releaseManifest).signed.manifest.sha256,
-    releaseId: "pi-v0.81.1-patch.6",
-  });
+  assert.equal(selected.sequence, 11);
+  assert.equal(selected.manifestSha256, channel(releaseManifest).signed.manifest.sha256);
+  assert.equal(selected.releaseId, "pi-v0.81.1-patch.6");
+  assert.match(selected.envelopeSha256, /^[a-f0-9]{64}$/);
 });
 
 test("unknown schemas, expired trust, malformed metadata, and unauthorized signatures fail closed", () => {
@@ -188,6 +193,44 @@ test("unknown schemas, expired trust, malformed metadata, and unauthorized signa
   const invalid = structuredClone(validManifest);
   invalid.signatures[0].signature = `${invalid.signatures[0].signature.slice(0, -4)}AAAA`;
   assert.throws(() => verifyReleaseManifest(invalid, { trust: authority, now }), /invalid release-manifest signature/i);
+});
+
+test("accepted trust state rejects replay that would undo release-key revocation", () => {
+  const revoked = trust({
+    version: 4,
+    releaseKeys: [{
+      keyId: "fixture-release-2026",
+      algorithm: "ed25519",
+      publicKey: releasePublic,
+      expires: "2026-12-01T00:00:00.000Z",
+      revoked: true,
+    }],
+  });
+  const acceptedAuthority = verifiedTrust(revoked);
+  assert.deepEqual(Object.keys(acceptedAuthority.acceptedState).sort(), ["envelopeSha256", "version"]);
+  assert.equal(acceptedAuthority.acceptedState.version, 4);
+
+  assert.throws(
+    () => verifyTrustMetadata(trust({ version: 3 }), {
+      trustedRootKeys: new Map([["fixture-root-2026", rootPublic]]),
+      now,
+      accepted: acceptedAuthority.acceptedState,
+    }),
+    /trust metadata version replay/i,
+  );
+  assert.throws(
+    () => verifyTrustMetadata(trust({ version: 4, channelUrl: "https://example.test/replayed-channel.json" }), {
+      trustedRootKeys: new Map([["fixture-root-2026", rootPublic]]),
+      now,
+      accepted: acceptedAuthority.acceptedState,
+    }),
+    /equal trust metadata version is not an identical retry/i,
+  );
+  assert.equal(verifyTrustMetadata(revoked, {
+    trustedRootKeys: new Map([["fixture-root-2026", rootPublic]]),
+    now,
+    accepted: acceptedAuthority.acceptedState,
+  }).acceptedState.envelopeSha256, acceptedAuthority.acceptedState.envelopeSha256);
 });
 
 test("release-key expiry and revocation fail closed", () => {
@@ -218,10 +261,7 @@ test("channel replay is rejected while an identical equal-sequence retry is acce
   const authority = verifiedTrust();
   const releaseManifest = manifest();
   const current = channel(releaseManifest);
-  const accepted = {
-    sequence: current.signed.sequence,
-    sha256: current.signed.manifest.sha256,
-  };
+  const accepted = verifyChannel(current, { trust: authority, now, manifest: releaseManifest });
 
   assert.equal(verifyChannel(current, { trust: authority, now, manifest: releaseManifest, accepted }).sequence, 11);
   assert.throws(
@@ -231,7 +271,45 @@ test("channel replay is rejected while an identical equal-sequence retry is acce
   const different = manifest({ releaseId: "pi-v0.81.1-patch.7", tag: "pi-v0.81.1-patch.7" });
   assert.throws(
     () => verifyChannel(channel(different), { trust: authority, now, manifest: different, accepted }),
-    /equal channel sequence selects different manifest/i,
+    /equal channel sequence is not an identical retry/i,
+  );
+});
+
+test("equal Channel sequence rejects every non-identical envelope retry", () => {
+  const authority = verifiedTrust();
+  const releaseManifest = manifest();
+  const current = channel(releaseManifest);
+  const accepted = verifyChannel(current, { trust: authority, now, manifest: releaseManifest });
+
+  for (const [name, retry] of [
+    ["expiry", channel(releaseManifest, { expires: "2026-08-02T00:00:00.000Z" })],
+    ["manifest URL", channel(releaseManifest, {
+      manifest: { ...current.signed.manifest, url: "https://example.test/release-manifest.json" },
+    })],
+  ]) {
+    assert.throws(
+      () => verifyChannel(retry, { trust: authority, now, manifest: releaseManifest, accepted }),
+      /equal Channel sequence is not an identical retry/i,
+      name,
+    );
+  }
+
+  const alternateTrust = verifiedTrust(trust({
+    releaseKeys: [
+      ...trust().signed.releaseKeys,
+      {
+        keyId: "fixture-release-alternate",
+        algorithm: "ed25519",
+        publicKey: readFileSync(join(keys, "unauthorized-public.pem"), "utf8"),
+        expires: "2026-12-01T00:00:00.000Z",
+        revoked: false,
+      },
+    ],
+  }));
+  const resigned = signMetadata(current.signed, "fixture-release-alternate", unauthorizedPrivate);
+  assert.throws(
+    () => verifyChannel(resigned, { trust: alternateTrust, now, manifest: releaseManifest, accepted }),
+    /equal Channel sequence is not an identical retry/i,
   );
 });
 
@@ -245,7 +323,7 @@ test("a patch-only promotion is a new channel selection", () => {
     trust: authority,
     now,
     manifest: next,
-    accepted: { sequence: 10, sha256: previousChannel.signed.manifest.sha256 },
+    accepted: verifyChannel(previousChannel, { trust: authority, now, manifest: previous }),
   });
 
   assert.equal(previous.signed.upstream.packageVersion, next.signed.upstream.packageVersion);
@@ -264,7 +342,10 @@ test("manifest projections are generated from one verified identity", () => {
     releaseId: releaseManifest.releaseId,
     assets: [
       releaseManifest.manager.artifacts[0],
+      releaseManifest.compatibility.questionTool.package,
+      releaseManifest.bootstrap.installer,
       archive.artifact,
+      releaseManifest.releaseGates[0].definition,
       releaseManifest.releaseGates[0].report,
       releaseManifest.releaseNotes,
     ].sort((left, right) => left.name.localeCompare(right.name)),
@@ -306,16 +387,24 @@ test("the metadata CLI verifies provenance, signs a manifest, and promotes one C
     const manifestPath = join(directory, "release-manifest.json");
     const output = join(directory, "promotion");
     const acceptedStatePath = join(directory, "accepted-state.json");
+    const acceptedTrustStatePath = join(directory, "accepted-trust-state.json");
     const unsigned = manifest().signed;
     writeFileSync(unsignedPath, serializeMetadata(unsigned));
     writeFileSync(provenancePath, serializeMetadata(unsigned.provenance));
     writeFileSync(trustPath, serializeMetadata(trust()));
-    writeFileSync(acceptedStatePath, serializeMetadata({ sequence: 10, sha256: "previous" }));
+    writeFileSync(acceptedTrustStatePath, serializeMetadata(verifiedTrust().acceptedState));
+    const previousChannel = channel(manifest(), { sequence: 10 });
+    writeFileSync(acceptedStatePath, serializeMetadata(verifyChannel(previousChannel, {
+      trust: verifiedTrust(),
+      now,
+      manifest: manifest(),
+    })));
 
     const common = [
       "--trust", trustPath,
       "--root-key", `fixture-root-2026=${join(keys, "root-public.pem")}`,
       "--now", now.toISOString(),
+      "--accepted-trust-state", acceptedTrustStatePath,
     ];
     const signed = spawnSync(process.execPath, [metadataCli, "sign-manifest",
       "--input", unsignedPath,
@@ -340,6 +429,7 @@ test("the metadata CLI verifies provenance, signs a manifest, and promotes one C
     ], { encoding: "utf8" });
     assert.equal(promoted.status, 0, promoted.stderr);
     assert.equal(existsSync(join(output, "channel.json")), true);
+    assert.deepEqual(JSON.parse(readFileSync(join(output, "trust-state.json"), "utf8")), verifiedTrust().acceptedState);
     assert.equal(existsSync(join(output, "active.json")), true);
     assert.equal(existsSync(join(output, "artifact-manifest.json")), true);
     assert.equal(existsSync(join(output, "SHA256SUMS")), true);
@@ -356,6 +446,21 @@ test("the metadata CLI verifies provenance, signs a manifest, and promotes one C
       ...projectionOptions,
     ], { encoding: "utf8" });
     assert.equal(verified.status, 0, verified.stderr);
+
+    const receiptPath = join(directory, "receipt.json");
+    const receipt = spawnSync(process.execPath, [metadataCli, "receipt",
+      "--manifest", manifestPath,
+      ...common,
+      "--platform", "linux-x64",
+      "--owned-path", "/managed/release",
+      "--output", receiptPath,
+    ], { encoding: "utf8" });
+    assert.equal(receipt.status, 0, receipt.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(receiptPath, "utf8")), createReceipt(
+      verifyReleaseManifest(manifest(), { trust: verifiedTrust(), now }),
+      "linux-x64",
+      "/managed/release",
+    ));
 
     const activePath = join(output, "active.json");
     writeFileSync(activePath, serializeMetadata({ ...JSON.parse(readFileSync(activePath, "utf8")), releaseId: "pi-v0.81.1-patch.5" }));
@@ -389,13 +494,18 @@ test("digest, extracted-file, projection drift, and provenance mismatches are re
   try {
     mkdirSync(join(directory, "pi-wait-for-user"));
     writeFileSync(join(directory, "pi-wait-for-user", "pi-core"), "binary");
+    chmodSync(join(directory, "pi-wait-for-user", "pi-core"), 0o755);
     writeFileSync(join(directory, "pi-wait-for-user", "release.json"), "metadata");
     const releaseManifest = verifyReleaseManifest(manifest(), { trust: verifiedTrust(), now });
     const archive = releaseManifest.platformArchives[0];
 
+    assert.deepEqual(createPayloadInventory(directory), archive.payload);
     verifyReleasePayloads(directory, archive.payload);
     writeFileSync(join(directory, "pi-wait-for-user", "pi-core"), "broken");
     assert.throws(() => verifyReleasePayloads(directory, archive.payload), /payload digest mismatch/i);
+    writeFileSync(join(directory, "pi-wait-for-user", "pi-core"), "binary");
+    chmodSync(join(directory, "pi-wait-for-user", "pi-core"), 0o700);
+    assert.throws(() => verifyReleasePayloads(directory, archive.payload), /payload mode mismatch/i);
 
     assert.throws(
       () => createArtifactManifest({ ...releaseManifest, releaseNotes: { ...releaseManifest.releaseNotes, sha256: "0".repeat(64) } }, {
@@ -412,7 +522,6 @@ test("digest, extracted-file, projection drift, and provenance mismatches are re
       }),
       /provenance repository mismatch/i,
     );
-    assert.notEqual(sha256File(join(directory, "pi-wait-for-user", "pi-core")), archive.payload[0].sha256);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

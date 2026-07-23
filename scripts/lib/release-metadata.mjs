@@ -1,6 +1,6 @@
 import { createHash, sign, verify } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
-import { join, posix, relative, resolve, sep } from "node:path";
+import { join, posix, relative, sep } from "node:path";
 
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const releaseIdPattern = /^[a-z0-9][a-z0-9.-]+$/;
@@ -137,11 +137,12 @@ function validateUpstream(value, label) {
 function validateCompatibility(value, label) {
   expectObject(value, label, ["questionTool", "sessions"]);
   const question = expectObject(value.questionTool, `${label}.questionTool`, [
-    "name", "version", "manifest", "coreProtocolVersions", "handlerId", "handlerVersion", "packageSchemaVersions",
+    "name", "version", "manifest", "package", "coreProtocolVersions", "handlerId", "handlerVersion", "packageSchemaVersions",
   ]);
   expectString(question.name, `${label}.questionTool.name`);
   expectString(question.version, `${label}.questionTool.version`);
   validateArtifact(question.manifest, `${label}.questionTool.manifest`);
+  validateArtifact(question.package, `${label}.questionTool.package`);
   expectArray(question.coreProtocolVersions, `${label}.questionTool.coreProtocolVersions`, (entry, itemLabel) => expectInteger(entry, itemLabel, 1));
   expectString(question.handlerId, `${label}.questionTool.handlerId`);
   expectInteger(question.handlerVersion, `${label}.questionTool.handlerVersion`, 1);
@@ -167,7 +168,7 @@ function validateReleaseManifestEnvelope(value) {
   validateEnvelope(value, "release-manifest");
   const signed = expectObject(value.signed, "release-manifest payload", [
     "schemaVersion", "type", "releaseId", "tag", "publishedAt", "upstream", "patches", "compatibility",
-    "manager", "platformArchives", "releaseGates", "provenance", "releaseNotes",
+    "manager", "bootstrap", "platformArchives", "releaseGates", "provenance", "releaseNotes",
   ]);
   expectString(signed.releaseId, "release-manifest.releaseId", releaseIdPattern);
   expectString(signed.tag, "release-manifest.tag", releaseIdPattern);
@@ -195,6 +196,9 @@ function validateReleaseManifestEnvelope(value) {
   if (!manager.compatibleReleaseManifestVersions.includes(1)) fail("Malformed release-manifest.manager compatibility");
   expectArray(manager.artifacts, "release-manifest.manager.artifacts", validateArtifact);
 
+  const bootstrap = expectObject(signed.bootstrap, "release-manifest.bootstrap", ["installer"]);
+  validateArtifact(bootstrap.installer, "release-manifest.bootstrap.installer");
+
   expectArray(signed.platformArchives, "release-manifest.platformArchives", (entry, label) => {
     expectObject(entry, label, ["platform", "artifact", "payload"]);
     expectString(entry.platform, `${label}.platform`, /^[a-z0-9]+-(?:arm64|x64)$/);
@@ -212,9 +216,10 @@ function validateReleaseManifestEnvelope(value) {
   expectUnique(signed.platformArchives, "release-manifest.platformArchives", (entry) => entry.platform);
 
   expectArray(signed.releaseGates, "release-manifest.releaseGates", (entry, label) => {
-    expectObject(entry, label, ["name", "status", "report"]);
+    expectObject(entry, label, ["name", "status", "definition", "report"]);
     expectString(entry.name, `${label}.name`);
     if (entry.status !== "passed") fail(`Malformed ${label}.status: required release gate did not pass`);
+    validateArtifact(entry.definition, `${label}.definition`);
     validateArtifact(entry.report, `${label}.report`);
   });
 
@@ -255,6 +260,10 @@ function signaturePayload(signed) {
   return Buffer.from(canonicalJson(signed));
 }
 
+function envelopeDigest(envelope) {
+  return createHash("sha256").update(canonicalJson(envelope)).digest("hex");
+}
+
 function verifyAtLeastOneSignature(envelope, keys, unauthorizedMessage) {
   let recognized = false;
   for (const signature of envelope.signatures) {
@@ -285,8 +294,10 @@ function verifyDelegated(envelope, trust, now) {
 function releaseArtifacts(manifest) {
   return [
     ...manifest.manager.artifacts,
+    manifest.compatibility.questionTool.package,
+    manifest.bootstrap.installer,
     ...manifest.platformArchives.map((entry) => entry.artifact),
-    ...manifest.releaseGates.map((entry) => entry.report),
+    ...manifest.releaseGates.flatMap((entry) => [entry.definition, entry.report]),
     manifest.releaseNotes,
   ].sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -316,14 +327,28 @@ export function sha256File(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-export function verifyTrustMetadata(envelope, { trustedRootKeys, now = new Date() }) {
+export function verifyTrustMetadata(envelope, { trustedRootKeys, now = new Date(), accepted } = {}) {
   validateTrust(envelope);
   if (!(trustedRootKeys instanceof Map) || trustedRootKeys.size === 0) fail("No trusted root keys configured");
   verifyAtLeastOneSignature(envelope, trustedRootKeys, "Trust metadata is not signed by a trusted root key");
   if (Date.parse(envelope.signed.expires) <= now.getTime()) fail("Trust metadata expired");
+  const acceptedState = {
+    version: envelope.signed.version,
+    envelopeSha256: envelopeDigest(envelope),
+  };
+  if (accepted) {
+    expectObject(accepted, "accepted trust state", ["version", "envelopeSha256"]);
+    expectInteger(accepted.version, "accepted trust version", 0);
+    expectString(accepted.envelopeSha256, "accepted trust envelope digest", sha256Pattern);
+    if (acceptedState.version < accepted.version) fail("Release trust metadata version replay");
+    if (acceptedState.version === accepted.version && acceptedState.envelopeSha256 !== accepted.envelopeSha256) {
+      fail("Equal trust metadata version is not an identical retry");
+    }
+  }
   return {
     metadata: envelope.signed,
     releaseKeys: new Map(envelope.signed.releaseKeys.map((entry) => [entry.keyId, entry])),
+    acceptedState,
   };
 }
 
@@ -341,19 +366,24 @@ export function verifyChannel(envelope, { trust, now = new Date(), manifest, acc
   const actualManifestDigest = createHash("sha256").update(serializeMetadata(manifest)).digest("hex");
   if (actualManifestDigest !== envelope.signed.manifest.sha256) fail("Release Channel manifest digest mismatch");
   if (manifest.signed.releaseId !== envelope.signed.manifest.releaseId) fail("Release Channel manifest identity mismatch");
+  const acceptedState = {
+    sequence: envelope.signed.sequence,
+    releaseId: envelope.signed.manifest.releaseId,
+    manifestSha256: envelope.signed.manifest.sha256,
+    envelopeSha256: envelopeDigest(envelope),
+  };
   if (accepted) {
+    expectObject(accepted, "accepted Channel state", ["sequence", "releaseId", "manifestSha256", "envelopeSha256"]);
     expectInteger(accepted.sequence, "accepted channel sequence", 0);
-    expectString(accepted.sha256, "accepted manifest digest");
-    if (envelope.signed.sequence < accepted.sequence) fail("Release Channel sequence replay");
-    if (envelope.signed.sequence === accepted.sequence && envelope.signed.manifest.sha256 !== accepted.sha256) {
-      fail("Equal Channel sequence selects different manifest");
+    expectString(accepted.releaseId, "accepted manifest release ID", releaseIdPattern);
+    expectString(accepted.manifestSha256, "accepted manifest digest", sha256Pattern);
+    expectString(accepted.envelopeSha256, "accepted Channel envelope digest", sha256Pattern);
+    if (acceptedState.sequence < accepted.sequence) fail("Release Channel sequence replay");
+    if (acceptedState.sequence === accepted.sequence && acceptedState.envelopeSha256 !== accepted.envelopeSha256) {
+      fail("Equal Channel sequence is not an identical retry");
     }
   }
-  return {
-    sequence: envelope.signed.sequence,
-    sha256: envelope.signed.manifest.sha256,
-    releaseId: envelope.signed.manifest.releaseId,
-  };
+  return acceptedState;
 }
 
 export function createArtifactManifest(manifest, { existing } = {}) {
@@ -399,6 +429,41 @@ export function createReceipt(manifest, platform, ownedPath, { existing } = {}) 
   }, "receipt");
 }
 
+export function verifyReleaseIdentityProjections(manifest, root) {
+  const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const candidateVersion = manifest.releaseId.startsWith("pi-v") ? manifest.releaseId.slice(4) : "";
+  if (packageManifest.version !== candidateVersion) fail("Package release candidate projection drift");
+
+  const shellIdentity = (path, variable, expected, label) => {
+    const contents = readFileSync(join(root, path), "utf8");
+    const matches = [...contents.matchAll(new RegExp(`^${variable}="([^"]*)"$`, "gm"))];
+    if (matches.length !== 1 || matches[0][1] !== expected) fail(`${label} projection drift`);
+  };
+  shellIdentity("scripts/bootstrap.sh", "release_id", manifest.releaseId, "Bootstrap release ID");
+  shellIdentity("scripts/install-binary.sh", "release_id", manifest.releaseId, "Binary installer release ID");
+  shellIdentity("scripts/install-binary.sh", "pi_version", manifest.upstream.packageVersion, "Binary installer Pi version");
+
+  const verifyFile = (artifact, path, label) => {
+    const absolute = join(root, path);
+    const stat = lstatSync(absolute);
+    if (!stat.isFile() || stat.size !== artifact.size || sha256File(absolute) !== artifact.sha256) {
+      fail(`${label} projection drift`);
+    }
+  };
+  verifyFile(manifest.bootstrap.installer, "scripts/bootstrap.sh", "Bootstrap installer");
+  verifyFile(manifest.compatibility.questionTool.manifest, manifest.compatibility.questionTool.manifest.name, "Question Tool manifest");
+  verifyFile(manifest.releaseNotes, join("releases", manifest.releaseId, "RELEASE_NOTES.md"), "Release documentation");
+
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  if (!readme.includes(`The packaged release candidate is **\`${manifest.releaseId}\`**`)) {
+    fail("README release candidate projection drift");
+  }
+  if (!readme.includes(`/download/${manifest.releaseId}/install.sh`)) fail("README installer projection drift");
+  const notes = readFileSync(join(root, "releases", manifest.releaseId, "RELEASE_NOTES.md"), "utf8");
+  if (!notes.includes(`# Pi Wait for User · \`${manifest.releaseId}\``)) fail("Release notes identity projection drift");
+  if (!notes.includes(`/download/${manifest.releaseId}/install.sh`)) fail("Release notes installer projection drift");
+}
+
 export function createCompatibilityActiveRelease(channel, manifest, { existing } = {}) {
   if (channel.manifest.releaseId !== manifest.signed.releaseId) fail("Release Channel manifest identity mismatch");
   return compareProjection(existing, {
@@ -410,16 +475,23 @@ export function createCompatibilityActiveRelease(channel, manifest, { existing }
   }, "active.json");
 }
 
-function inventory(root) {
+export function createPayloadInventory(root) {
   const files = [];
   function visit(directory) {
     for (const name of readdirSync(directory).sort()) {
       const absolute = join(directory, name);
+      const path = relative(root, absolute).split(sep).join("/");
       const stat = lstatSync(absolute);
-      if (stat.isSymbolicLink()) fail(`Payload contains symbolic link: ${relative(root, absolute)}`);
+      if (stat.isSymbolicLink()) fail(`Payload contains symbolic link: ${path}`);
       if (stat.isDirectory()) visit(absolute);
-      else if (stat.isFile()) files.push(relative(root, absolute).split(sep).join("/"));
-      else fail(`Payload contains unsupported file: ${relative(root, absolute)}`);
+      else if (stat.isFile()) {
+        files.push({
+          path,
+          sha256: sha256File(absolute),
+          size: stat.size,
+          mode: stat.mode & 0o777,
+        });
+      } else fail(`Payload contains unsupported file: ${path}`);
     }
   }
   visit(root);
@@ -427,16 +499,17 @@ function inventory(root) {
 }
 
 export function verifyReleasePayloads(root, payload) {
-  const declared = payload.map((entry) => entry.path).sort();
-  const actual = inventory(root);
-  if (canonicalJson(actual) !== canonicalJson(declared)) fail("Extracted payload inventory mismatch");
-  for (const entry of payload) {
-    const absolute = resolve(root, entry.path);
-    const inside = relative(root, absolute);
-    if (inside.startsWith("..") || inside === "") fail(`Payload path escapes root: ${entry.path}`);
-    const stat = lstatSync(absolute);
-    if (stat.size !== entry.size) fail(`Payload size mismatch: ${entry.path}`);
-    if (sha256File(absolute) !== entry.sha256) fail(`Payload digest mismatch: ${entry.path}`);
+  const declared = [...payload].sort((left, right) => left.path.localeCompare(right.path));
+  const actual = createPayloadInventory(root).sort((left, right) => left.path.localeCompare(right.path));
+  if (canonicalJson(actual.map((entry) => entry.path)) !== canonicalJson(declared.map((entry) => entry.path))) {
+    fail("Extracted payload inventory mismatch");
+  }
+  for (let index = 0; index < declared.length; index += 1) {
+    const expected = declared[index];
+    const found = actual[index];
+    if (found.size !== expected.size) fail(`Payload size mismatch: ${expected.path}`);
+    if (found.sha256 !== expected.sha256) fail(`Payload digest mismatch: ${expected.path}`);
+    if (found.mode !== expected.mode) fail(`Payload mode mismatch: ${expected.path}`);
   }
 }
 
