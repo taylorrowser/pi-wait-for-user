@@ -179,6 +179,19 @@ function validVersion(value) {
   return typeof value === "string" && parseVersion(value) !== null;
 }
 
+function managedUpdateStatusRecord({ checkedAt, active, channel, compatibleUpdate = null, patchLag = null, observedUpstreamVersion, upstreamError }) {
+  return {
+    schemaVersion: 1,
+    type: "managed-update-status",
+    checkedAt: checkedAt.toISOString(),
+    active,
+    channel,
+    compatibleUpdate,
+    patchLag,
+    upstream: { observedVersion: observedUpstreamVersion || null, error: upstreamError || null },
+  };
+}
+
 function updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError, candidateCompatible) {
   const candidateDiffers = candidateCompatible && (manifest.releaseId !== context.active.releaseId
     || manifest.manager.releaseId !== context.active.managerReleaseId
@@ -191,10 +204,8 @@ function updateStatus(context, selection, manifest, observedUpstreamVersion, ups
   } : null;
   const newerUpstream = !compatibleUpdate && observedUpstreamVersion
     && compareVersions(observedUpstreamVersion, context.active.upstreamVersion) > 0;
-  return {
-    schemaVersion: 1,
-    type: "managed-update-status",
-    checkedAt: new Date().toISOString(),
+  return managedUpdateStatusRecord({
+    checkedAt: new Date(),
     active: {
       releaseId: context.active.releaseId,
       managerReleaseId: context.active.managerReleaseId,
@@ -212,11 +223,9 @@ function updateStatus(context, selection, manifest, observedUpstreamVersion, ups
       currentUpstreamVersion: context.active.upstreamVersion,
       observedUpstreamVersion,
     } : null,
-    upstream: {
-      observedVersion: observedUpstreamVersion || null,
-      error: upstreamError || null,
-    },
-  };
+    observedUpstreamVersion,
+    upstreamError,
+  });
 }
 
 function hasExactKeys(value, keys) {
@@ -371,10 +380,8 @@ function activatedStatus(checked, candidate, now) {
         observedUpstreamVersion: checked.observedUpstreamVersion,
       }
     : null;
-  return {
-    schemaVersion: 1,
-    type: "managed-update-status",
-    checkedAt: now.toISOString(),
+  return managedUpdateStatusRecord({
+    checkedAt: now,
     active: {
       releaseId: candidate.releaseId,
       managerReleaseId: candidate.managerReleaseId,
@@ -382,10 +389,10 @@ function activatedStatus(checked, candidate, now) {
       manifestSha256: checked.channel.manifestSha256,
     },
     channel: checked.channel,
-    compatibleUpdate: null,
     patchLag,
-    upstream: { observedVersion: checked.observedUpstreamVersion || null, error: checked.upstreamError || null },
-  };
+    observedUpstreamVersion: checked.observedUpstreamVersion,
+    upstreamError: checked.upstreamError,
+  });
 }
 
 async function performManagedUpdateLocked(dataRoot, options = {}) {
