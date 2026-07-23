@@ -1131,6 +1131,20 @@ function installAndActivateWithProvenance(options, provenanceType) {
   return withLifecycleLock(dataRoot, `activate ${manifestEnvelope?.signed?.releaseId ?? "candidate"}`, activate);
 }
 
+export function readManagedStartupContext(dataRoot) {
+  const selected = validateActivePair(dataRoot);
+  const accepted = readAcceptedMetadataState(selected.paths);
+  if (!accepted) fail("Accepted metadata state is missing for existing Activation");
+  return {
+    active: {
+      releaseId: selected.pair.downstreamReleaseId,
+      managerReleaseId: selected.pair.managerReleaseId,
+      manifestSha256: selected.pair.manifestSha256,
+    },
+    accepted,
+  };
+}
+
 export function readManagedUpdateContext(dataRoot) {
   const selected = validateActivePair(dataRoot);
   if (selected.config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {

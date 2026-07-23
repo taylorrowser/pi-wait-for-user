@@ -20,6 +20,7 @@ import {
   installAndActivateFromManagedConfig,
   managedStateDirectory,
   readActivation,
+  readManagedStartupContext,
   readManagedStateJson,
   readManagedUpdateContext,
   recordManagedUpdateDiagnostic,
@@ -198,6 +199,7 @@ function updateStatus(context, selection, manifest, observedUpstreamVersion, ups
       releaseId: context.active.releaseId,
       managerReleaseId: context.active.managerReleaseId,
       upstreamVersion: context.active.upstreamVersion,
+      manifestSha256: context.active.manifestSha256,
     },
     channel: {
       sequence: selection.sequence,
@@ -230,14 +232,15 @@ function validDate(value) {
 function validateStatus(status) {
   if (!hasExactKeys(status, ["schemaVersion", "type", "checkedAt", "active", "channel", "compatibleUpdate", "patchLag", "upstream"])
     || status.schemaVersion !== 1 || status.type !== "managed-update-status" || !validDate(status.checkedAt)
-    || !hasExactKeys(status.active, ["releaseId", "managerReleaseId", "upstreamVersion"])
+    || !hasExactKeys(status.active, ["releaseId", "managerReleaseId", "upstreamVersion", "manifestSha256"])
     || !hasExactKeys(status.channel, ["sequence", "releaseId", "manifestSha256"])
     || !hasExactKeys(status.upstream, ["observedVersion", "error"])) fail("Malformed managed update status");
   for (const id of [status.active.releaseId, status.active.managerReleaseId, status.channel.releaseId]) {
     if (typeof id !== "string" || !idPattern.test(id)) fail("Malformed managed update status");
   }
   if (!Number.isSafeInteger(status.channel.sequence) || status.channel.sequence < 1
-    || !sha256Pattern.test(status.channel.manifestSha256) || !validVersion(status.active.upstreamVersion)
+    || !sha256Pattern.test(status.active.manifestSha256) || !sha256Pattern.test(status.channel.manifestSha256)
+    || !validVersion(status.active.upstreamVersion)
     || (status.upstream.observedVersion !== null && !validVersion(status.upstream.observedVersion))
     || (status.upstream.error !== null && (typeof status.upstream.error !== "string" || status.upstream.error.length > 500))) {
     fail("Malformed managed update status");
@@ -331,11 +334,11 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
     source: { trustEnvelope, channelEnvelope, manifestEnvelope, manifestUrl },
   };
   if (status.compatibleUpdate) return { kind: "compatible-update", ...common, candidate: status.compatibleUpdate };
+  if (status.patchLag) return { kind: "patch-lag", ...common, patchLag: status.patchLag };
   if (candidateChanged && !candidateCompatible) {
     const incompatibility = platformArchive ? "Release Manifest does not select one Manager Release artifact" : `platform is not declared: ${context.active.platform}`;
     return { kind: "incompatible", ...common, incompatibility };
   }
-  if (status.patchLag) return { kind: "patch-lag", ...common, patchLag: status.patchLag };
   return { kind: "current", ...common };
 }
 
@@ -376,6 +379,7 @@ function activatedStatus(checked, candidate, now) {
       releaseId: candidate.releaseId,
       managerReleaseId: candidate.managerReleaseId,
       upstreamVersion: candidate.upstreamVersion,
+      manifestSha256: checked.channel.manifestSha256,
     },
     channel: checked.channel,
     compatibleUpdate: null,
@@ -498,6 +502,7 @@ function readUpdateHold(dataRoot) {
 function statusMatchesContext(status, context) {
   return status?.active.releaseId === context.active.releaseId
     && status.active.managerReleaseId === context.active.managerReleaseId
+    && status.active.manifestSha256 === context.active.manifestSha256
     && status.channel.sequence === context.accepted.channel.sequence
     && status.channel.releaseId === context.accepted.channel.releaseId
     && status.channel.manifestSha256 === context.accepted.channel.manifestSha256;
@@ -508,7 +513,7 @@ export function cachedManagedStartupNotice(dataRoot, options = {}) {
   if (!options.interactive || environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE) return null;
   const status = readManagedUpdateStatus(dataRoot);
   if (!status) return null;
-  const context = readManagedUpdateContext(dataRoot);
+  const context = readManagedStartupContext(dataRoot);
   if (!statusMatchesContext(status, context)) return null;
   const hold = readUpdateHold(dataRoot);
   if (status.compatibleUpdate && hold?.releaseId !== status.compatibleUpdate.releaseId) {

@@ -1920,6 +1920,16 @@ test("startup never advertises a signed Channel candidate incompatible with the 
       performManagedUpdate(dataRoot, { transport: updateTransport(candidate), now }),
       /candidate compatibility: platform is not declared: linux-x64/,
     );
+    const patchLag = await performManagedUpdate(dataRoot, {
+      transport: updateTransport(candidate, { upstreamVersion: "0.82.0" }),
+      now,
+    });
+    assert.equal(patchLag.kind, "patch-lag");
+    assert.deepEqual(patchLag.patchLag, {
+      currentReleaseId: "pi-v0.81.1-patch.6",
+      currentUpstreamVersion: "0.81.1",
+      observedUpstreamVersion: "0.82.0",
+    });
     assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
   } finally {
     destroy(dataRoot);
