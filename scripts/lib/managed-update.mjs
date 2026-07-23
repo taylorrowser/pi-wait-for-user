@@ -20,8 +20,8 @@ import {
   inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
   managedCandidateIdentityConflict,
-  managedProcessIdentityIsLive,
   managedProcessStartIdentity,
+  managedProcessStatus,
   managedStateDirectory,
   managedStateFileIsOwned,
   publishManagedStateFileExclusive,
@@ -589,8 +589,10 @@ function acquireStartupRecoveryOwner(dataRoot, staleToken, now) {
     || typeof active.token !== "string" || !active.token || !validDate(active.claimedAt)) {
     fail("Malformed startup check recovery owner");
   }
-  if (managedProcessIdentityIsLive(active.pid, active.processStartIdentity)
-    && now.getTime() - Date.parse(active.claimedAt) <= 5 * 60 * 1_000) return null;
+  const ownerProcess = managedProcessStatus(active.pid);
+  if (ownerProcess.status === "unknown"
+    || (ownerProcess.status === "live" && ownerProcess.identity === active.processStartIdentity
+      && now.getTime() - Date.parse(active.claimedAt) <= 5 * 60 * 1_000)) return null;
   const path = join(managedStateDirectory(dataRoot), name);
   const stat = lstatSync(path);
   removeManagedStateFileIfOwned(dataRoot, name, { dev: stat.dev, ino: stat.ino });
@@ -621,7 +623,9 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
       { maximumSize: metadataLimit },
     ));
     const stat = lstatSync(selected.startupLock);
-    if (managedProcessIdentityIsLive(active.pid, active.processStartIdentity)
+    const lockProcess = managedProcessStatus(active.pid);
+    if (lockProcess.status === "unknown"
+      || (lockProcess.status === "live" && lockProcess.identity === active.processStartIdentity)
       || now.getTime() - Date.parse(active.createdAt) <= 5 * 60 * 1_000) return false;
     const recoveryPath = join(selected.state, `startup-check-recovery-${active.token}.json`);
     try {

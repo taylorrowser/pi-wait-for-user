@@ -375,7 +375,9 @@ function acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken) {
   }
   expectString(active.claimantToken, "lifecycle recovery claimant token");
   expectDate(active.claimedAt, "lifecycle recovery claim date");
-  if (managedProcessIdentityIsLive(active.pid, active.processStartIdentity)) {
+  const ownerProcess = managedProcessStatus(active.pid);
+  if (ownerProcess.status === "unknown"
+    || (ownerProcess.status === "live" && ownerProcess.identity === active.processStartIdentity)) {
     fail("Stale lifecycle lock recovery is already active");
   }
   const stat = lstatSync(ownerPath);
@@ -411,7 +413,8 @@ function acquireLifecycleLock(dataRoot, operation) {
     expectDate(active.startedAt, "lifecycle lock start date");
     const activeProcess = managedProcessStatus(active.pid);
     if ((legacy && activeProcess.status !== "dead")
-      || (!legacy && activeProcess.status === "live" && activeProcess.identity === active.processStartIdentity)) {
+      || (!legacy && (activeProcess.status === "unknown"
+        || (activeProcess.status === "live" && activeProcess.identity === active.processStartIdentity)))) {
       fail(`Managed lifecycle operation already active: ${String(active.operation)}`);
     }
     const recoveryPath = join(paths.state, `lifecycle-recovery-${digestBytes(String(active.token))}.json`);
