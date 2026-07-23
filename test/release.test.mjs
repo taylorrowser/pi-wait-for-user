@@ -367,6 +367,19 @@ for (const {
   });
 }
 
+test("release verification rejects Manager Release package identity drift", () => {
+  const root = copyReleaseFixture();
+  const packagePath = join(root, "package.json");
+  const packageManifest = JSON.parse(readFileSync(packagePath, "utf8"));
+  packageManifest.piWaitForUser.managerReleaseId = "manager-stale";
+  writeFileSync(packagePath, `${JSON.stringify(packageManifest, null, 2)}\n`);
+
+  const result = verify(root);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Manager Release package identity/);
+});
+
 test("release verification rejects release documentation identity drift", () => {
   const root = copyReleaseFixture();
   const notes = join(root, "releases", releaseCandidateId, "RELEASE_NOTES.md");

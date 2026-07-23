@@ -433,6 +433,11 @@ export function verifyReleaseIdentityProjections(manifest, root) {
   const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const candidateVersion = manifest.releaseId.startsWith("pi-v") ? manifest.releaseId.slice(4) : "";
   if (packageManifest.version !== candidateVersion) fail("Package release candidate projection drift");
+  if (packageManifest.piWaitForUser?.managerReleaseId !== manifest.manager.releaseId
+    || canonicalJson(packageManifest.piWaitForUser?.compatibleReleaseManifestVersions)
+      !== canonicalJson(manifest.manager.compatibleReleaseManifestVersions)) {
+    fail("Manager Release package projection drift");
+  }
 
   const shellIdentity = (path, variable, expected, label) => {
     const contents = readFileSync(join(root, path), "utf8");
