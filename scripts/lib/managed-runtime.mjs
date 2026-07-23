@@ -40,6 +40,7 @@ import {
 const idPattern = /^[a-z0-9][a-z0-9.-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const supportedPlatforms = new Set(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
+const rootKeyProvenanceType = Object.freeze({ callerSelected: "caller-selected", installerPinned: "installer-pinned" });
 const receiptKeys = [
   "schemaVersion", "type", "ownedPath", "managerReleaseId", "downstreamReleaseId", "platform",
   "manifestSha256", "sourceArtifact", "verifiedAt", "payload",
@@ -369,7 +370,7 @@ function comparePayload(actual, expected) {
 }
 
 function publishStableDispatcher(paths, selected) {
-  if (selected.config.rootKeyProvenance.type !== "installer-pinned") {
+  if (selected.config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {
     fail("Command Ownership requires root keys pinned by the reviewed installer");
   }
   const destination = join(paths.root, "dispatcher");
@@ -630,7 +631,7 @@ function writeConfig(paths, platform, rootKeys, provenanceType) {
     if (existing.platform !== platform || canonicalJson([...existing.rootKeys]) !== canonicalJson([...configuredRootKeys])) {
       fail("Managed root trust or platform configuration mismatch");
     }
-    if (provenanceType === "installer-pinned" && existing.rootKeyProvenance.type !== "installer-pinned") atomicWrite(paths.config, config);
+    if (provenanceType === rootKeyProvenanceType.installerPinned && existing.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) atomicWrite(paths.config, config);
   } else atomicWrite(paths.config, config);
 }
 
@@ -639,7 +640,7 @@ function readConfig(paths) {
   exactObject(config, "managed configuration", ["schemaVersion", "platform", "rootKeys", "rootKeyProvenance"]);
   if (config.schemaVersion !== 1 || !Array.isArray(config.rootKeys) || config.rootKeys.length === 0) fail("Malformed managed configuration");
   exactObject(config.rootKeyProvenance, "root-key provenance", ["type", "configurationSha256"]);
-  if (!["caller-selected", "installer-pinned"].includes(config.rootKeyProvenance.type)) fail("Malformed root-key provenance");
+  if (!Object.values(rootKeyProvenanceType).includes(config.rootKeyProvenance.type)) fail("Malformed root-key provenance");
   expectString(config.rootKeyProvenance.configurationSha256, "root-key provenance digest", sha256Pattern);
   ensurePlatform(config.platform);
   const rootKeys = new Map();
@@ -989,13 +990,13 @@ function installAndActivateWithProvenance(options, provenanceType) {
 }
 
 export function installAndActivate(options) {
-  return installAndActivateWithProvenance(options, "caller-selected");
+  return installAndActivateWithProvenance(options, rootKeyProvenanceType.callerSelected);
 }
 
 export function installAndActivateFromPinnedRoot(options) {
   const configurationPath = join(dirname(dirname(fileURLToPath(import.meta.url))), "managed-root-keys.json");
   const rootKeys = readPinnedRootKeys(configurationPath);
-  return installAndActivateWithProvenance({ ...options, rootKeys }, "installer-pinned");
+  return installAndActivateWithProvenance({ ...options, rootKeys }, rootKeyProvenanceType.installerPinned);
 }
 
 export function recoverPrevious(dataRoot) {
@@ -1465,10 +1466,8 @@ export function installManagedCompatibility(dataRoot, options = {}) {
     const receiptPath = compatibilityReceiptPath(paths);
     if (pathExists(receiptPath)) {
       requireOwnedCompatibility(paths, expected, { allowMissing: true });
-    } else {
-      if (pathExists(expected.path)) fail(`Unowned foreign command collision: ${expected.path}`);
-      validateBinDirectory(binDirectory);
-    }
+    } else if (pathExists(expected.path)) fail(`Unowned foreign command collision: ${expected.path}`);
+    validateBinDirectory(binDirectory);
     const dispatcher = dispatcherIdentity(publishStableDispatcher(paths, selected));
     if (dispatcher.path !== expected.target) fail("Managed Dispatcher path mismatch");
     mkdir(binDirectory);
@@ -1521,6 +1520,7 @@ export function enableManagedOwnership(dataRoot, options = {}) {
       };
     }
 
+    validateBinDirectory(binDirectory);
     const dispatcher = dispatcherIdentity(publishStableDispatcher(paths, selected));
     if (ownership) {
       if (ownership.dispatcher.sha256 !== dispatcher.sha256 || ownership.dispatcher.size !== dispatcher.size) {
@@ -1551,7 +1551,8 @@ export function enableManagedOwnership(dataRoot, options = {}) {
 
     const resolvedCommand = commandPath("pi", environment);
     const resolvesToManagedDispatcher = resolvedCommand
-      && realpathSync(resolvedCommand) === realpathSync(ownership.entrypoints.pi.path);
+      && basename(resolvedCommand) === basename(ownership.entrypoints.pi.path)
+      && realpathSync(dirname(resolvedCommand)) === realpathSync(dirname(ownership.entrypoints.pi.path));
     if (!resolvesToManagedDispatcher) {
       const pathRemediation = resolvedCommand
         ? `Put ${binDirectory} before ${dirname(resolvedCommand)} in PATH`
@@ -1606,6 +1607,7 @@ export function disableManagedCommandOwnership(dataRoot) {
       }
       entrypoint = managedOwnership.entrypoints.pi;
     }
+    validateBinDirectory(dirname(entrypoint.path));
     const path = resolve(entrypoint.path);
     if (!pathExists(path)) return "already disabled";
     const stat = lstatSync(path);

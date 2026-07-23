@@ -11,6 +11,7 @@ import {
   readdirSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   lstatSync,
   rmSync,
   writeFileSync,
@@ -910,6 +911,7 @@ test("managed enable records Stock Pi and publishes both command names to one Di
   const bin = mkdtempSync(join(tmpdir(), "managed-runtime-enable-bin-"));
   const binAliasRoot = mkdtempSync(join(tmpdir(), "managed-runtime-enable-bin-alias-"));
   const binAlias = join(binAliasRoot, "bin");
+  const foreignBin = mkdtempSync(join(tmpdir(), "managed-runtime-enable-foreign-bin-"));
   const stockBin = mkdtempSync(join(tmpdir(), "managed-runtime-stock-bin-"));
   const candidate = fixture();
   const stock = join(stockBin, "pi");
@@ -940,10 +942,18 @@ test("managed enable records Stock Pi and publishes both command names to one Di
     assert.equal(normalLaunch.status, 0, normalLaunch.stderr);
     assert.equal(normalLaunch.stdout, compatibilityLaunch.stdout);
     assert.match(compatibilityLaunch.stdout, /PI_ARGS: <-e> <.*question-tool> <--help>/);
+
+    symlinkSync(join(dataRoot, "dispatcher", "managed-dispatcher.mjs"), join(foreignBin, "pi"));
+    const foreignResolution = runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], {
+      PATH: `${foreignBin}:${bin}:/usr/bin:/bin`,
+    });
+    assert.notEqual(foreignResolution.status, 0);
+    assert.match(foreignResolution.stderr, new RegExp(`current command resolution selects ${foreignBin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/pi`));
   } finally {
     destroy(dataRoot);
     destroy(bin);
     destroy(binAliasRoot);
+    destroy(foreignBin);
     destroy(stockBin);
     destroy(candidate.directory);
   }
@@ -1162,6 +1172,20 @@ test("managed disable retains the Compatibility Entrypoint and re-enable converg
     const unavailableStock = runManager(dataRoot, ["managed", "stock", "--"], environment);
     assert.notEqual(unavailableStock.status, 0);
     assert.match(unavailableStock.stderr, /No Stock Pi executable was recorded/);
+
+    const movedBin = `${bin}-owned`;
+    const foreignBin = `${bin}-foreign`;
+    renameSync(bin, movedBin);
+    mkdirSync(foreignBin);
+    symlinkSync(foreignBin, bin);
+    const substitutedEnable = runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment);
+    assert.notEqual(substitutedEnable.status, 0);
+    const substitutedDisable = runDispatcher(dataRoot, ["managed", "disable"]);
+    assert.notEqual(substitutedDisable.status, 0);
+    assert.deepEqual(readdirSync(foreignBin), []);
+    rmSync(bin);
+    renameSync(movedBin, bin);
+    destroy(foreignBin);
 
     rmSync(join(bin, "pi-wait-for-user"));
     writeFileSync(join(bin, "pi-wait-for-user"), "foreign\n");
