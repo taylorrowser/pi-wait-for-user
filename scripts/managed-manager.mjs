@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  legacyMigrationMessages,
+  legacyInstallationAdoptionMessages,
   managedActivationOptions,
   parseManagedOptions,
   readJsonFile,
@@ -21,7 +21,7 @@ import {
   executeStockPi,
   installAndActivate,
   installManagedCompatibility,
-  readLegacyMigration,
+  readLegacyInstallationAdoption,
   recoverPrevious,
   verifyManagedInstallation,
 } from "./lib/managed-runtime.mjs";
@@ -59,7 +59,7 @@ function activate(args) {
     now: values.has("--now") ? new Date(values.get("--now")) : new Date(),
     checkpoint: interruptionCheckpoint(),
   }));
-  return { activation, migration: readLegacyMigration(selectedDataRoot) };
+  return { activation, adoption: readLegacyInstallationAdoption(selectedDataRoot) };
 }
 
 function installCompatibility(args) {
@@ -111,9 +111,9 @@ try {
   if (args.length === 1 && args[0] === "--manager-version") {
     console.log(packageIdentity());
   } else if (args[0] === "managed" && args[1] === "activate") {
-    const { activation, migration } = activate(args.slice(2));
+    const { activation, adoption } = activate(args.slice(2));
     console.log(`Activated ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
-    for (const message of legacyMigrationMessages(migration)) console.log(message);
+    for (const message of legacyInstallationAdoptionMessages(adoption)) console.log(message);
   } else if (args[0] === "managed" && args[1] === "install-compatibility") {
     installCompatibility(args.slice(2));
   } else if (args[0] === "managed" && args[1] === "enable") {

@@ -79,10 +79,10 @@ export function managedActivationOptions(values, { dataRoot, now = new Date(), c
   return options;
 }
 
-export function legacyMigrationMessages(migration) {
-  if (!migration) return [];
-  const result = migration.disposition === "adopted-after-signed-verification"
-    ? `Adopted verified Legacy Downstream Installation from ${migration.legacyPath}.`
-    : `Legacy Downstream Installation was not signed-payload identical and was left untouched at ${migration.legacyPath}.`;
-  return [result, migration.cleanup];
+export function legacyInstallationAdoptionMessages(adoption) {
+  if (!adoption) return [];
+  const result = adoption.disposition === "adopted-after-signed-verification"
+    ? `Adopted verified Legacy Downstream Installation from ${adoption.legacyPath}.`
+    : `Legacy Downstream Installation was not signed-payload identical and was left untouched at ${adoption.legacyPath}.`;
+  return [result, adoption.cleanup];
 }

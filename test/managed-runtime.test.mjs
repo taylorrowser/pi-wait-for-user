@@ -28,7 +28,7 @@ import {
   defaultManagedDataRoot,
   installAndActivate,
   readActivation,
-  readLegacyMigration,
+  readLegacyInstallationAdoption,
   readManagedOwnership,
   removeInstalledPair,
   verifyManagedInstallation,
@@ -228,22 +228,27 @@ esac
   };
 }
 
+function markFixtureRootAsInstallerPinned(dataRoot) {
+  const configPath = join(dataRoot, "state", "config.json");
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  config.rootKeyProvenance.type = "installer-pinned";
+  config.rootKeyProvenance.configurationSha256 = digest(serializeMetadata({
+    type: config.rootKeyProvenance.type,
+    keys: config.rootKeys,
+  }));
+  writeFileSync(configPath, serializeMetadata(config));
+}
+
 function activate(dataRoot, candidate, options = {}) {
   const { callerSelected = false, ...activationOptions } = options;
-  const request = {
+  const result = installAndActivate({
     dataRoot,
     platform: "linux-x64",
     now,
     ...candidate,
     ...activationOptions,
-  };
-  const result = installAndActivate(request);
-  if (!callerSelected) {
-    const configPath = join(dataRoot, "state", "config.json");
-    const config = JSON.parse(readFileSync(configPath, "utf8"));
-    config.rootKeyProvenance.type = "installer-pinned";
-    writeFileSync(configPath, serializeMetadata(config));
-  }
+  });
+  if (!callerSelected) markFixtureRootAsInstallerPinned(dataRoot);
   return result;
 }
 
@@ -669,15 +674,15 @@ test("signed-payload-identical legacy installation is adopted only after complet
     cpSync(join(extracted, "pi-wait-for-user"), legacy, { recursive: true });
 
     activate(dataRoot, candidate, { legacyDirectories: [legacy] });
-    const migration = readLegacyMigration(dataRoot);
-    assert.equal(migration.disposition, "adopted-after-signed-verification");
+    const adoption = readLegacyInstallationAdoption(dataRoot);
+    assert.equal(adoption.disposition, "adopted-after-signed-verification");
     assert.equal(existsSync(legacy), true);
     assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
-    assert.match(migration.cleanup, /remove legacy directories manually/);
+    assert.match(adoption.cleanup, /remove legacy directories manually/);
 
     destroy(legacy);
     activate(dataRoot, candidate);
-    assert.equal(readLegacyMigration(dataRoot), null);
+    assert.equal(readLegacyInstallationAdoption(dataRoot), null);
   } finally {
     destroy(dataRoot);
     destroy(candidate.directory);
@@ -695,13 +700,13 @@ test("unverified legacy installation is untouched while a fresh Downstream Relea
     writeFileSync(join(legacy, "keep-foreign"), "untouched\n");
     writeFileSync(join(olderLegacy, "keep-older"), "older\n");
     activate(dataRoot, candidate);
-    const migration = readLegacyMigration(dataRoot);
-    assert.equal(migration.disposition, "fresh-install-legacy-untouched");
+    const adoption = readLegacyInstallationAdoption(dataRoot);
+    assert.equal(adoption.disposition, "fresh-install-legacy-untouched");
     assert.equal(readFileSync(join(legacy, "keep-foreign"), "utf8"), "untouched\n");
     assert.equal(readFileSync(join(olderLegacy, "keep-older"), "utf8"), "older\n");
     assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6", "pi-wait-for-user", "pi-core")), true);
-    assert.match(migration.cleanup, new RegExp(legacy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(migration.cleanup, new RegExp(olderLegacy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(adoption.cleanup, new RegExp(legacy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(adoption.cleanup, new RegExp(olderLegacy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     destroy(dataRoot);
     destroy(candidate.directory);
@@ -993,15 +998,16 @@ test("empty PATH components resolve Stock Pi from the current directory", () => 
   const candidate = fixture();
   try {
     mkdirSync(workingDirectory);
+    mkdirSync(join(root, "spoofed-pwd"));
     writeExecutable(join(workingDirectory, "pi"), "#!/bin/sh\necho current-directory-stock\n");
     activate(dataRoot, candidate);
     const result = runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], {
       PATH: `:${bin}:/usr/bin:/bin`,
-      PWD: workingDirectory,
+      PWD: join(root, "spoofed-pwd"),
       PI_TEST_CWD: workingDirectory,
     });
     assert.notEqual(result.status, 0);
-    assert.equal(readManagedOwnership(dataRoot).stock.resolvedPath, join(workingDirectory, "pi"));
+    assert.equal(readManagedOwnership(dataRoot).stock.resolvedPath, join(realpathSync(workingDirectory), "pi"));
     assert.match(result.stderr, /current command resolution selects .*project\/pi/);
   } finally {
     destroy(root);
@@ -1170,14 +1176,17 @@ test("managed stock rechecks identity, warns about downstream sessions, and prev
   const stockBin = mkdtempSync(join(tmpdir(), "managed-runtime-stock-command-bin-"));
   const candidate = fixture();
   const stock = join(stockBin, "pi");
+  const stockExecutable = join(stockBin, "stock-pi-executable");
   try {
-    writeExecutable(stock, "#!/bin/sh\nprintf 'STOCK_ARGS:'; printf ' <%s>' \"$@\"; printf '\\n'\n");
+    writeExecutable(stockExecutable, "#!/bin/sh\nprintf 'STOCK_COMMAND:%s\\n' \"$0\"; printf 'STOCK_ARGS:'; printf ' <%s>' \"$@\"; printf '\\n'\n");
+    symlinkSync(stockExecutable, stock);
     activate(dataRoot, candidate);
     const environment = { PATH: `${bin}:${stockBin}:/usr/bin:/bin` };
     assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
     const launched = runManager(dataRoot, ["managed", "stock", "--", "--model", "fixture"], environment);
     assert.equal(launched.status, 0, launched.stderr);
     assert.match(launched.stderr, /Stock Pi cannot open downstream session files/);
+    assert.match(launched.stdout, new RegExp(`STOCK_COMMAND:${stock.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
     assert.match(launched.stdout, /STOCK_ARGS: <--model> <fixture>/);
 
     rmSync(stock);

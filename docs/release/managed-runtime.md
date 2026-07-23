@@ -25,7 +25,7 @@ state/activation.json              atomic active + previous pair
 state/accepted-metadata.json       trust and Channel replay checkpoints
 state/entrypoints.json             strict command-ownership and Stock Pi receipt
 state/compatibility-entrypoint.json side-by-side compatibility ownership
-state/legacy-migration.json        adoption/fresh-install result and cleanup text
+state/legacy-adoption.json         Legacy Downstream Installation adoption result and cleanup text
 state/lifecycle.lock               exclusive mutating-operation owner
 dispatcher/                        immutable receipt-owned stage 0 copied from a verified Manager Release
 managers/<manager-release-id>/     immutable Manager Release payload

@@ -496,19 +496,19 @@ function discoverLegacyPaths(paths, releaseId, explicitPaths = []) {
   return discovered.filter((path, index) => pathExists(path) && discovered.indexOf(path) === index);
 }
 
-function updateLegacyMigration(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId }) {
-  const migrationPath = join(paths.state, "legacy-migration.json");
+function updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId }) {
+  const adoptionPath = join(paths.state, "legacy-adoption.json");
   if (legacyPaths.length > 0) {
     const listedPaths = legacyPaths.join(", ");
-    atomicWrite(migrationPath, {
+    atomicWrite(adoptionPath, {
       schemaVersion: 1,
-      type: "legacy-migration",
+      type: "legacy-downstream-installation-adoption",
       releaseId,
       legacyPath,
       disposition: legacyAdopted ? "adopted-after-signed-verification" : "fresh-install-legacy-untouched",
       cleanup: `After confirming managed commands work, remove legacy directories manually if desired: ${listedPaths}`,
     });
-  } else if (pathExists(migrationPath)) unlinkSync(migrationPath);
+  } else if (pathExists(adoptionPath)) unlinkSync(adoptionPath);
 }
 
 function pairFor(manifest, platform) {
@@ -614,7 +614,7 @@ function readAcceptedMetadataState(paths) {
 
 function rootKeyProvenance(rootKeys, type) {
   const keys = [...rootKeys].map(([keyId, publicKey]) => ({ keyId, publicKey })).sort((a, b) => a.keyId.localeCompare(b.keyId));
-  return { type, configurationSha256: digestBytes(serializeMetadata(keys)) };
+  return { type, configurationSha256: digestBytes(serializeMetadata({ type, keys })) };
 }
 
 function writeConfig(paths, platform, rootKeys, provenanceType) {
@@ -963,7 +963,7 @@ function installAndActivateWithProvenance(options, provenanceType) {
       if (existsSync(paths.activation)) {
         const current = readActivation(dataRoot);
         if (canonicalJson(current.active) === canonicalJson(pair)) {
-          updateLegacyMigration(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
+          updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
           return current;
         }
         previous = current.active;
@@ -976,7 +976,7 @@ function installAndActivateWithProvenance(options, provenanceType) {
         previous,
       };
       atomicWrite(paths.activation, activation);
-      updateLegacyMigration(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
+      updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
       checkpoint?.("after-activation-switch");
       return activation;
     } catch (error) {
@@ -1257,17 +1257,21 @@ function validateStockIdentity(value) {
   return value;
 }
 
-export function readLegacyMigration(dataRoot) {
-  const migrationPath = join(layout(dataRoot).state, "legacy-migration.json");
-  if (!pathExists(migrationPath)) return null;
-  const migration = readJson(migrationPath, "legacy migration state");
-  exactObject(migration, "legacy migration state", ["schemaVersion", "type", "releaseId", "legacyPath", "disposition", "cleanup"]);
-  if (migration.schemaVersion !== 1 || migration.type !== "legacy-migration") fail("Malformed legacy migration state");
-  ensureIdentifier(migration.releaseId, "legacy migration release ID");
-  expectString(migration.legacyPath, "legacy migration path");
-  if (!["adopted-after-signed-verification", "fresh-install-legacy-untouched"].includes(migration.disposition)) fail("Malformed legacy migration state");
-  expectString(migration.cleanup, "legacy migration cleanup instructions");
-  return migration;
+export function readLegacyInstallationAdoption(dataRoot) {
+  const adoptionPath = join(layout(dataRoot).state, "legacy-adoption.json");
+  if (!pathExists(adoptionPath)) return null;
+  const adoption = readJson(adoptionPath, "Legacy Downstream Installation adoption state");
+  exactObject(adoption, "Legacy Downstream Installation adoption state", ["schemaVersion", "type", "releaseId", "legacyPath", "disposition", "cleanup"]);
+  if (adoption.schemaVersion !== 1 || adoption.type !== "legacy-downstream-installation-adoption") {
+    fail("Malformed Legacy Downstream Installation adoption state");
+  }
+  ensureIdentifier(adoption.releaseId, "Legacy Downstream Installation release ID");
+  expectString(adoption.legacyPath, "Legacy Downstream Installation path");
+  if (!["adopted-after-signed-verification", "fresh-install-legacy-untouched"].includes(adoption.disposition)) {
+    fail("Malformed Legacy Downstream Installation adoption state");
+  }
+  expectString(adoption.cleanup, "Legacy Downstream Installation cleanup instructions");
+  return adoption;
 }
 
 export function readManagedOwnership(dataRoot) {
@@ -1304,7 +1308,7 @@ function shellQuote(value) {
 
 function commandPath(name, environment) {
   for (const directory of (environment.PATH || "").split(":")) {
-    const candidate = resolve(directory || environment.PWD || process.cwd(), name);
+    const candidate = resolve(directory || process.cwd(), name);
     if (!pathExists(candidate)) continue;
     let stat;
     try { stat = lstatSync(realpathSync(candidate)); } catch { continue; }
@@ -1452,7 +1456,7 @@ export function installManagedCompatibility(dataRoot, options = {}) {
   const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
   verifyManagedInstallation(dataRoot);
   const selected = validateActivePair(dataRoot);
-  return withLifecycleLock(dataRoot, "install managed compatibility command", () => {
+  return withLifecycleLock(dataRoot, "install Compatibility Entrypoint", () => {
     const paths = initializeLayout(dataRoot);
     const expected = {
       path: join(binDirectory, "pi-wait-for-user"),
@@ -1488,7 +1492,7 @@ export function enableManagedOwnership(dataRoot, options = {}) {
   const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
   verifyManagedInstallation(dataRoot);
   const selected = validateActivePair(dataRoot);
-  return withLifecycleLock(dataRoot, "enable managed command ownership", () => {
+  return withLifecycleLock(dataRoot, "enable Command Ownership", () => {
     const paths = initializeLayout(dataRoot);
     const ownershipPath = join(paths.state, "entrypoints.json");
     const expectedDispatcherPath = join(paths.root, "dispatcher", "managed-dispatcher.mjs");
@@ -1573,8 +1577,9 @@ export function executeStockPi(dataRoot, args, { environment = process.env } = {
   }
   if (canonicalJson(current) !== canonicalJson(stock)) fail(`Stock Pi identity changed at ${stock.resolvedPath}`);
   console.error("Warning: Stock Pi cannot open downstream session files. Use it only for Stock Pi sessions.");
-  if (typeof process.execve === "function") process.execve(current.executablePath, [stock.resolvedPath, ...args], environment);
-  const result = spawnSync(current.executablePath, args, { stdio: "inherit", env: environment, argv0: stock.resolvedPath });
+  if (realpathSync(stock.resolvedPath) !== current.executablePath) fail(`Stock Pi identity changed at ${stock.resolvedPath}`);
+  if (typeof process.execve === "function") process.execve(stock.resolvedPath, [stock.resolvedPath, ...args], environment);
+  const result = spawnSync(stock.resolvedPath, args, { stdio: "inherit", env: environment });
   if (result.error) throw result.error;
   return result.status ?? 1;
 }
@@ -1583,7 +1588,7 @@ export function disableManagedCommandOwnership(dataRoot) {
   const paths = initializeLayout(dataRoot);
   const ownershipPath = join(paths.state, "entrypoints.json");
   if (!existsSync(ownershipPath)) return "already disabled";
-  return withLifecycleLock(dataRoot, "disable managed command ownership", () => {
+  return withLifecycleLock(dataRoot, "disable Command Ownership", () => {
     const ownership = readJson(ownershipPath, "managed entrypoint receipt");
     let entrypoint;
     if (ownership.type === "managed-pi-entrypoint") {

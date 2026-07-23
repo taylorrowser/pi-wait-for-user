@@ -3,7 +3,7 @@
 import { resolve } from "node:path";
 
 import {
-  legacyMigrationMessages,
+  legacyInstallationAdoptionMessages,
   managedActivationOptions,
   parseManagedOptions,
   rejectUnknownOptions,
@@ -16,7 +16,7 @@ import {
   installAndActivateFromPinnedRoot,
   installManagedCompatibility,
   preflightManagedCommandOwnership,
-  readLegacyMigration,
+  readLegacyInstallationAdoption,
 } from "./lib/managed-runtime.mjs";
 
 function parseArguments(args) {
@@ -42,7 +42,7 @@ try {
   if (managePi) enableManagedOwnership(dataRoot, { binDirectory });
   console.log(`${managePi ? "Managed" : "Side-by-side"} installation ready: ${activation.active.downstreamReleaseId}.`);
   if (managePi) console.log(shellHashRemediation);
-  for (const message of legacyMigrationMessages(readLegacyMigration(dataRoot))) console.log(message);
+  for (const message of legacyInstallationAdoptionMessages(readLegacyInstallationAdoption(dataRoot))) console.log(message);
 } catch (error) {
   console.error(`managed-installer: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
