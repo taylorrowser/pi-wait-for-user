@@ -25,6 +25,7 @@ import {
   readManagedUpdateContext,
   recordManagedUpdateDiagnostic,
   validateActivePair,
+  verifyManagedInstallation,
   withLifecycleLockAsync,
   withManagedTemporaryDirectory,
   writeManagedStateJson,
@@ -400,7 +401,11 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
   try {
     const checked = await checkManagedUpdate(dataRoot, options);
     if (checked.kind === "incompatible") fail(`Managed Update failed during candidate compatibility: ${checked.incompatibility}`);
-    if (checked.kind !== "compatible-update") return checked;
+    if (checked.kind !== "compatible-update") {
+      if (!options.force) return checked;
+      verifyManagedInstallation(dataRoot);
+      return { ...checked, fullyVerifiedCurrent: true };
+    }
     const manifest = checked.source.manifestEnvelope.signed;
     const platform = readActivation(dataRoot).active.platform;
     const downstream = manifest.platformArchives.find((entry) => entry.platform === platform);
@@ -633,7 +638,7 @@ export function formatManagedStatus(dataRoot) {
     `Active Question Tool handler: ${question.handlerId}@${question.handlerVersion}`,
     `Stock Pi: ${stock}`,
     `Channel sequence: ${channel}`,
-    `Compatible Downstream Update: ${compatible}`,
+    `Compatible Downstream Release: ${compatible}`,
     `Patch Lag: ${patchLag}`,
     `Update Hold: ${hold ? hold.releaseId : "none"}`,
   ].join("\n");

@@ -1971,6 +1971,10 @@ test("explicit CLI renders current, Patch Lag, ordered --all success, and nonzer
     const currentResult = runDispatcher(dataRoot, ["update"], currentEnvironment);
     assert.equal(currentResult.status, 0, currentResult.stderr);
     assert.match(currentResult.stdout, /Already current: pi-v0\.81\.1-patch\.6/);
+    const forced = runDispatcher(dataRoot, ["update", "--force"], currentEnvironment);
+    assert.equal(forced.status, 0, forced.stderr);
+    assert.match(forced.stdout, /Fully verified current Activation pi-v0\.81\.1-patch\.6/);
+    assert.doesNotMatch(forced.stdout, /PI_ARGS:/);
 
     const lagEnvironment = managedNetworkEnvironment(current, current.directory, "0.82.0");
     const lag = runDispatcher(dataRoot, ["update"], lagEnvironment);

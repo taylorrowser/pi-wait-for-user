@@ -110,7 +110,7 @@ export function classifyManagedUpdateArgs(args) {
     return self || extensions ? { type: "reject" } : { type: "delegate" };
   }
   if (extensions && !self && !source) return { type: "delegate" };
-  return { type: "managed", all: all || extensions };
+  return { type: "managed", all: all || extensions, force: flags.has("--force") };
 }
 
 export function legacyInstallationAdoptionMessages(adoption) {

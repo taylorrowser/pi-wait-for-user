@@ -176,6 +176,7 @@ function printManagedUpdate(result) {
     console.log(`Already current: ${result.active.releaseId} (upstream Pi ${result.active.upstreamVersion}); Channel sequence ${result.channel.sequence}.`);
     if (result.upstreamError) console.log(`Upstream Pi status unavailable (informational only): ${result.upstreamError}`);
   }
+  if (result.fullyVerifiedCurrent) console.log(`Fully verified current Activation ${result.active.releaseId}.`);
 }
 
 async function update(args, route) {
@@ -184,6 +185,7 @@ async function update(args, route) {
   const packageOptions = args.filter((argument) => ["--approve", "--no-approve", "-a", "-na"].includes(argument));
   const result = await runManagedUpdate(dataRoot(), {
     all: route.all,
+    force: route.force,
     checkpoint: interruptionCheckpoint(),
     packagePhase: (selected) => packageUpdate(selected, packageOptions),
     managedPhaseComplete: printManagedUpdate,
