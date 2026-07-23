@@ -676,11 +676,20 @@ test("leased payload cleanup is deferred and receipt-scoped cleanup rejects fore
     cleanupManagedState(dataRoot);
     assert.equal(existsSync(join(dataRoot, "tmp", "foreign.tmp", "keep")), true);
 
-    const lease = acquirePairLease(dataRoot, oldPair);
+    const staleLease = acquirePairLease(dataRoot, oldPair);
+    const leaseDirectory = join(dataRoot, "leases", `${oldPair.managerReleaseId}--${oldPair.downstreamReleaseId}`);
+    const staleLeasePath = join(leaseDirectory, readdirSync(leaseDirectory)[0]);
+    const staleLeaseRecord = JSON.parse(readFileSync(staleLeasePath, "utf8"));
+    writeFileSync(staleLeasePath, serializeMetadata({
+      ...staleLeaseRecord,
+      processStartIdentity: "fixture-reused-pid",
+    }));
+    const liveLease = acquirePairLease(dataRoot, oldPair);
     assert.equal(removeInstalledPair(dataRoot, oldPair), "deferred");
     assert.equal(existsSync(join(dataRoot, "downstream-releases", oldPair.downstreamReleaseId)), true);
-    lease.release();
+    liveLease.release();
     assert.equal(cleanupManagedState(dataRoot) >= 1, true);
+    staleLease.release();
     assert.equal(existsSync(join(dataRoot, "downstream-releases", oldPair.downstreamReleaseId)), false);
     assert.equal(existsSync(join(dataRoot, "state", "pending-cleanup.json")), false);
   } finally {
@@ -1524,9 +1533,14 @@ test("Managed Update rejects a changed manifest that reuses an immutable Downstr
     }, "fixture-release", releasePrivate);
     const candidate = { ...current, manifestEnvelope, channelEnvelope };
 
+    const checked = await checkManagedUpdate(dataRoot, { transport: updateTransport(candidate), now });
+    assert.equal(checked.kind, "incompatible");
+    assert.match(checked.incompatibility, /reuses immutable Downstream Release identity/);
+    assert.equal(readManagedUpdateStatus(dataRoot).compatibleUpdate, null);
+    assert.equal(cachedManagedStartupNotice(dataRoot, { interactive: true }), null);
     await assert.rejects(
       performManagedUpdate(dataRoot, { transport: updateTransport(candidate), now }),
-      /Immutable downstream release identity already exists with different content/,
+      /candidate compatibility: signed candidate reuses immutable Downstream Release identity/,
     );
     assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
     const launched = runDispatcher(dataRoot, ["--help"], { PI_OFFLINE: "1" });

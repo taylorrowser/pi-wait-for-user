@@ -1380,15 +1380,19 @@ function livePairLeases(paths, pair) {
     let lease;
     try {
       lease = readJson(path, "pair lease");
-      exactObject(lease, "pair lease", ["schemaVersion", "pid", "token", "createdAt"]);
-      if (lease.schemaVersion !== 1 || !Number.isSafeInteger(lease.pid) || lease.pid < 1) fail("Malformed pair lease");
+      exactObject(lease, "pair lease", ["schemaVersion", "pid", "processStartIdentity", "token", "createdAt"]);
+      if (lease.schemaVersion !== 1 || !Number.isSafeInteger(lease.pid) || lease.pid < 1
+        || (lease.processStartIdentity !== null && (typeof lease.processStartIdentity !== "string" || !lease.processStartIdentity))) {
+        fail("Malformed pair lease");
+      }
       expectString(lease.token, "pair lease token");
       expectDate(lease.createdAt, "pair lease creation date");
     } catch {
       live.push(path); // Ambiguous lease state must defer deletion.
       continue;
     }
-    if (managedProcessStartIdentity(lease.pid) !== null) live.push(path);
+    const observedIdentity = managedProcessStartIdentity(lease.pid);
+    if (observedIdentity === null || observedIdentity === lease.processStartIdentity) live.push(path);
     else unlinkSync(path);
   }
   return live;
@@ -1401,12 +1405,18 @@ export function acquirePairLease(dataRoot, pair) {
   ensureManagedDirectory(directory);
   const token = randomUUID();
   const path = join(directory, `${token}.json`);
-  const lease = { schemaVersion: 1, pid: process.pid, token, createdAt: new Date().toISOString() };
+  const lease = {
+    schemaVersion: 1,
+    pid: process.pid,
+    processStartIdentity: currentManagedProcessStartIdentity(),
+    token,
+    createdAt: new Date().toISOString(),
+  };
   writeFileSync(path, serializeMetadata(lease), { flag: "wx", mode: 0o600 });
   return {
     transfer(pid) {
       if (!Number.isSafeInteger(pid) || pid < 1) fail("Invalid pair lease process");
-      atomicWrite(path, { ...lease, pid });
+      atomicWrite(path, { ...lease, pid, processStartIdentity: managedProcessStartIdentity(pid) });
     },
     release() {
       try {
