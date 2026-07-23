@@ -28,6 +28,7 @@ import {
   readActivation,
   readManagedStartupContext,
   readManagedStateJson,
+  readManagedUpdateHold,
   readManagedUpdateContext,
   recordManagedUpdateDiagnostic,
   removeManagedStateFileIfOwned,
@@ -519,13 +520,7 @@ export async function runManagedUpdate(dataRoot, options = {}) {
 }
 
 function readUpdateHold(dataRoot) {
-  const holdPath = paths(dataRoot).hold;
-  if (!existsSync(holdPath)) return null;
-  const hold = readManagedStateJson(dataRoot, "update-hold.json", "Update Hold", { maximumSize: metadataLimit });
-  if (!hasExactKeys(hold, ["schemaVersion", "type", "releaseId", "createdAt"])
-    || hold.schemaVersion !== 1 || hold.type !== "update-hold" || !idPattern.test(hold.releaseId)
-    || !validDate(hold.createdAt)) fail("Malformed Update Hold");
-  return hold;
+  return readManagedUpdateHold(dataRoot);
 }
 
 function statusMatchesContext(status, context) {

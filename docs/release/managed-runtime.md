@@ -31,6 +31,8 @@ state/lifecycle-recovery-*.json    durable stale-owner recovery claims
 state/update-status.json           last safe authenticated Channel/upstream status
 state/startup-check.json           24-hour startup-check throttle
 state/update-hold.json             optional exact Downstream Release hold
+state/pinned-releases.json          verified pairs exempt from automatic retention
+state/pending-cleanup.json          leased pairs awaiting a later lifecycle pass
 dispatcher/                        immutable receipt-owned stage 0 copied from a verified Manager Release
 managers/<manager-release-id>/     immutable Manager Release payload
 downstream-releases/<downstream-release-id>/ immutable Downstream Release payload
@@ -81,6 +83,14 @@ Explicit updates are synchronous. Normal launch instead renders only a cache who
 
 If a Legacy Downstream Installation for the selected release exists, Activation compares every file path, mode, size, and digest with the signed platform payload. Only an exact match is adopted into the managed staging tree. Otherwise Activation installs the fresh signed archive under `downstream-releases/`, leaves the Legacy Downstream Installation unchanged, and records exact manual cleanup guidance.
 
+## Rollback, retention, and recovery
+
+`pi managed rollback` fully re-verifies the retained previous local pair before one atomic Activation switch. `--to <release-id>` selects only an already installed, fully verified pair and performs no network work. A successful switch retains the pair being left as `previous`, warns about the session compatibility boundary, and records an Update Hold for exactly the release being left. `pi managed unhold` clears that hold; passive startup notices suppress only an exact held candidate, while explicit `pi update` continues to retry it.
+
+Automatic post-activation retention keeps the active pair, previous pair, every Pinned Release pair, and every live-leased pair. `pi managed pin [release-id]` and `unpin [release-id]` default to the active release. `pi managed prune` removes older receipt-proven pairs and records leased pairs for retry. Cleanup starts only after the Activation switch, and a later activation, prune, or explicit cleanup pass converges deferred work after leases end.
+
+Normal launch still fails closed when the active pair is unusable. Stage 0 alone implements `managed recover --previous` and `managed disable`; it never automatically starts the previous pair or Stock Pi.
+
 ## Ownership safety and Stock Pi
 
 Both launcher paths are preflighted before the Dispatcher or ownership state is published. Any file or symlink without the matching manager receipt is a hard collision; there is no overwrite, backup, rename, or force option. Compatibility is published before `pi`, so interruption cannot claim the normal command without a working compatibility path. Retries verify receipts and converge.
@@ -88,6 +98,12 @@ Both launcher paths are preflighted before the Dispatcher or ownership state is 
 Enable succeeds only when fresh command resolution selects the owned `pi`. A losing PATH reports the selected command, the exact managed bin directory ordering to apply, `hash -r` remediation, and exits nonzero without editing shell startup files. The verified pair and owned entrypoints remain available for a convergent retry.
 
 `pi managed stock -- <args>` rechecks every recorded Stock Pi identity field, rejects a missing/changed executable and Dispatcher recursion, warns that Stock Pi cannot open downstream session files, then executes only that recorded command. npm-, pnpm-, Bun-, and mise-style symlink paths remain untouched. No ownership or migration operation reads or writes `~/.pi/agent` or other shared Pi data.
+
+## Uninstall
+
+`pi managed uninstall` preflights the complete receipt-owned installation before mutation. It removes the owned normal `pi` entrypoint first, then the Compatibility Entrypoint, all unleased Manager and Downstream Releases (including pinned pairs), Activation/channel/trust state, receipts, artifacts, diagnostics, and safe receipt-scoped temporary state. Foreign launchers, inconsistent receipt copies, malformed ownership state, payload changes, and symlink substitution fail closed before either command path is removed.
+
+A live pair is recorded for deferred deletion and remains under its receipts until a later bootstrap or lifecycle pass can prove its lease ended. Repeated uninstall then converges. Stock Pi and shared Pi settings, credentials, packages, sessions, and Agent Threads are never receipt-owned and remain untouched. Disable and uninstall report the Stock Pi path/version that will resolve, or report that no `pi` command remains.
 
 ## Verification
 
@@ -112,3 +128,5 @@ Only fixture private keys are used by automated tests. This runtime stores pinne
 ## Ticket traceability
 
 Issue #61 acceptance behavior is exercised in `test/managed-runtime.test.mjs`: pair-change selection (patch-only, Manager Release, Question Tool, and upstream rebase), replay/schema/outage handling, immutable identity reuse rejection, streamed artifact downloads, reported-identity/smoke/conformance failure boundaries, atomic activation, Patch Lag, update syntax routing, `--all` partial results, retryable startup throttling/output isolation, safe cached status, and Dispatcher-level proof that no self-inclusive update form reaches Pi core. The Activation crash/failure matrix from #59 remains the shared verification seam used by Managed Update.
+
+Issue #62 behavior is exercised at the same filesystem/CLI seam: previous and explicit-local rollback, exact Update Holds and unhold, rollback interruption boundaries, active/previous/pinned/live-leased retention, convergent prune, corrupt-active fail-closed launch and explicit recovery, receipt-safe uninstall, foreign entrypoint refusal, current-process lease deferral, retry after every uninstall boundary, absent-install no-op, final Stock Pi resolution, and preservation hashes for settings, credentials, packages, sessions, and Agent Threads.

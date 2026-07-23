@@ -8,6 +8,7 @@ import {
   defaultManagedDataRoot,
   disableManagedCommandOwnership,
   dispatchActivePair,
+  managedPiResolution,
   recoverPrevious,
 } from "./lib/managed-runtime.mjs";
 
@@ -40,6 +41,7 @@ try {
     console.log(`Recovered ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "disable") {
     console.log(`Command Ownership ${disableManagedCommandOwnership(root)}.`);
+    console.log(managedPiResolution(process.env).message);
   } else {
     process.exitCode = await dispatchActivePair(root, args);
   }

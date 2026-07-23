@@ -35,6 +35,8 @@ import {
   readLegacyInstallationAdoption,
   readManagedOwnership,
   removeInstalledPair,
+  rollbackManagedInstallation,
+  uninstallManagedInstallation,
   verifyManagedInstallation,
   withLifecycleLock,
 } from "../scripts/lib/managed-runtime.mjs";
@@ -620,6 +622,73 @@ test("unknown trust, Channel, and Release Manifest schemas leave the active pair
   }
 });
 
+test("managed rollback re-verifies a local pair, swaps previous, records an exact Update Hold, and never downloads", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-lifecycle-rollback-"));
+  const first = fixture({ releaseId: "pi-v0.81.1-patch.4" });
+  const second = fixture({ releaseId: "pi-v0.81.1-patch.5", managerId: "manager-v2" });
+  const current = fixture({ managerId: "manager-v3" });
+  try {
+    activate(dataRoot, first);
+    assert.equal(runManager(dataRoot, ["managed", "pin"]).status, 0);
+    activate(dataRoot, second);
+    activate(dataRoot, current);
+
+    const rollback = runManager(dataRoot, ["managed", "rollback"]);
+    assert.equal(rollback.status, 0, rollback.stderr);
+    assert.match(rollback.stderr, /newer sessions may reject or reconstruct as unavailable/i);
+    assert.match(rollback.stdout, /Rolled back to .*patch\.5/);
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.5");
+    assert.equal(readActivation(dataRoot).previous.downstreamReleaseId, "pi-v0.81.1-patch.6");
+    assert.equal(JSON.parse(readFileSync(join(dataRoot, "state", "update-hold.json"), "utf8")).releaseId, "pi-v0.81.1-patch.6");
+
+    const explicit = runManager(dataRoot, ["managed", "rollback", "--to", "pi-v0.81.1-patch.4"]);
+    assert.equal(explicit.status, 0, explicit.stderr);
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.4");
+    assert.equal(readActivation(dataRoot).previous.downstreamReleaseId, "pi-v0.81.1-patch.5");
+    assert.equal(JSON.parse(readFileSync(join(dataRoot, "state", "update-hold.json"), "utf8")).releaseId, "pi-v0.81.1-patch.5");
+
+    const absent = runManager(dataRoot, ["managed", "rollback", "--to", "pi-v0.81.1-patch.99"]);
+    assert.notEqual(absent.status, 0);
+    assert.match(absent.stderr, /locally installed verified pair/i);
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.4");
+
+    const unheld = runManager(dataRoot, ["managed", "unhold"]);
+    assert.equal(unheld.status, 0, unheld.stderr);
+    assert.equal(existsSync(join(dataRoot, "state", "update-hold.json")), false);
+    assert.match(runManager(dataRoot, ["managed", "unhold"]).stdout, /already clear/i);
+  } finally {
+    destroy(dataRoot);
+    destroy(first.directory);
+    destroy(second.directory);
+    destroy(current.directory);
+  }
+});
+
+test("rollback interruption boundaries expose only the old pair or the complete rollback result", () => {
+  for (const boundary of ["rollback-target-verified", "before-rollback-switch", "after-rollback-switch"]) {
+    const dataRoot = mkdtempSync(join(tmpdir(), "managed-lifecycle-rollback-interruption-"));
+    const previous = fixture({ releaseId: "pi-v0.81.1-patch.5" });
+    const active = fixture({ managerId: "manager-v2" });
+    try {
+      activate(dataRoot, previous);
+      activate(dataRoot, active);
+      assert.throws(() => rollbackManagedInstallation(dataRoot, {
+        checkpoint(name) { if (name === boundary) throw new Error(`Interrupted at ${name}`); },
+      }), new RegExp(boundary));
+      const activation = readActivation(dataRoot);
+      const switched = boundary === "after-rollback-switch";
+      assert.equal(activation.active.downstreamReleaseId, switched ? "pi-v0.81.1-patch.5" : "pi-v0.81.1-patch.6");
+      assert.equal(activation.previous.downstreamReleaseId, switched ? "pi-v0.81.1-patch.6" : "pi-v0.81.1-patch.5");
+      assert.doesNotThrow(() => verifyManagedInstallation(dataRoot, { all: true }));
+      assert.equal(existsSync(join(dataRoot, "state", "update-hold.json")), switched);
+    } finally {
+      destroy(dataRoot);
+      destroy(previous.directory);
+      destroy(active.directory);
+    }
+  }
+});
+
 test("stage-0 recovers the verified previous pair without the active manager", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-recover-"));
   const oldCandidate = fixture({ releaseId: "pi-v0.81.1-patch.5" });
@@ -660,6 +729,50 @@ test("the lifecycle lock serializes mutations while normal launches continue", (
   }
 });
 
+test("automatic retention keeps active, previous, pinned, and live-leased pairs while unpin and prune converge", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-lifecycle-retention-"));
+  const pinned = fixture({ releaseId: "pi-v0.81.1-patch.3" });
+  const leased = fixture({ releaseId: "pi-v0.81.1-patch.4", managerId: "manager-v2" });
+  const previous = fixture({ releaseId: "pi-v0.81.1-patch.5", managerId: "manager-v3" });
+  const active = fixture({ managerId: "manager-v4" });
+  let lease;
+  try {
+    activate(dataRoot, pinned);
+    assert.match(runManager(dataRoot, ["managed", "pin"]).stdout, /Pinned.*patch\.3/);
+    assert.match(runManager(dataRoot, ["managed", "pin"]).stdout, /already pinned/i);
+    activate(dataRoot, leased);
+    lease = acquirePairLease(dataRoot, readActivation(dataRoot).active);
+    activate(dataRoot, previous);
+    activate(dataRoot, active);
+
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.3")), true);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.4")), true);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.5")), true);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6")), true);
+
+    assert.match(runManager(dataRoot, ["managed", "unpin", "pi-v0.81.1-patch.3"]).stdout, /Unpinned.*patch\.3/);
+    assert.match(runManager(dataRoot, ["managed", "unpin", "pi-v0.81.1-patch.3"]).stdout, /already unpinned/i);
+    const pruned = runManager(dataRoot, ["managed", "prune"]);
+    assert.equal(pruned.status, 0, pruned.stderr);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.3")), false);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.4")), true);
+
+    lease.release();
+    lease = undefined;
+    assert.equal(runManager(dataRoot, ["managed", "prune"]).status, 0);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.4")), false);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.5")), true);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6")), true);
+  } finally {
+    lease?.release();
+    destroy(dataRoot);
+    destroy(pinned.directory);
+    destroy(leased.directory);
+    destroy(previous.directory);
+    destroy(active.directory);
+  }
+});
+
 test("leased payload cleanup is deferred and receipt-scoped cleanup rejects foreign paths", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-cleanup-"));
   const old = fixture({ releaseId: "pi-v0.81.1-patch.4" });
@@ -669,6 +782,7 @@ test("leased payload cleanup is deferred and receipt-scoped cleanup rejects fore
     activate(dataRoot, old);
     const oldPair = readActivation(dataRoot).active;
     activate(dataRoot, previous);
+    const liveLease = acquirePairLease(dataRoot, oldPair);
     activate(dataRoot, active);
 
     mkdirSync(join(dataRoot, "tmp", "foreign.tmp"), { recursive: true });
@@ -676,15 +790,15 @@ test("leased payload cleanup is deferred and receipt-scoped cleanup rejects fore
     cleanupManagedState(dataRoot);
     assert.equal(existsSync(join(dataRoot, "tmp", "foreign.tmp", "keep")), true);
 
-    const staleLease = acquirePairLease(dataRoot, oldPair);
     const leaseDirectory = join(dataRoot, "leases", `${oldPair.managerReleaseId}--${oldPair.downstreamReleaseId}`);
-    const staleLeasePath = join(leaseDirectory, readdirSync(leaseDirectory)[0]);
+    const priorLeaseNames = new Set(readdirSync(leaseDirectory));
+    const staleLease = acquirePairLease(dataRoot, oldPair);
+    const staleLeasePath = join(leaseDirectory, readdirSync(leaseDirectory).find((name) => !priorLeaseNames.has(name)));
     const staleLeaseRecord = JSON.parse(readFileSync(staleLeasePath, "utf8"));
     writeFileSync(staleLeasePath, serializeMetadata({
       ...staleLeaseRecord,
       processStartIdentity: "fixture-reused-pid",
     }));
-    const liveLease = acquirePairLease(dataRoot, oldPair);
     assert.equal(removeInstalledPair(dataRoot, oldPair), "deferred");
     assert.equal(existsSync(join(dataRoot, "downstream-releases", oldPair.downstreamReleaseId)), true);
     liveLease.release();
@@ -1283,6 +1397,7 @@ test("managed disable retains the Compatibility Entrypoint and re-enable converg
 
     const disabled = runDispatcher(dataRoot, ["managed", "disable"]);
     assert.equal(disabled.status, 0, disabled.stderr);
+    assert.match(disabled.stdout, /(?:Stock Pi .* will resolve|No pi command will resolve)/);
     assert.equal(existsSync(join(bin, "pi")), false);
     assert.equal(readlinkSync(join(bin, "pi-wait-for-user")), join(dataRoot, "dispatcher", "managed-dispatcher.mjs"));
     const repeatedDisable = runDispatcher(dataRoot, ["managed", "disable"]);
@@ -1299,6 +1414,133 @@ test("managed disable retains the Compatibility Entrypoint and re-enable converg
     destroy(stockBin);
     destroy(home);
     destroy(candidate.directory);
+  }
+});
+
+test("managed uninstall removes only receipt-proven product state and preserves Stock Pi and shared Pi data", () => {
+  const root = mkdtempSync(join(tmpdir(), "managed-lifecycle-uninstall-"));
+  const dataRoot = join(root, "managed-data");
+  const bin = join(root, "managed-bin");
+  const stockBin = join(root, "stock-bin");
+  const home = join(root, "home");
+  const candidate = fixture();
+  const legacy = join(dataRoot, "releases", "legacy-patch");
+  const sharedFiles = [
+    join(home, ".pi", "agent", "settings.json"),
+    join(home, ".pi", "agent", "auth.json"),
+    join(home, ".pi", "agent", "sessions", "thread.jsonl"),
+    join(home, ".pi", "agent", "packages", "package.json"),
+    join(home, ".pi", "agent", "threads", "thread.json"),
+  ];
+  try {
+    mkdirSync(stockBin, { recursive: true });
+    writeExecutable(join(stockBin, "pi"), "#!/bin/sh\necho stock-pi-2.0\n");
+    for (const [index, path] of sharedFiles.entries()) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, `shared-${index}\n`);
+    }
+    const before = sharedFiles.map((path) => digest(readFileSync(path)));
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "foreign-legacy-payload"), "preserve legacy\n");
+    activate(dataRoot, candidate);
+    const environment = { PATH: `${bin}:${stockBin}:/usr/bin:/bin`, HOME: home };
+    assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
+
+    const foreignCompatibility = join(root, "foreign-compatibility");
+    rmSync(join(bin, "pi-wait-for-user"));
+    writeFileSync(join(bin, "pi-wait-for-user"), "foreign\n");
+    const refused = runManager(dataRoot, ["managed", "uninstall"], environment);
+    assert.notEqual(refused.status, 0);
+    assert.equal(readFileSync(join(bin, "pi-wait-for-user"), "utf8"), "foreign\n");
+    assert.equal(existsSync(join(bin, "pi")), true);
+    renameSync(join(bin, "pi-wait-for-user"), foreignCompatibility);
+    symlinkSync(join(dataRoot, "dispatcher", "managed-dispatcher.mjs"), join(bin, "pi-wait-for-user"));
+
+    const uninstalled = runManager(dataRoot, ["managed", "uninstall"], environment);
+    assert.equal(uninstalled.status, 0, uninstalled.stderr);
+    assert.match(uninstalled.stdout, new RegExp(`Stock Pi .*${stockBin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/pi.*will resolve`, "i"));
+    assert.equal(existsSync(join(bin, "pi")), false);
+    assert.equal(existsSync(join(bin, "pi-wait-for-user")), false);
+    assert.equal(existsSync(join(dataRoot, "state")), false);
+    assert.equal(readFileSync(join(legacy, "foreign-legacy-payload"), "utf8"), "preserve legacy\n");
+    assert.equal(existsSync(join(stockBin, "pi")), true);
+    assert.deepEqual(sharedFiles.map((path) => digest(readFileSync(path))), before);
+
+    const repeated = runManager(dataRoot, ["managed", "uninstall"], environment);
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.match(repeated.stdout, /already absent/i);
+  } finally {
+    destroy(root);
+    destroy(candidate.directory);
+  }
+});
+
+test("uninstall defers its live Dispatcher pair and a later lifecycle pass removes it", () => {
+  const root = mkdtempSync(join(tmpdir(), "managed-lifecycle-uninstall-leased-"));
+  const dataRoot = join(root, "data");
+  const bin = join(root, "bin");
+  const candidate = fixture();
+  const environment = {
+    ...process.env,
+    PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    PI_MANAGED_DATA_ROOT: dataRoot,
+    PI_SKIP_VERSION_CHECK: "1",
+  };
+  try {
+    activate(dataRoot, candidate);
+    assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
+    const first = spawnSync(join(bin, "pi"), ["managed", "uninstall"], { encoding: "utf8", env: environment });
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stdout, /1 leased pair\(s\) deferred/);
+    assert.equal(existsSync(join(bin, "pi")), false);
+    assert.equal(existsSync(join(bin, "pi-wait-for-user")), false);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", "pi-v0.81.1-patch.6")), true);
+
+    const converged = runManager(dataRoot, ["managed", "uninstall"], environment);
+    assert.equal(converged.status, 0, converged.stderr);
+    assert.equal(existsSync(dataRoot), false);
+  } finally {
+    destroy(root);
+    destroy(candidate.directory);
+  }
+});
+
+test("uninstall interruption boundaries retry to convergence without touching shared Pi data", () => {
+  const boundaries = [
+    "uninstall-preflight-complete",
+    "uninstall-pi-entrypoint-removed",
+    "uninstall-compatibility-entrypoint-removed",
+    "uninstall-payloads-removed",
+    "uninstall-state-removed",
+  ];
+  for (const boundary of boundaries) {
+    const root = mkdtempSync(join(tmpdir(), "managed-lifecycle-uninstall-interruption-"));
+    const dataRoot = join(root, "data");
+    const bin = join(root, "bin");
+    const home = join(root, "home");
+    const shared = join(home, ".pi", "agent", "sessions", "thread.jsonl");
+    const candidate = fixture();
+    const environment = { PATH: `${bin}:/usr/bin:/bin`, HOME: home };
+    try {
+      mkdirSync(dirname(shared), { recursive: true });
+      writeFileSync(shared, "preserve me\n");
+      activate(dataRoot, candidate);
+      assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
+      assert.throws(() => uninstallManagedInstallation(dataRoot, {
+        environment,
+        checkpoint(name) { if (name === boundary) throw new Error(`Interrupted at ${name}`); },
+      }), new RegExp(boundary));
+      assert.equal(readFileSync(shared, "utf8"), "preserve me\n");
+      const converged = uninstallManagedInstallation(dataRoot, { environment });
+      assert.equal(converged.kind, "uninstalled");
+      assert.equal(existsSync(dataRoot), false);
+      assert.equal(existsSync(join(bin, "pi")), false);
+      assert.equal(existsSync(join(bin, "pi-wait-for-user")), false);
+      assert.equal(readFileSync(shared, "utf8"), "preserve me\n");
+    } finally {
+      destroy(root);
+      destroy(candidate.directory);
+    }
   }
 });
 

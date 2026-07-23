@@ -196,6 +196,7 @@ function layout(dataRoot) {
     temporary: join(root, "tmp"),
     diagnostics: join(root, "diagnostics"),
     pending: join(root, "state", "pending-cleanup.json"),
+    pins: join(root, "state", "pinned-releases.json"),
     lock: join(root, "state", "lifecycle.lock"),
   };
 }
@@ -1254,6 +1255,7 @@ function installAndActivateWithProvenance(options, provenanceType) {
       atomicWrite(paths.activation, activation);
       updateLegacyInstallationAdoption(paths, { legacyPaths, legacyAdopted, legacyPath, releaseId: manifest.releaseId });
       checkpoint?.("after-activation-switch");
+      pruneInstalledPairsLocked(dataRoot);
       return activation;
     } catch (error) {
       if (managerStage) removeStage(managerStage.stage);
@@ -1397,6 +1399,165 @@ export function installAndActivateFromPinnedRoot(options) {
   const configurationPath = join(dirname(dirname(fileURLToPath(import.meta.url))), "managed-root-keys.json");
   const rootKeys = readPinnedRootKeys(configurationPath);
   return installAndActivateWithProvenance({ ...options, rootKeys }, rootKeyProvenanceType.installerPinned);
+}
+
+function updateHoldPath(paths) {
+  return join(paths.state, "update-hold.json");
+}
+
+function readUpdateHoldRecord(paths) {
+  const path = updateHoldPath(paths);
+  if (!pathExists(path)) return null;
+  const hold = readJson(path, "Update Hold");
+  exactObject(hold, "Update Hold", ["schemaVersion", "type", "releaseId", "createdAt"]);
+  if (hold.schemaVersion !== 1 || hold.type !== "update-hold") fail("Malformed Update Hold");
+  ensureIdentifier(hold.releaseId, "Update Hold release ID");
+  expectDate(hold.createdAt, "Update Hold creation date");
+  return hold;
+}
+
+export function readManagedUpdateHold(dataRoot) {
+  return readUpdateHoldRecord(layout(dataRoot));
+}
+
+function installedPairForRelease(paths, releaseId) {
+  ensureIdentifier(releaseId, "local release ID");
+  const releasePath = join(paths.releases, releaseId);
+  const centralPath = receiptPath(paths, "downstream", releaseId);
+  if (!pathExists(releasePath) || !pathExists(centralPath)) return null;
+  const receipt = readJson(centralPath, "downstream receipt");
+  const pair = {
+    managerReleaseId: receipt.managerReleaseId,
+    downstreamReleaseId: releaseId,
+    manifestSha256: receipt.manifestSha256,
+    platform: receipt.platform,
+  };
+  validatePairShape(pair, "installed local pair");
+  const verifiedReceipt = readReceiptCopies(paths, "downstream", releaseId, releasePath, pair);
+  comparePayload(payloadWithoutManagerFiles(releasePath), verifiedReceipt.payload);
+  return pair;
+}
+
+function installedPairs(paths) {
+  const receiptDirectory = ensureNoSymlinkPath(paths.receipts, join(paths.receipts, "releases"), "Downstream receipt directory");
+  const releaseDirectory = ensureNoSymlinkPath(paths.root, paths.releases, "Downstream Release directory");
+  ensureManagedDirectory(receiptDirectory);
+  ensureManagedDirectory(releaseDirectory);
+  const pairs = readdirSync(receiptDirectory).sort().map((name) => {
+    if (!name.endsWith(".json")) fail(`Foreign Downstream Release receipt: ${name}`);
+    const releaseId = name.slice(0, -5);
+    ensureIdentifier(releaseId, "Downstream Release receipt ID");
+    const pair = installedPairForRelease(paths, releaseId);
+    if (!pair) fail(`Inconsistent receipt for Downstream Release ${releaseId}`);
+    return pair;
+  });
+  for (const releaseId of readdirSync(releaseDirectory)) {
+    ensureIdentifier(releaseId, "installed Downstream Release ID");
+    if (!pairs.some((pair) => pair.downstreamReleaseId === releaseId)) {
+      fail(`Installed Downstream Release has no receipt: ${releaseId}`);
+    }
+  }
+  return pairs;
+}
+
+function readPinnedPairs(paths) {
+  if (!pathExists(paths.pins)) return [];
+  const value = readJson(paths.pins, "Pinned Releases state");
+  exactObject(value, "Pinned Releases state", ["schemaVersion", "type", "pairs"]);
+  if (value.schemaVersion !== 1 || value.type !== "pinned-releases" || !Array.isArray(value.pairs)) {
+    fail("Malformed Pinned Releases state");
+  }
+  value.pairs.forEach((pair) => validatePairShape(pair, "Pinned Release pair"));
+  if (new Set(value.pairs.map((pair) => pair.downstreamReleaseId)).size !== value.pairs.length) {
+    fail("Malformed Pinned Releases state");
+  }
+  return value.pairs;
+}
+
+function writePinnedPairs(paths, pairs) {
+  if (pairs.length === 0) {
+    if (pathExists(paths.pins)) unlinkSync(paths.pins);
+    return;
+  }
+  atomicWrite(paths.pins, { schemaVersion: 1, type: "pinned-releases", pairs });
+}
+
+export function pinManagedRelease(dataRoot, releaseId) {
+  return withLifecycleLock(dataRoot, `pin ${releaseId || "active release"}`, () => {
+    const paths = layout(dataRoot);
+    const selectedId = releaseId || readActivation(dataRoot).active.downstreamReleaseId;
+    const pair = installedPairForRelease(paths, selectedId);
+    if (!pair) fail(`No locally installed verified pair exists for ${selectedId}`);
+    verifyPair(dataRoot, pair);
+    const pins = readPinnedPairs(paths);
+    if (pins.some((entry) => entry.downstreamReleaseId === selectedId)) return { kind: "already-pinned", pair };
+    writePinnedPairs(paths, [...pins, pair]);
+    return { kind: "pinned", pair };
+  });
+}
+
+export function unpinManagedRelease(dataRoot, releaseId) {
+  return withLifecycleLock(dataRoot, `unpin ${releaseId || "active release"}`, () => {
+    const paths = layout(dataRoot);
+    const selectedId = releaseId || readActivation(dataRoot).active.downstreamReleaseId;
+    ensureIdentifier(selectedId, "Pinned Release ID");
+    const pins = readPinnedPairs(paths);
+    const retained = pins.filter((pair) => pair.downstreamReleaseId !== selectedId);
+    if (retained.length === pins.length) return { kind: "already-unpinned", releaseId: selectedId };
+    writePinnedPairs(paths, retained);
+    return { kind: "unpinned", releaseId: selectedId };
+  });
+}
+
+export function rollbackManagedInstallation(dataRoot, options = {}) {
+  const releaseId = options.releaseId;
+  return withLifecycleLock(dataRoot, `rollback${releaseId ? ` to ${releaseId}` : ""}`, () => {
+    const paths = layout(dataRoot);
+    const current = readActivation(dataRoot);
+    const target = releaseId ? installedPairForRelease(paths, releaseId) : current.previous;
+    if (!target) {
+      if (releaseId) fail(`No locally installed verified pair exists for ${releaseId}`);
+      return { kind: "no-target", activation: current };
+    }
+    if (canonicalJson(target) === canonicalJson(current.active)) {
+      return { kind: "already-active", activation: current };
+    }
+    verifyPair(dataRoot, target);
+    options.checkpoint?.("rollback-target-verified");
+    readUpdateHoldRecord(paths); // Refuse malformed or substituted state before changing Activation.
+    const rolledBack = {
+      schemaVersion: 1,
+      type: "activation",
+      createdAt: new Date().toISOString(),
+      active: target,
+      previous: current.active,
+    };
+    options.checkpoint?.("before-rollback-switch");
+    atomicWrite(paths.activation, rolledBack);
+    try {
+      atomicWrite(updateHoldPath(paths), {
+        schemaVersion: 1,
+        type: "update-hold",
+        releaseId: current.active.downstreamReleaseId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      atomicWrite(paths.activation, current);
+      throw error;
+    }
+    options.checkpoint?.("after-rollback-switch");
+    pruneInstalledPairsLocked(dataRoot);
+    return { kind: "rolled-back", activation: rolledBack, heldReleaseId: current.active.downstreamReleaseId };
+  });
+}
+
+export function clearManagedUpdateHold(dataRoot) {
+  return withLifecycleLock(dataRoot, "clear Update Hold", () => {
+    const paths = layout(dataRoot);
+    if (!readUpdateHoldRecord(paths)) return "already clear";
+    unlinkSync(updateHoldPath(paths));
+    return "cleared";
+  });
 }
 
 export function recoverPrevious(dataRoot) {
@@ -1591,61 +1752,82 @@ function removeThroughTombstone(paths, source, kind) {
   removeStage(tombstone);
 }
 
-export function removeInstalledPair(dataRoot, pair) {
-  return withLifecycleLock(dataRoot, `remove ${pair.downstreamReleaseId}`, () => {
-    exactObject(pair, "cleanup pair", ["managerReleaseId", "downstreamReleaseId", "manifestSha256", "platform"]);
-    validatePairShape(pair, "cleanup pair");
-    const paths = layout(dataRoot);
-    const activation = readActivation(dataRoot);
-    if (canonicalJson(pair) === canonicalJson(activation.active)) fail("Cannot remove the active pair");
-    if (activation.previous && canonicalJson(pair) === canonicalJson(activation.previous)) fail("Cannot remove the retained previous pair");
-    if (livePairLeases(paths, pair).length > 0) {
-      writePendingPairs(paths, [...readPendingPairs(paths), pair]);
-      return "deferred";
-    }
-    const releasePath = join(paths.releases, pair.downstreamReleaseId);
-    const centralReleaseReceipt = ensureNoSymlinkPath(
-      paths.receipts,
-      receiptPath(paths, "downstream", pair.downstreamReleaseId),
-      "Downstream cleanup receipt path",
-    );
-    if (existsSync(releasePath)) {
-      readReceiptCopies(paths, "downstream", pair.downstreamReleaseId, releasePath, pair);
-      removeThroughTombstone(paths, releasePath, "downstream");
-      unlinkSync(centralReleaseReceipt);
-    } else if (existsSync(centralReleaseReceipt)) {
-      validateReceipt(readJson(centralReleaseReceipt, "downstream receipt"), "downstream", releasePath, pair);
-      unlinkSync(centralReleaseReceipt);
-    }
+function removeInstalledPairLocked(dataRoot, pair, { allowRetained = false } = {}) {
+  exactObject(pair, "cleanup pair", ["managerReleaseId", "downstreamReleaseId", "manifestSha256", "platform"]);
+  validatePairShape(pair, "cleanup pair");
+  const paths = layout(dataRoot);
+  const activation = readActivation(dataRoot);
+  if (!allowRetained && canonicalJson(pair) === canonicalJson(activation.active)) fail("Cannot remove the active pair");
+  if (!allowRetained && activation.previous && canonicalJson(pair) === canonicalJson(activation.previous)) fail("Cannot remove the retained previous pair");
+  if (livePairLeases(paths, pair).length > 0) {
+    writePendingPairs(paths, [...readPendingPairs(paths), pair]);
+    return "deferred";
+  }
+  const releasePath = join(paths.releases, pair.downstreamReleaseId);
+  const centralReleaseReceipt = ensureNoSymlinkPath(
+    paths.receipts,
+    receiptPath(paths, "downstream", pair.downstreamReleaseId),
+    "Downstream cleanup receipt path",
+  );
+  if (existsSync(releasePath)) {
+    readReceiptCopies(paths, "downstream", pair.downstreamReleaseId, releasePath, pair);
+    removeThroughTombstone(paths, releasePath, "downstream");
+    unlinkSync(centralReleaseReceipt);
+  } else if (existsSync(centralReleaseReceipt)) {
+    validateReceipt(readJson(centralReleaseReceipt, "downstream receipt"), "downstream", releasePath, pair);
+    unlinkSync(centralReleaseReceipt);
+  }
 
-    const retainedManager = [activation.active, activation.previous]
-      .filter(Boolean)
-      .some((entry) => entry.managerReleaseId === pair.managerReleaseId);
-    const releaseReceipts = ensureNoSymlinkPath(paths.receipts, join(paths.receipts, "releases"), "Downstream receipt directory");
-    const installedManagerReference = existsSync(releaseReceipts) && readdirSync(releaseReceipts).some((name) => {
-      const path = ensureNoSymlinkPath(releaseReceipts, join(releaseReceipts, name), "Installed Downstream receipt path");
-      const receipt = readJson(path, "downstream receipt");
-      return receipt.managerReleaseId === pair.managerReleaseId;
-    });
-    const managerPath = join(paths.managers, pair.managerReleaseId);
-    const centralManagerReceipt = ensureNoSymlinkPath(
-      paths.receipts,
-      receiptPath(paths, "manager", pair.managerReleaseId),
-      "Manager cleanup receipt path",
-    );
-    if (!retainedManager && !installedManagerReference) {
-      if (existsSync(managerPath)) {
-        readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
-        removeThroughTombstone(paths, managerPath, "manager");
-        unlinkSync(centralManagerReceipt);
-      } else if (existsSync(centralManagerReceipt)) {
-        validateReceipt(readJson(centralManagerReceipt, "manager receipt"), "manager", managerPath, pair);
-        unlinkSync(centralManagerReceipt);
-      }
-    }
-    writePendingPairs(paths, readPendingPairs(paths).filter((entry) => canonicalJson(entry) !== canonicalJson(pair)));
-    return "removed";
+  const retainedManager = allowRetained ? false : [activation.active, activation.previous]
+    .filter(Boolean)
+    .some((entry) => entry.managerReleaseId === pair.managerReleaseId);
+  const releaseReceipts = ensureNoSymlinkPath(paths.receipts, join(paths.receipts, "releases"), "Downstream receipt directory");
+  const installedManagerReference = existsSync(releaseReceipts) && readdirSync(releaseReceipts).some((name) => {
+    const path = ensureNoSymlinkPath(releaseReceipts, join(releaseReceipts, name), "Installed Downstream receipt path");
+    const receipt = readJson(path, "downstream receipt");
+    return receipt.managerReleaseId === pair.managerReleaseId;
   });
+  const managerPath = join(paths.managers, pair.managerReleaseId);
+  const centralManagerReceipt = ensureNoSymlinkPath(
+    paths.receipts,
+    receiptPath(paths, "manager", pair.managerReleaseId),
+    "Manager cleanup receipt path",
+  );
+  if (!retainedManager && !installedManagerReference) {
+    if (existsSync(managerPath)) {
+      readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
+      removeThroughTombstone(paths, managerPath, "manager");
+      unlinkSync(centralManagerReceipt);
+    } else if (existsSync(centralManagerReceipt)) {
+      validateReceipt(readJson(centralManagerReceipt, "manager receipt"), "manager", managerPath, pair);
+      unlinkSync(centralManagerReceipt);
+    }
+  }
+  writePendingPairs(paths, readPendingPairs(paths).filter((entry) => canonicalJson(entry) !== canonicalJson(pair)));
+  return "removed";
+}
+
+function pruneInstalledPairsLocked(dataRoot) {
+  const paths = layout(dataRoot);
+  const activation = readActivation(dataRoot);
+  const retained = [activation.active, activation.previous, ...readPinnedPairs(paths)].filter(Boolean);
+  let removed = 0;
+  let deferred = 0;
+  for (const pair of installedPairs(paths)) {
+    if (retained.some((entry) => canonicalJson(entry) === canonicalJson(pair))) continue;
+    const outcome = removeInstalledPairLocked(dataRoot, pair);
+    if (outcome === "removed") removed += 1;
+    else deferred += 1;
+  }
+  return { removed, deferred };
+}
+
+export function pruneManagedInstallation(dataRoot) {
+  return withLifecycleLock(dataRoot, "prune retained releases", () => pruneInstalledPairsLocked(dataRoot));
+}
+
+export function removeInstalledPair(dataRoot, pair) {
+  return withLifecycleLock(dataRoot, `remove ${pair.downstreamReleaseId}`, () => removeInstalledPairLocked(dataRoot, pair));
 }
 
 const ownershipKeys = [
@@ -2029,6 +2211,232 @@ export function executeStockPi(dataRoot, args, { environment = process.env } = {
   const result = spawnSync(stock.resolvedPath, args, { stdio: "inherit", env: environment });
   if (result.error) throw result.error;
   return result.status ?? 1;
+}
+
+function validateDispatcherForRemoval(paths) {
+  const destination = join(paths.root, "dispatcher");
+  const centralPath = join(paths.state, "dispatcher.json");
+  if (!pathExists(destination) && !pathExists(centralPath)) return null;
+  if (!pathExists(destination) || !pathExists(centralPath)
+    || lstatSync(destination).isSymbolicLink() || !lstatSync(destination).isDirectory()) {
+    fail("Inconsistent Managed Dispatcher receipt");
+  }
+  const embedded = readJson(join(destination, ".managed", "receipt.json"), "Managed Dispatcher receipt");
+  const central = readJson(centralPath, "Managed Dispatcher receipt");
+  if (canonicalJson(embedded) !== canonicalJson(central)) fail("Managed Dispatcher receipt copies mismatch");
+  exactObject(central, "Managed Dispatcher receipt", [
+    "schemaVersion", "type", "ownedPath", "managerReleaseId", "platform", "sourceArtifact", "createdAt", "payload",
+  ]);
+  if (central.schemaVersion !== 1 || central.type !== "managed-dispatcher"
+    || resolve(central.ownedPath) !== destination || !Array.isArray(central.payload)) {
+    fail("Malformed Managed Dispatcher receipt");
+  }
+  ensureIdentifier(central.managerReleaseId, "Dispatcher Manager Release ID");
+  ensurePlatform(central.platform);
+  exactObject(central.sourceArtifact, "Dispatcher source artifact", ["name", "sha256", "size"]);
+  ensureRelativePath(central.sourceArtifact.name, "Dispatcher source artifact name");
+  expectString(central.sourceArtifact.sha256, "Dispatcher source artifact digest", sha256Pattern);
+  if (!Number.isSafeInteger(central.sourceArtifact.size) || central.sourceArtifact.size < 0) fail("Malformed Dispatcher source artifact");
+  expectDate(central.createdAt, "Dispatcher creation date");
+  central.payload.forEach((entry, index) => validatePayloadEntry(entry, `Managed Dispatcher receipt payload[${index}]`));
+  comparePayload(createPayloadInventory(destination).filter((entry) => !entry.path.startsWith(".managed/")), central.payload);
+  return { destination, centralPath };
+}
+
+function validateManagerPayloadsForRemoval(paths) {
+  const receiptDirectory = ensureNoSymlinkPath(paths.receipts, join(paths.receipts, "managers"), "Manager receipt directory");
+  ensureManagedDirectory(receiptDirectory);
+  const found = [];
+  for (const name of readdirSync(receiptDirectory).sort()) {
+    if (!name.endsWith(".json")) fail(`Foreign Manager Release receipt: ${name}`);
+    const managerReleaseId = name.slice(0, -5);
+    ensureIdentifier(managerReleaseId, "Manager Release receipt ID");
+    const managerPath = join(paths.managers, managerReleaseId);
+    if (!pathExists(managerPath)) fail(`Inconsistent receipt for Manager Release ${managerReleaseId}`);
+    const central = readJson(join(receiptDirectory, name), "manager receipt");
+    const pair = {
+      managerReleaseId,
+      downstreamReleaseId: managerReleaseId,
+      manifestSha256: central.manifestSha256,
+      platform: central.platform,
+    };
+    const receipt = readReceiptCopies(paths, "manager", managerReleaseId, managerPath, pair);
+    comparePayload(payloadWithoutManagerFiles(managerPath), receipt.payload);
+    found.push(managerReleaseId);
+  }
+  for (const managerReleaseId of readdirSync(paths.managers)) {
+    ensureIdentifier(managerReleaseId, "installed Manager Release ID");
+    if (!found.includes(managerReleaseId)) fail(`Installed Manager Release has no receipt: ${managerReleaseId}`);
+  }
+}
+
+const managedRootEntries = new Set([
+  "state", "managers", "downstream-releases", "receipts", "artifacts", "leases", "tmp", "diagnostics", "dispatcher",
+]);
+
+function validateUninstallRoot(root) {
+  let hasManagedState = false;
+  for (const name of readdirSync(root)) {
+    const path = ensureNoSymlinkPath(root, join(root, name), "Managed uninstall root path");
+    if (name === "releases") {
+      if (!lstatSync(path).isDirectory()) fail("Legacy Downstream Installation root is foreign");
+      continue;
+    }
+    if (!managedRootEntries.has(name)) fail(`Foreign Managed Installation root path: ${name}`);
+    hasManagedState = true;
+  }
+  return hasManagedState;
+}
+
+function validateUninstallState(dataRoot, paths, pairs) {
+  const known = new Set([
+    "activation.json", "accepted-metadata.json", "config.json", "pending-cleanup.json", "pinned-releases.json",
+    "entrypoints.json", "compatibility-entrypoint.json", "legacy-adoption.json", "update-status.json",
+    "startup-check.json", "startup-check.lock", "update-hold.json", "dispatcher.json", "lifecycle.lock",
+  ]);
+  for (const name of readdirSync(paths.state)) {
+    const path = ensureNoSymlinkPath(paths.state, join(paths.state, name), "Managed uninstall state path");
+    if (!lstatSync(path).isFile()) fail(`Foreign managed state path: ${name}`);
+    const dynamicRecovery = /^(?:lifecycle|startup-check)-recovery-[a-z0-9-]+\.(?:json|owner)$/.test(name);
+    if (!known.has(name) && !dynamicRecovery) fail(`Foreign managed state path: ${name}`);
+  }
+  if (pairs.length > 0) {
+    const activation = readActivation(dataRoot);
+    readConfig(paths);
+    readAcceptedMetadataState(paths);
+    for (const selected of [activation.active, activation.previous].filter(Boolean)) {
+      if (!pairs.some((pair) => canonicalJson(pair) === canonicalJson(selected))) {
+        fail("Activation selects an unreceipted local pair");
+      }
+    }
+  }
+  readPendingPairs(paths);
+  readPinnedPairs(paths);
+  readUpdateHoldRecord(paths);
+  if (pathExists(join(paths.state, "legacy-adoption.json"))) readLegacyInstallationAdoption(dataRoot);
+  for (const name of ["update-status.json", "startup-check.json", "startup-check.lock"]) {
+    const path = join(paths.state, name);
+    if (pathExists(path)) readJson(path, `managed ${name}`);
+  }
+}
+
+function validateUninstallCaches(paths) {
+  for (const name of readdirSync(paths.artifacts)) {
+    if (!sha256Pattern.test(name)) fail(`Foreign cached artifact: ${name}`);
+    const path = ensureNoSymlinkPath(paths.artifacts, join(paths.artifacts, name), "Cached artifact path");
+    const stat = lstatSync(path);
+    if (!stat.isFile() || sha256File(path) !== name) fail(`Cached artifact ownership mismatch: ${name}`);
+  }
+  for (const name of readdirSync(paths.diagnostics)) {
+    if (!isManagedDiagnostic(paths, name)) fail(`Foreign diagnostic path: ${name}`);
+  }
+  for (const name of readdirSync(paths.temporary)) {
+    const path = ensureNoSymlinkPath(paths.temporary, join(paths.temporary, name), "Temporary uninstall path");
+    if (!safeTemporaryOwner(path)) fail(`Foreign temporary path: ${name}`);
+  }
+}
+
+function removeOwnedEntrypoint(entrypoint, label) {
+  if (!pathExists(entrypoint.path)) return false;
+  if (!entrypointMatches(entrypoint)) fail(`${label} ownership mismatch: ${entrypoint.path}`);
+  unlinkSync(entrypoint.path);
+  return true;
+}
+
+function finalPiResolution(environment) {
+  const resolved = commandPath("pi", environment);
+  if (!resolved) return { kind: "none", message: "No pi command will resolve after uninstall." };
+  if (isManagedDispatcherExecutable(resolved)) fail(`Managed Dispatcher still resolves after uninstall: ${resolved}`);
+  try {
+    const identity = executableIdentity(resolved, environment);
+    return { kind: "stock", path: resolved, version: identity.version, message: `Stock Pi ${identity.version} at ${resolved} will resolve after uninstall.` };
+  } catch {
+    return { kind: "stock", path: resolved, version: null, message: `Stock Pi at ${resolved} will resolve after uninstall (its version identity is unavailable).` };
+  }
+}
+
+export function managedPiResolution(environment = process.env) {
+  return finalPiResolution(environment);
+}
+
+export function uninstallManagedInstallation(dataRoot, options = {}) {
+  const root = resolve(dataRoot);
+  const environment = options.environment || process.env;
+  if (!pathExists(root)) return { kind: "already-absent", deferred: 0, resolution: finalPiResolution(environment) };
+  if (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory()) fail(`Managed state path is foreign: ${root}`);
+  if (!validateUninstallRoot(root)) return { kind: "already-absent", deferred: 0, resolution: finalPiResolution(environment) };
+  return withLifecycleLock(dataRoot, "uninstall Managed Installation", () => {
+    const paths = initializeLayout(dataRoot);
+    const pairs = installedPairs(paths);
+    validateManagerPayloadsForRemoval(paths);
+    validateUninstallState(dataRoot, paths, pairs);
+    validateUninstallCaches(paths);
+    const dispatcher = validateDispatcherForRemoval(paths);
+    const ownershipPath = join(paths.state, "entrypoints.json");
+    const compatibilityPath = compatibilityReceiptPath(paths);
+    const ownership = pathExists(ownershipPath) ? readManagedOwnership(dataRoot) : null;
+    const compatibility = pathExists(compatibilityPath) ? readCompatibilityEntrypoint(paths) : null;
+    if (ownership) {
+      assertDispatcherIdentity(ownership.dispatcher);
+      if (compatibility && (resolve(compatibility.path) !== resolve(ownership.entrypoints.compatibility.path)
+        || resolve(compatibility.target) !== resolve(ownership.entrypoints.compatibility.target))) {
+        fail("Compatibility Entrypoint receipt copies mismatch");
+      }
+      if (pathExists(ownership.entrypoints.pi.path) && !entrypointMatches(ownership.entrypoints.pi)) {
+        fail(`Command Ownership pi entrypoint mismatch: ${ownership.entrypoints.pi.path}`);
+      }
+      if (pathExists(ownership.entrypoints.compatibility.path) && !entrypointMatches(ownership.entrypoints.compatibility)) {
+        fail(`Compatibility Entrypoint ownership mismatch: ${ownership.entrypoints.compatibility.path}`);
+      }
+    }
+    if (compatibility && pathExists(compatibility.path) && !entrypointMatches(compatibility)) {
+      fail(`Compatibility Entrypoint ownership mismatch: ${compatibility.path}`);
+    }
+    options.checkpoint?.("uninstall-preflight-complete");
+
+    if (ownership) removeOwnedEntrypoint(ownership.entrypoints.pi, "Command Ownership pi entrypoint");
+    options.checkpoint?.("uninstall-pi-entrypoint-removed");
+    if (compatibility) removeOwnedEntrypoint(compatibility, "Compatibility Entrypoint");
+    else if (ownership) removeOwnedEntrypoint(ownership.entrypoints.compatibility, "Compatibility Entrypoint");
+    options.checkpoint?.("uninstall-compatibility-entrypoint-removed");
+
+    let deferred = 0;
+    for (const pair of pairs) {
+      if (removeInstalledPairLocked(dataRoot, pair, { allowRetained: true }) === "deferred") deferred += 1;
+    }
+    options.checkpoint?.("uninstall-payloads-removed");
+
+    if (dispatcher) {
+      removeThroughTombstone(paths, dispatcher.destination, "dispatcher");
+      unlinkSync(dispatcher.centralPath);
+    }
+    if (pathExists(ownershipPath)) unlinkSync(ownershipPath);
+    if (pathExists(compatibilityPath)) unlinkSync(compatibilityPath);
+    for (const name of readdirSync(paths.artifacts)) unlinkSync(join(paths.artifacts, name));
+    for (const name of readdirSync(paths.diagnostics)) unlinkSync(join(paths.diagnostics, name));
+    for (const name of readdirSync(paths.temporary)) removeStage(join(paths.temporary, name));
+    for (const stateName of [
+      "accepted-metadata.json", "legacy-adoption.json", "pinned-releases.json", "update-status.json",
+      "startup-check.json", "startup-check.lock", "update-hold.json",
+    ]) {
+      const path = join(paths.state, stateName);
+      if (pathExists(path)) unlinkSync(path);
+    }
+    options.checkpoint?.("uninstall-state-removed");
+
+    const remainingPairs = installedPairs(paths);
+    if (remainingPairs.length === 0) {
+      for (const name of managedRootEntries) {
+        const path = join(root, name);
+        if (!pathExists(path)) continue;
+        makeWritable(path);
+        rmSync(path, { recursive: true, force: true });
+      }
+      if (readdirSync(root).length === 0) rmSync(root, { recursive: true });
+    }
+    const resolution = finalPiResolution(environment);
+    return { kind: "uninstalled", deferred, resolution };
+  });
 }
 
 export function disableManagedCommandOwnership(dataRoot) {
