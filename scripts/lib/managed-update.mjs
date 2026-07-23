@@ -536,8 +536,9 @@ function readUpdateHold(dataRoot) {
   const holdPath = paths(dataRoot).hold;
   if (!existsSync(holdPath)) return null;
   const hold = readJson(holdPath, "Update Hold");
-  if (hold?.schemaVersion !== 1 || hold.type !== "update-hold" || !idPattern.test(hold.releaseId)
-    || typeof hold.createdAt !== "string") fail("Malformed Update Hold");
+  if (!hasExactKeys(hold, ["schemaVersion", "type", "releaseId", "createdAt"])
+    || hold.schemaVersion !== 1 || hold.type !== "update-hold" || !idPattern.test(hold.releaseId)
+    || !validDate(hold.createdAt)) fail("Malformed Update Hold");
   return hold;
 }
 

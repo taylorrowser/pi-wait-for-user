@@ -1655,13 +1655,22 @@ test("cached startup status is throttled, isolated to interactive output, and re
     }
     writeFileSync(join(dataRoot, "state", "update-status.json"), serializeMetadata(cached));
     assert.match(cachedManagedStartupNotice(dataRoot, { interactive: true }), /compatible Downstream Release.*patch\.7/i);
-    writeFileSync(join(dataRoot, "state", "update-hold.json"), serializeMetadata({
+    const updateHold = {
       schemaVersion: 1,
       type: "update-hold",
       releaseId: "pi-v0.81.1-patch.7",
       createdAt: now.toISOString(),
-    }));
+    };
+    writeFileSync(join(dataRoot, "state", "update-hold.json"), serializeMetadata(updateHold));
     assert.equal(cachedManagedStartupNotice(dataRoot, { interactive: true }), null);
+    for (const malformed of [{ ...updateHold, foreign: true }, { ...updateHold, createdAt: "not-a-date" }]) {
+      writeFileSync(join(dataRoot, "state", "update-hold.json"), serializeMetadata(malformed));
+      assert.throws(
+        () => cachedManagedStartupNotice(dataRoot, { interactive: true }),
+        /Malformed Update Hold/,
+      );
+    }
+    writeFileSync(join(dataRoot, "state", "update-hold.json"), serializeMetadata(updateHold));
     assert.equal(cachedManagedStartupNotice(dataRoot, { interactive: false }), null);
     assert.equal(cachedManagedStartupNotice(dataRoot, { interactive: true, environment: { PI_SKIP_VERSION_CHECK: "1" } }), null);
     assert.equal(cachedManagedStartupNotice(dataRoot, { interactive: true, environment: { PI_OFFLINE: "1" } }), null);
@@ -1767,7 +1776,8 @@ test("Managed Dispatcher never exposes self-inclusive Stock Pi updates while pre
     ]) {
       const packages = runDispatcher(dataRoot, args, { PI_OFFLINE: "1" });
       assert.equal(packages.status, 0, packages.stderr);
-      assert.match(packages.stdout, /PI_ARGS:.*<update>/s);
+      assert.match(packages.stdout, /^PI_ARGS: <update>/m);
+      assert.doesNotMatch(packages.stdout, /PI_ARGS: <-e>/);
     }
 
     for (const args of [
@@ -1966,6 +1976,7 @@ test("interactive startup notices do not pollute TTY metadata and package-comman
       const output = runDispatcherInTty(dataRoot, [...args, "--offline"]);
       assert.equal(output.status, 0, `${output.stdout}\n${output.stderr}`);
       assert.doesNotMatch(output.stdout, /compatible Downstream Release is available/);
+      if (args[0] === "conformance") assert.match(output.stdout, /Deferred conformance passed/);
     }
   } finally {
     destroy(dataRoot);

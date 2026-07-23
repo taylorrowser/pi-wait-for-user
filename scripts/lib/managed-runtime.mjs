@@ -217,16 +217,41 @@ function processAlive(pid) {
   }
 }
 
+function publishLifecycleLock(paths, lock) {
+  const temporary = join(paths.state, `.lifecycle.lock.tmp-${randomUUID()}`);
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeSync(fd, serializeMetadata(lock));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  let published = false;
+  try {
+    linkSync(temporary, paths.lock);
+    published = true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  } finally {
+    unlinkSync(temporary);
+  }
+  if (published) {
+    try {
+      const directory = openSync(paths.state, "r");
+      try { fsyncSync(directory); } finally { closeSync(directory); }
+    } catch {
+      // The complete hard-linked lock remains atomic when directory fsync is unavailable.
+    }
+  }
+  return published;
+}
+
 function acquireLifecycleLock(dataRoot, operation) {
   expectString(operation, "lifecycle operation");
   const paths = initializeLayout(dataRoot);
   const token = randomUUID();
   const lock = { schemaVersion: 1, pid: process.pid, token, operation, startedAt: new Date().toISOString() };
-  let fd;
-  try {
-    fd = openSync(paths.lock, "wx", 0o600);
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
+  if (!publishLifecycleLock(paths, lock)) {
     const active = readJson(paths.lock, "lifecycle lock");
     exactObject(active, "lifecycle lock", ["schemaVersion", "pid", "token", "operation", "startedAt"]);
     if (active.schemaVersion !== 1 || !Number.isSafeInteger(active.pid) || active.pid < 1) fail("Malformed lifecycle lock");
@@ -258,14 +283,8 @@ function acquireLifecycleLock(dataRoot, operation) {
       claimedByToken: token,
       claimedAt: new Date().toISOString(),
     });
-    try { fd = openSync(paths.lock, "wx", 0o600); } catch (replacementError) {
-      if (replacementError?.code === "EEXIST") return acquireLifecycleLock(dataRoot, operation);
-      throw replacementError;
-    }
+    if (!publishLifecycleLock(paths, lock)) return acquireLifecycleLock(dataRoot, operation);
   }
-  writeSync(fd, serializeMetadata(lock));
-  fsyncSync(fd);
-  closeSync(fd);
   const capability = Object.freeze({});
   activeLifecycleCapabilities.add(capability);
   return {

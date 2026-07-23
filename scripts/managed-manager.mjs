@@ -108,10 +108,10 @@ function verifyInstallation(args) {
   console.log(`Verified ${verified.length} managed Activation pair${verified.length === 1 ? "" : "s"}.`);
 }
 
-function piCommand(release, args) {
+function piCommand(release, args, { loadQuestionTool = true } = {}) {
   const pi = join(release, "pi-wait-for-user", "pi-core");
   const questionTool = join(release, "pi-wait-for-user", "question-tool");
-  return { pi, piArgs: [pi, "-e", questionTool, ...args] };
+  return { pi, piArgs: loadQuestionTool ? [pi, "-e", questionTool, ...args] : [pi, ...args] };
 }
 
 function piEnvironment() {
@@ -121,7 +121,8 @@ function piEnvironment() {
 function executePi(args) {
   const release = process.env.PI_MANAGED_RELEASE_DIR;
   if (!release) fail("Manager Release was not selected by the Managed Dispatcher");
-  const { pi, piArgs } = piCommand(release, args);
+  const leadingCommands = new Set(["install", "remove", "uninstall", "update", "list", "config", "conformance"]);
+  const { pi, piArgs } = piCommand(release, args, { loadQuestionTool: !leadingCommands.has(args[0]) });
   const environment = piEnvironment();
   if (typeof process.execve === "function") process.execve(pi, piArgs, environment);
   const result = spawnSync(pi, piArgs.slice(1), { stdio: "inherit", env: environment });
@@ -131,7 +132,7 @@ function executePi(args) {
 
 function packageUpdate(selected, options = []) {
   console.log("Package update phase (newly active Pi):");
-  const { pi, piArgs } = piCommand(selected.releasePath, ["update", "--extensions", ...options]);
+  const { pi, piArgs } = piCommand(selected.releasePath, ["update", "--extensions", ...options], { loadQuestionTool: false });
   const result = spawnSync(pi, piArgs.slice(1), { stdio: "inherit", env: piEnvironment() });
   if (result.error) throw result.error;
   return result.status ?? 1;
