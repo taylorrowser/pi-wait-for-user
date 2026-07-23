@@ -44,5 +44,22 @@
     "handlerId": "dev.taylorrowser.pi-question-tool.question",
     "handlerVersion": 1,
     "packageSchemaVersions": [1]
+  },
+  "sessionCompatibility": {
+    "identities": [
+      { "id": "dev.taylorrowser.pi-wait-for-user/session", "version": 1 }
+    ],
+    "readableCoreProtocolVersions": [1],
+    "readableHandlers": [
+      { "id": "dev.taylorrowser.pi-question-tool.question", "versions": [1] }
+    ]
+  },
+  "manager": {
+    "releaseId": "manager-v1",
+    "compatibleReleaseManifestVersions": [1]
+  },
+  "provenance": {
+    "repository": "taylorrowser/pi-wait-for-user",
+    "workflow": ".github/workflows/release.yml"
   }
 }

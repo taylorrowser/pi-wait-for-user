@@ -69,6 +69,8 @@ test("installation cannot start without a passing release-candidate report", () 
   const project = join(root, "release");
   mkdirSync(join(project, "scripts"), { recursive: true });
   cpSync(join(repositoryRoot, "scripts", "install.mjs"), join(project, "scripts", "install.mjs"));
+  cpSync(join(repositoryRoot, "scripts", "lib"), join(project, "scripts", "lib"), { recursive: true });
+  cpSync(join(repositoryRoot, "package.json"), join(project, "package.json"));
   cpSync(join(repositoryRoot, "releases"), join(project, "releases"), { recursive: true });
   rmSync(join(project, "releases", "pi-v0.81.1-patch.6", "reports"), { recursive: true, force: true });
   const result = spawnSync(

@@ -9,11 +9,14 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { loadReleaseInput } from "./lib/release-input.mjs";
+import { createArchiveMetadata } from "./lib/release-metadata.mjs";
 
 const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const binaryPlatforms = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
@@ -43,8 +46,16 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+function artifact(path, name = basename(path)) {
+  return { name, sha256: sha256(path), size: statSync(path).size };
+}
+
 function expectEqual(actual, expected, label) {
   if (actual !== expected) fail(`${label}: expected ${String(expected)}, found ${String(actual)}`);
+}
+
+function expectIncludes(actual, expected, label) {
+  if (!actual.includes(expected)) fail(`${label}: missing ${expected}`);
 }
 
 function readShellVariable(path, variable, label) {
@@ -54,18 +65,10 @@ function readShellVariable(path, variable, label) {
 }
 
 function verifyRelease(root) {
-  const activePath = join(root, "releases", "active.json");
-  const active = readJson(activePath);
-  expectEqual(active.schemaVersion, 1, "Active release schema");
-  if (typeof active.releaseId !== "string" || !/^[a-z0-9][a-z0-9.-]+$/.test(active.releaseId)) {
-    fail("Active release ID must be a lowercase, filename-safe string");
-  }
-
-  const manifestPath = join(root, "releases", active.releaseId, "manifest.json");
-  const manifest = readJson(manifestPath);
-  expectEqual(manifest.schemaVersion, 1, "Release manifest schema");
-  expectEqual(manifest.releaseId, active.releaseId, "Active release ID");
-  expectEqual(manifest.tag, active.releaseId, "Release tag");
+  const { releaseId, manifest } = loadReleaseInput(root);
+  expectEqual(manifest.schemaVersion, 1, "Release input schema");
+  expectEqual(manifest.releaseId, releaseId, "Package-derived release ID");
+  expectEqual(manifest.tag, releaseId, "Release tag");
   expectEqual(JSON.stringify(manifest.binaryPlatforms), JSON.stringify(binaryPlatforms), "Binary platforms");
 
   const bootstrapPath = join(root, "scripts", "bootstrap.sh");
@@ -108,6 +111,17 @@ function verifyRelease(root) {
 
   const fixtureGatePath = safePath(root, manifest.fixtureGate.path);
   expectEqual(sha256(fixtureGatePath), manifest.fixtureGate.sha256, "Fixture gate SHA-256");
+
+  if (!manifest.sessionCompatibility || !manifest.manager || !manifest.provenance) {
+    fail("Release input must declare session, Manager Release, and provenance compatibility");
+  }
+
+  const releaseNotes = readFileSync(join(root, "releases", releaseId, "RELEASE_NOTES.md"), "utf8");
+  expectIncludes(releaseNotes, `# Pi Wait for User · \`${releaseId}\``, "Release notes heading");
+  expectIncludes(releaseNotes, `/download/${releaseId}/install.sh`, "Release notes install identity");
+  const readme = readFileSync(join(root, "README.md"), "utf8");
+  expectIncludes(readme, `The active release is **\`${releaseId}\`**`, "README release identity");
+  expectIncludes(readme, `/download/${releaseId}/install.sh`, "README install identity");
 
   const questionManifestPath = safePath(root, manifest.questionTool.manifestPath);
   expectEqual(sha256(questionManifestPath), manifest.questionTool.manifestSha256, "Question Tool manifest SHA-256");
@@ -169,7 +183,7 @@ function bundleRelease(root, outputArgument, binaryDirectoryArgument) {
   const requiredCategories = gate.categories.map((category) => category.name);
   expectEqual(JSON.stringify(reportedCategories), JSON.stringify(requiredCategories), "Release report fixture categories");
 
-  if (!binaryDirectoryArgument) fail("Binary assets are required for the active release");
+  if (!binaryDirectoryArgument) fail("Binary assets are required for the selected release");
   const binaryDirectory = resolve(binaryDirectoryArgument);
   for (const name of binaryAssetNames) {
     if (!existsSync(join(binaryDirectory, name))) fail(`Missing required binary asset: ${name}`);
@@ -186,22 +200,106 @@ function bundleRelease(root, outputArgument, binaryDirectoryArgument) {
     const releaseAsset = join(temporary, `pi-wait-for-user-${manifest.releaseId}.tgz`);
     renameSync(releasePackage, releaseAsset);
 
-    for (const name of binaryAssetNames) copyFileSync(join(binaryDirectory, name), join(temporary, name));
-    copyFileSync(join(root, "scripts", "bootstrap.sh"), join(temporary, "install.sh"));
-    copyFileSync(join(root, "releases", manifest.releaseId, "manifest.json"), join(temporary, "release-manifest.json"));
-    copyFileSync(join(root, manifest.fixtureGate.path), join(temporary, "fixture-gate.json"));
-    copyFileSync(reportPath, join(temporary, "release-candidate.json"));
+    const platformArchives = [];
+    const packagedArchiveMetadata = new Map();
+    for (const name of binaryAssetNames) {
+      const source = join(binaryDirectory, name);
+      const destination = join(temporary, name);
+      copyFileSync(source, destination);
+      const metadataPath = join(binaryDirectory, `${name}.metadata.json`);
+      if (!existsSync(metadataPath)) fail(`Missing required binary metadata: ${name}.metadata.json`);
+      const metadata = readJson(metadataPath);
+      const descriptor = artifact(destination);
+      const expectedPlatform = name.replace(/^pi-wait-for-user-/, "").replace(/\.(?:tar\.gz|zip)$/, "");
+      if (
+        metadata.schemaVersion !== 1 ||
+        metadata.platform !== expectedPlatform ||
+        metadata.artifact?.name !== descriptor.name ||
+        metadata.artifact?.sha256 !== descriptor.sha256 ||
+        metadata.artifact?.size !== descriptor.size ||
+        !metadata.archiveMetadata ||
+        !Array.isArray(metadata.payload) || metadata.payload.length === 0
+      ) fail(`Binary metadata does not match archive: ${name}`);
+      platformArchives.push({ platform: metadata.platform, artifact: descriptor, payload: metadata.payload });
+      packagedArchiveMetadata.set(metadata.platform, metadata.archiveMetadata);
+    }
+    const installPath = join(temporary, "install.sh");
+    const fixtureGateOutput = join(temporary, "fixture-gate.json");
+    const candidateOutput = join(temporary, "release-candidate.json");
+    const notesOutput = join(temporary, "RELEASE_NOTES.md");
+    copyFileSync(join(root, "scripts", "bootstrap.sh"), installPath);
+    copyFileSync(join(root, manifest.fixtureGate.path), fixtureGateOutput);
+    copyFileSync(reportPath, candidateOutput);
+    copyFileSync(join(root, "releases", manifest.releaseId, "RELEASE_NOTES.md"), notesOutput);
 
-    const assets = readdirSync(temporary).sort().map((name) => ({ name, sha256: sha256(join(temporary, name)) }));
-    writeFileSync(
-      join(temporary, "artifact-manifest.json"),
-      `${JSON.stringify({ schemaVersion: 1, releaseId: manifest.releaseId, assets }, null, 2)}\n`,
-    );
-    const checksummed = readdirSync(temporary).sort();
-    writeFileSync(
-      join(temporary, "SHA256SUMS"),
-      `${checksummed.map((name) => `${sha256(join(temporary, name))}  ${name}`).join("\n")}\n`,
-    );
+    const questionManifestPath = safePath(root, manifest.questionTool.manifestPath);
+    const managerArtifacts = [
+      artifact(releaseAsset),
+      artifact(questionPackage),
+      artifact(installPath),
+      artifact(fixtureGateOutput),
+    ].sort((left, right) => left.name.localeCompare(right.name));
+    const releaseGates = [{ name: "release-candidate", status: "passed", report: artifact(candidateOutput) }];
+    const releaseNotes = artifact(notesOutput);
+    const provenanceArtifacts = [
+      ...managerArtifacts,
+      ...platformArchives.map((entry) => entry.artifact),
+      ...releaseGates.map((entry) => entry.report),
+      releaseNotes,
+    ].sort((left, right) => left.name.localeCompare(right.name)).map(({ name, sha256: digest }) => ({ name, sha256: digest }));
+    const sourceCommit = process.env.GITHUB_SHA ?? process.env.RELEASE_SOURCE_COMMIT;
+    if (!/^[a-f0-9]{40}$/.test(sourceCommit ?? "")) {
+      fail("GITHUB_SHA or RELEASE_SOURCE_COMMIT must identify the exact release source commit");
+    }
+    const unsignedManifest = {
+      schemaVersion: 1,
+      type: "release-manifest",
+      releaseId: manifest.releaseId,
+      tag: manifest.tag,
+      publishedAt: process.env.RELEASE_PUBLISHED_AT ?? new Date().toISOString(),
+      upstream: manifest.upstream,
+      patches: manifest.patches.map((patch, index) => ({
+        order: index + 1,
+        path: patch.path,
+        sha256: patch.sha256,
+        size: statSync(safePath(root, patch.path)).size,
+      })),
+      compatibility: {
+        questionTool: {
+          name: manifest.questionTool.name,
+          version: manifest.questionTool.version,
+          manifest: artifact(questionManifestPath, manifest.questionTool.manifestPath),
+          coreProtocolVersions: manifest.questionTool.coreProtocolVersions,
+          handlerId: manifest.questionTool.handlerId,
+          handlerVersion: manifest.questionTool.handlerVersion,
+          packageSchemaVersions: manifest.questionTool.packageSchemaVersions,
+        },
+        sessions: manifest.sessionCompatibility,
+      },
+      manager: {
+        releaseId: manifest.manager.releaseId,
+        compatibleReleaseManifestVersions: manifest.manager.compatibleReleaseManifestVersions,
+        artifacts: managerArtifacts,
+      },
+      platformArchives,
+      releaseGates,
+      provenance: {
+        repository: manifest.provenance.repository,
+        workflow: manifest.provenance.workflow,
+        sourceCommit,
+        artifacts: provenanceArtifacts,
+      },
+      releaseNotes,
+    };
+    for (const archive of platformArchives) {
+      createArchiveMetadata(unsignedManifest, archive.platform, {
+        existing: packagedArchiveMetadata.get(archive.platform),
+      });
+    }
+    const metadataDirectory = join(temporary, ".release-metadata");
+    mkdirSync(metadataDirectory);
+    writeFileSync(join(metadataDirectory, "unsigned-manifest.json"), `${JSON.stringify(unsignedManifest, null, 2)}\n`);
+    writeFileSync(join(metadataDirectory, "provenance-request.json"), `${JSON.stringify(unsignedManifest.provenance, null, 2)}\n`);
     renameSync(temporary, output);
     console.log(`Built ${manifest.releaseId} release assets in ${output}.`);
     console.log(`Question Tool artifact: ${basename(questionPackage)}`);

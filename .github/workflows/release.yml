@@ -28,14 +28,16 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Read and validate the active release
+      - name: Read and validate the package-selected release
         shell: bash
         run: |
-          release_id=$(node -p 'JSON.parse(require("fs").readFileSync("releases/active.json", "utf8")).releaseId')
+          release_id=$(node -p '`pi-v${JSON.parse(require("fs").readFileSync("package.json", "utf8")).version}`')
+          pi_version=$(node -p 'JSON.parse(require("fs").readFileSync(`releases/${process.argv[1]}/manifest.json`, "utf8")).upstream.packageVersion' "$release_id")
           echo "RELEASE_ID=$release_id" >> "$GITHUB_ENV"
+          echo "PI_VERSION=$pi_version" >> "$GITHUB_ENV"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             [[ "$GITHUB_REF_NAME" == "$release_id" ]] || {
-              echo "Tag $GITHUB_REF_NAME does not match active release $release_id" >&2
+              echo "Tag $GITHUB_REF_NAME does not match package-selected release $release_id" >&2
               exit 1
             }
             git fetch origin main
@@ -67,7 +69,7 @@ jobs:
           tar -xzf .work/release-binaries/pi-wait-for-user-linux-x64.tar.gz -C "$smoke_root"
           export HOME="$smoke_root/home"
           export PI_CODING_AGENT_DIR="$HOME/.pi/agent"
-          test "$("$smoke_root/pi-wait-for-user/pi-wait-for-user" --version)" = "0.81.1"
+          test "$("$smoke_root/pi-wait-for-user/pi-wait-for-user" --version)" = "$PI_VERSION"
           "$smoke_root/pi-wait-for-user/pi-wait-for-user" conformance | grep 'Deferred conformance passed (8/8)'
           "$smoke_root/pi-wait-for-user/pi-wait-for-user" --list-models >/dev/null
           test -f "$smoke_root/pi-wait-for-user/question-tool/extensions/question-tool.ts"
@@ -76,8 +78,91 @@ jobs:
           set -e
           grep -a 'question-tool.ts' "$smoke_root/session.log"
 
-      - name: Build checksummed release assets
+      - name: Build immutable payload assets
         run: node scripts/release.mjs bundle "dist/$RELEASE_ID" .work/release-binaries
+
+      - name: Attest payload provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/${{ env.RELEASE_ID }}/*
+
+      - name: Verify every payload's GitHub provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          request="dist/$RELEASE_ID/.release-metadata/provenance-request.json"
+          node -e 'for (const artifact of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).artifacts) console.log(artifact.name)' "$request" |
+          while IFS= read -r artifact; do
+            gh attestation verify "dist/$RELEASE_ID/$artifact" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA"
+          done
+          cp "$request" "dist/$RELEASE_ID/.release-metadata/provenance-verified.json"
+
+      - name: Sign the complete Release Manifest and Channel
+        env:
+          RELEASE_ROOT_KEY_ID: ${{ vars.RELEASE_ROOT_KEY_ID }}
+          RELEASE_ROOT_PUBLIC_KEY: ${{ secrets.RELEASE_ROOT_PUBLIC_KEY }}
+          RELEASE_SIGNING_KEY_ID: ${{ vars.RELEASE_SIGNING_KEY_ID }}
+          RELEASE_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY }}
+          RELEASE_CHANNEL_SEQUENCE: ${{ vars.RELEASE_CHANNEL_SEQUENCE }}
+          RELEASE_CHANNEL_EXPIRES: ${{ vars.RELEASE_CHANNEL_EXPIRES }}
+        shell: bash
+        run: |
+          test -f releases/trust.json || { echo "Production release trust is not provisioned" >&2; exit 1; }
+          test -n "$RELEASE_ROOT_KEY_ID" && test -n "$RELEASE_ROOT_PUBLIC_KEY"
+          test -n "$RELEASE_SIGNING_KEY_ID" && test -n "$RELEASE_SIGNING_PRIVATE_KEY"
+          test -n "$RELEASE_CHANNEL_SEQUENCE" && test -n "$RELEASE_CHANNEL_EXPIRES"
+          key_dir=$(mktemp -d)
+          trap 'rm -rf "$key_dir"' EXIT
+          printf '%s' "$RELEASE_ROOT_PUBLIC_KEY" > "$key_dir/root-public.pem"
+          printf '%s' "$RELEASE_SIGNING_PRIVATE_KEY" > "$key_dir/release-private.pem"
+          chmod 600 "$key_dir/release-private.pem"
+          metadata="dist/$RELEASE_ID/.release-metadata"
+          manifest="dist/$RELEASE_ID/release-manifest.json"
+          common=(--trust releases/trust.json --root-key "$RELEASE_ROOT_KEY_ID=$key_dir/root-public.pem")
+          node scripts/release-metadata.mjs sign-manifest \
+            --input "$metadata/unsigned-manifest.json" \
+            --provenance "$metadata/provenance-verified.json" \
+            "${common[@]}" \
+            --key-id "$RELEASE_SIGNING_KEY_ID" \
+            --private-key "$key_dir/release-private.pem" \
+            --output "$manifest"
+          if test -f releases/channel-state.json; then
+            promotion_state=(--accepted-state releases/channel-state.json)
+          else
+            promotion_state=(--bootstrap true)
+          fi
+          node scripts/release-metadata.mjs promote \
+            --manifest "$manifest" \
+            "${common[@]}" \
+            --key-id "$RELEASE_SIGNING_KEY_ID" \
+            --private-key "$key_dir/release-private.pem" \
+            --sequence "$RELEASE_CHANNEL_SEQUENCE" \
+            --expires "$RELEASE_CHANNEL_EXPIRES" \
+            --manifest-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_ID/release-manifest.json" \
+            "${promotion_state[@]}" \
+            --output "dist/$RELEASE_ID"
+
+      - name: Attest generated release metadata
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/${{ env.RELEASE_ID }}/*
+
+      - name: Verify every publishable artifact's provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          find "dist/$RELEASE_ID" -maxdepth 1 -type f -print0 |
+          while IFS= read -r -d '' artifact; do
+            gh attestation verify "$artifact" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA"
+          done
 
       - name: Upload release-candidate assets
         uses: actions/upload-artifact@v4
@@ -85,11 +170,6 @@ jobs:
           name: ${{ env.RELEASE_ID }}
           path: dist/${{ env.RELEASE_ID }}/*
           if-no-files-found: error
-
-      - name: Attest release provenance
-        uses: actions/attest-build-provenance@v2
-        with:
-          subject-path: dist/${{ env.RELEASE_ID }}/*
 
       - name: Publish immutable GitHub release
         if: startsWith(github.ref, 'refs/tags/')
