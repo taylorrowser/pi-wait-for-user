@@ -7,6 +7,7 @@ import {
   managedActivationOptions,
   parseManagedOptions,
   readPinnedRootKeys,
+  rejectUnknownOptions,
   shellHashRemediation,
 } from "./lib/managed-command.mjs";
 import {
@@ -19,17 +20,12 @@ import {
   readLegacyMigration,
 } from "./lib/managed-runtime.mjs";
 
-function fail(message) {
-  throw new Error(message);
-}
-
 function parseArguments(args) {
   const values = parseManagedOptions(args, { booleanFlags: ["--manage-pi"] });
-  const allowed = new Set([
+  rejectUnknownOptions(values, [
     "--manage-pi", "--data-root", "--bin-dir", "--platform", "--trust", "--channel", "--manifest",
     "--manager-archive", "--release-archive", "--legacy-dir",
   ]);
-  for (const flag of values.keys()) if (!allowed.has(flag)) fail(`Unknown option: ${flag}`);
   return { values, managePi: values.has("--manage-pi") };
 }
 
@@ -43,7 +39,10 @@ try {
   const binDirectory = resolve(values.get("--bin-dir") || defaultManagedBinDirectory());
   preflightManagedCommandOwnership(dataRoot, { binDirectory, managePi });
   const rootKeys = readPinnedRootKeys(join(import.meta.dirname, "managed-root-keys.json"));
-  const activation = installAndActivate(managedActivationOptions(values, { dataRoot, rootKeys }));
+  const activation = installAndActivate({
+    ...managedActivationOptions(values, { dataRoot, rootKeys }),
+    rootKeysPinnedByInstaller: true,
+  });
   installManagedCompatibility(dataRoot, { binDirectory });
   if (managePi) enableManagedOwnership(dataRoot, { binDirectory });
   console.log(`${managePi ? "Managed" : "Side-by-side"} installation ready: ${activation.active.downstreamReleaseId}.`);

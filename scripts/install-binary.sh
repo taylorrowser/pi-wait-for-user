@@ -25,6 +25,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 launcher="$bin_dir/pi-wait-for-user"
+launcher_receipt="$install_dir/.launcher-receipt"
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) platform=darwin-arm64 ;;
   Darwin-x86_64) platform=darwin-x64 ;;
@@ -56,12 +57,24 @@ verify_directory() {
   }
 }
 
+launcher_receipt_matches() {
+  test -f "$launcher_receipt" || return 1
+  expected_receipt=$(printf 'schemaVersion=1\npath=%s\ntarget=%s\n' "$launcher" "$install_dir/pi-wait-for-user")
+  actual_receipt=$(cat "$launcher_receipt")
+  test "$actual_receipt" = "$expected_receipt"
+}
+
+write_launcher_receipt() {
+  directory=$1
+  printf 'schemaVersion=1\npath=%s\ntarget=%s\n' "$launcher" "$install_dir/pi-wait-for-user" > "$directory/.launcher-receipt"
+}
+
 inspect_launcher() {
   launcher_status=absent
   if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
     return 0
   fi
-  if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ]; then
+  if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ] && launcher_receipt_matches; then
     launcher_status=current
     return 0
   fi
@@ -92,6 +105,7 @@ case "$action" in
     mkdir "$temporary"
     trap 'rm -rf "$temporary"' EXIT HUP INT TERM
     cp -R "$payload_dir/." "$temporary/"
+    write_launcher_receipt "$temporary"
     mv "$temporary" "$install_dir"
     trap - EXIT HUP INT TERM
     activate
@@ -116,7 +130,7 @@ case "$action" in
     ;;
   uninstall)
     test -d "$install_dir" || { echo "pi-wait-for-user: no installation at $install_dir" >&2; exit 1; }
-    if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ]; then
+    if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ] && launcher_receipt_matches; then
       rm "$launcher"
     fi
     rm -rf "$install_dir"

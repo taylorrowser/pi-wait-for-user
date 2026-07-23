@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
@@ -161,6 +161,17 @@ test("binary installation does not invoke Git, npm, or a local build", () => {
   );
   assert.notEqual(collision.status, 0);
   assert.equal(readFileSync(launcher, "utf8"), "foreign\n");
+  assert.equal(existsSync(installDirectory), false);
+  rmSync(launcher);
+
+  symlinkSync(join(installDirectory, "pi-wait-for-user"), launcher);
+  const unownedMatchingLink = spawnSync(
+    "sh",
+    [join(fixture.installation, "install.sh"), "install", "--install-dir", installDirectory, "--bin-dir", binDirectory],
+    { encoding: "utf8", env: { ...process.env, HOME: join(fixture.root, "home"), PATH: `${fakeBin}:${process.env.PATH}` } },
+  );
+  assert.notEqual(unownedMatchingLink.status, 0);
+  assert.equal(readlinkSync(launcher), join(installDirectory, "pi-wait-for-user"));
   assert.equal(existsSync(installDirectory), false);
   rmSync(launcher);
 

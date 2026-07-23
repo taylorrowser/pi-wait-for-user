@@ -9,6 +9,7 @@ import {
   managedActivationOptions,
   parseManagedOptions,
   readJsonFile,
+  rejectUnknownOptions,
   shellHashRemediation,
 } from "./lib/managed-command.mjs";
 import {
@@ -43,8 +44,7 @@ function dataRoot() {
 }
 function activate(args) {
   const values = parseManagedOptions(args);
-  const allowed = new Set(["--data-root", "--platform", "--trust", "--channel", "--manifest", "--root-key", "--manager-archive", "--release-archive", "--legacy-dir", "--now"]);
-  for (const flag of values.keys()) if (!allowed.has(flag)) fail(`Unknown option: ${flag}`);
+  rejectUnknownOptions(values, ["--data-root", "--platform", "--trust", "--channel", "--manifest", "--root-key", "--manager-archive", "--release-archive", "--legacy-dir", "--now"]);
   const selectedDataRoot = values.get("--data-root") || dataRoot();
   const activation = installAndActivate(managedActivationOptions(values, {
     dataRoot: selectedDataRoot,
@@ -58,16 +58,19 @@ function activate(args) {
 
 function installCompatibility(args) {
   const values = parseManagedOptions(args);
-  for (const flag of values.keys()) if (!["--data-root", "--bin-dir"].includes(flag)) fail(`Unknown option: ${flag}`);
+  rejectUnknownOptions(values, ["--data-root", "--bin-dir"]);
   const result = installManagedCompatibility(values.get("--data-root") || dataRoot(), {
     binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
+    checkpoint: process.env.PI_MANAGED_INTERRUPT_AT
+      ? (name) => { if (name === process.env.PI_MANAGED_INTERRUPT_AT) fail(`Interrupted at ${name}`); }
+      : undefined,
   });
   console.log(`Managed compatibility command ${result}.`);
 }
 
 function enableOwnership(args) {
   const values = parseManagedOptions(args);
-  for (const flag of values.keys()) if (!["--data-root", "--bin-dir"].includes(flag)) fail(`Unknown option: ${flag}`);
+  rejectUnknownOptions(values, ["--data-root", "--bin-dir"]);
   const result = enableManagedOwnership(values.get("--data-root") || dataRoot(), {
     binDirectory: values.get("--bin-dir") || defaultManagedBinDirectory(),
     checkpoint: process.env.PI_MANAGED_INTERRUPT_AT
@@ -80,7 +83,7 @@ function enableOwnership(args) {
 
 function verifyInstallation(args) {
   const values = parseManagedOptions(args, { booleanFlags: ["--all", "--provenance"] });
-  for (const flag of values.keys()) if (!["--all", "--provenance", "--data-root", "--gh"].includes(flag)) fail(`Unknown option: ${flag}`);
+  rejectUnknownOptions(values, ["--all", "--provenance", "--data-root", "--gh"]);
   const verified = verifyManagedInstallation(values.get("--data-root") || dataRoot(), {
     all: values.has("--all"),
     provenance: values.has("--provenance"),

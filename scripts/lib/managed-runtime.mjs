@@ -367,6 +367,9 @@ function comparePayload(actual, expected) {
 }
 
 function publishStableDispatcher(paths, selected) {
+  if (!selected.config.rootKeysPinnedByInstaller) {
+    fail("Command Ownership requires root keys pinned by the reviewed installer");
+  }
   const destination = join(paths.root, "dispatcher");
   const receiptPath = join(paths.state, "dispatcher.json");
   const source = join(selected.managerPath, "package", "scripts");
@@ -603,22 +606,28 @@ function readAcceptedMetadataState(paths) {
   return accepted;
 }
 
-function writeConfig(paths, platform, rootKeys) {
+function writeConfig(paths, platform, rootKeys, rootKeysPinnedByInstaller) {
   const config = {
     schemaVersion: 1,
     platform,
     rootKeys: [...rootKeys].map(([keyId, publicKey]) => ({ keyId, publicKey })).sort((a, b) => a.keyId.localeCompare(b.keyId)),
+    rootKeysPinnedByInstaller,
   };
   if (existsSync(paths.config)) {
-    const existing = readJson(paths.config, "managed configuration");
-    if (canonicalJson(existing) !== canonicalJson(config)) fail("Managed root trust or platform configuration mismatch");
+    const existing = readConfig(paths);
+    const configuredRootKeys = new Map(config.rootKeys.map(({ keyId, publicKey }) => [keyId, publicKey]));
+    if (existing.platform !== platform || canonicalJson([...existing.rootKeys]) !== canonicalJson([...configuredRootKeys])) {
+      fail("Managed root trust or platform configuration mismatch");
+    }
+    if (rootKeysPinnedByInstaller && !existing.rootKeysPinnedByInstaller) atomicWrite(paths.config, config);
   } else atomicWrite(paths.config, config);
 }
 
 function readConfig(paths) {
   const config = readJson(paths.config, "managed configuration");
-  exactObject(config, "managed configuration", ["schemaVersion", "platform", "rootKeys"]);
-  if (config.schemaVersion !== 1 || !Array.isArray(config.rootKeys) || config.rootKeys.length === 0) fail("Malformed managed configuration");
+  exactObject(config, "managed configuration", ["schemaVersion", "platform", "rootKeys", "rootKeysPinnedByInstaller"]);
+  if (config.schemaVersion !== 1 || !Array.isArray(config.rootKeys) || config.rootKeys.length === 0
+    || typeof config.rootKeysPinnedByInstaller !== "boolean") fail("Malformed managed configuration");
   ensurePlatform(config.platform);
   const rootKeys = new Map();
   for (const entry of config.rootKeys) {
@@ -830,6 +839,7 @@ export function installAndActivate(options) {
     now = new Date(),
     checkpoint,
     legacyDirectories = [],
+    rootKeysPinnedByInstaller = false,
   } = options;
   ensurePlatform(platform);
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("Invalid activation verification date");
@@ -839,7 +849,7 @@ export function installAndActivate(options) {
     let managerStage;
     let releaseStage;
     try {
-      writeConfig(paths, platform, rootKeys);
+      writeConfig(paths, platform, rootKeys, rootKeysPinnedByInstaller);
       const accepted = readAcceptedMetadataState(paths);
       if (!accepted && pathExists(paths.activation)) fail("Accepted metadata state is missing for existing Activation");
       const authority = verifyTrustMetadata(trustEnvelope, {
@@ -1370,11 +1380,13 @@ function validateBinDirectory(binDirectory) {
   }
 }
 
-function requireOwnedCompatibility(paths, expected) {
+function requireOwnedCompatibility(paths, expected, { allowMissing = false } = {}) {
   if (!pathExists(compatibilityReceiptPath(paths))) fail(`Unowned foreign command collision: ${expected.path}`);
   const installed = readCompatibilityEntrypoint(paths);
   if (resolve(installed.path) !== resolve(expected.path) || resolve(installed.target) !== resolve(expected.target)
-    || !entrypointMatches(installed)) fail(`Managed compatibility entrypoint ownership mismatch: ${expected.path}`);
+    || ((!allowMissing || pathExists(installed.path)) && !entrypointMatches(installed))) {
+    fail(`Managed compatibility entrypoint ownership mismatch: ${expected.path}`);
+  }
   return installed;
 }
 
@@ -1415,7 +1427,7 @@ export function installManagedCompatibility(dataRoot, options = {}) {
     };
     const receiptPath = compatibilityReceiptPath(paths);
     if (pathExists(receiptPath)) {
-      requireOwnedCompatibility(paths, expected);
+      requireOwnedCompatibility(paths, expected, { allowMissing: true });
     } else {
       if (pathExists(expected.path)) fail(`Unowned foreign command collision: ${expected.path}`);
       validateBinDirectory(binDirectory);
@@ -1432,6 +1444,7 @@ export function installManagedCompatibility(dataRoot, options = {}) {
         createdAt: new Date().toISOString(),
       });
     }
+    options.checkpoint?.("compatibility-receipt-published");
     publishEntrypoint(expected);
     return "installed";
   });

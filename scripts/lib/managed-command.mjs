@@ -26,6 +26,10 @@ export function nativeManagedPlatform() {
   return identity;
 }
 
+export function rejectUnknownOptions(values, allowed) {
+  for (const flag of values.keys()) if (!allowed.includes(flag)) throw new Error(`Unknown option: ${flag}`);
+}
+
 export function readJsonFile(path) {
   return JSON.parse(readFileSync(resolve(path), "utf8"));
 }

@@ -233,6 +233,7 @@ function activate(dataRoot, candidate, options = {}) {
     dataRoot,
     platform: "linux-x64",
     now,
+    rootKeysPinnedByInstaller: true,
     ...candidate,
     ...options,
   });
@@ -697,6 +698,25 @@ test("unverified legacy installation is untouched while a fresh Downstream Relea
   }
 });
 
+test("caller-selected activation roots cannot claim Command Ownership", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-unpinned-root-"));
+  const bin = mkdtempSync(join(tmpdir(), "managed-runtime-unpinned-root-bin-"));
+  const candidate = fixture();
+  try {
+    activate(dataRoot, candidate, { rootKeysPinnedByInstaller: false });
+    const result = runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], {
+      PATH: `${bin}:/usr/bin:/bin`,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /root keys pinned by the reviewed installer/);
+    assert.equal(existsSync(join(bin, "pi")), false);
+  } finally {
+    destroy(dataRoot);
+    destroy(bin);
+    destroy(candidate.directory);
+  }
+});
+
 test("installer claims pi only with explicit --manage-pi", () => {
   const root = mkdtempSync(join(tmpdir(), "managed-runtime-installer-"));
   const candidate = fixture();
@@ -779,6 +799,12 @@ test("plain side-by-side setup publishes only compatibility, which can explicitl
   };
   try {
     activate(dataRoot, candidate);
+    const interrupted = runManager(dataRoot, ["managed", "install-compatibility", "--bin-dir", bin], {
+      ...environment,
+      PI_MANAGED_INTERRUPT_AT: "compatibility-receipt-published",
+    });
+    assert.notEqual(interrupted.status, 0);
+    assert.equal(existsSync(join(bin, "pi-wait-for-user")), false);
     const installed = runManager(dataRoot, ["managed", "install-compatibility", "--bin-dir", bin], environment);
     assert.equal(installed.status, 0, installed.stderr);
     assert.equal(existsSync(join(bin, "pi")), false);
