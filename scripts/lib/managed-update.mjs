@@ -106,7 +106,7 @@ function errorMessage(error) {
   return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }
 
-async function during(stage, callback) {
+async function withManagedUpdateStage(stage, callback) {
   try {
     return await callback();
   } catch (error) {
@@ -304,32 +304,32 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   const transport = options.transport || defaultTransport();
   const now = options.now || new Date();
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("Invalid Managed Update check date");
-  const context = await during("local validation", async () => readManagedUpdateContext(dataRoot));
+  const context = await withManagedUpdateStage("local validation", async () => readManagedUpdateContext(dataRoot));
   const priorChannelUrl = httpsUrl(context.trustEnvelope.signed.channelUrl, "authenticated Channel");
   const trustUrl = new URL("release-trust.json", priorChannelUrl).href;
-  const trustEnvelope = await during("trust discovery", () => transport.json(trustUrl, "release trust metadata"));
-  const authority = await during("trust verification", async () => verifyTrustMetadata(trustEnvelope, {
+  const trustEnvelope = await withManagedUpdateStage("trust discovery", () => transport.json(trustUrl, "release trust metadata"));
+  const authority = await withManagedUpdateStage("trust verification", async () => verifyTrustMetadata(trustEnvelope, {
     trustedRootKeys: context.rootKeys,
     now,
     accepted: context.accepted.trust,
   }));
   const channelUrl = httpsUrl(authority.metadata.channelUrl, "authenticated Channel").href;
-  const channelEnvelope = await during("Channel discovery", () => transport.json(channelUrl, "Release Channel"));
-  const selection = await during("Channel verification", async () => verifyChannelSelection(channelEnvelope, {
+  const channelEnvelope = await withManagedUpdateStage("Channel discovery", () => transport.json(channelUrl, "Release Channel"));
+  const selection = await withManagedUpdateStage("Channel verification", async () => verifyChannelSelection(channelEnvelope, {
     trust: authority,
     now,
     accepted: context.accepted.channel,
   }));
   const manifestUrl = httpsUrl(channelEnvelope.signed.manifest.url, "Release Manifest").href;
-  const manifestEnvelope = await during("Release Manifest discovery", () => transport.json(manifestUrl, "Release Manifest"));
-  await during("Release Manifest verification", async () => verifyChannel(channelEnvelope, {
+  const manifestEnvelope = await withManagedUpdateStage("Release Manifest discovery", () => transport.json(manifestUrl, "Release Manifest"));
+  await withManagedUpdateStage("Release Manifest verification", async () => verifyChannel(channelEnvelope, {
     trust: authority,
     now,
     manifest: manifestEnvelope,
     accepted: context.accepted.channel,
   }));
-  const manifest = await during("Release Manifest verification", async () => verifyReleaseManifest(manifestEnvelope, { trust: authority, now }));
-  await during("metadata acceptance", async () => acceptManagedUpdateMetadata(dataRoot, {
+  const manifest = await withManagedUpdateStage("Release Manifest verification", async () => verifyReleaseManifest(manifestEnvelope, { trust: authority, now }));
+  await withManagedUpdateStage("metadata acceptance", async () => acceptManagedUpdateMetadata(dataRoot, {
     trustEnvelope,
     channelEnvelope,
     manifestEnvelope,
@@ -353,7 +353,7 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   const status = updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError, candidateCompatible);
   status.checkedAt = now.toISOString();
   if (options.cache !== false) atomicWrite(paths(dataRoot).status, status);
-  if (!candidateChanged) await during("Update Hold cleanup", async () => clearExactUpdateHold(dataRoot, manifest.releaseId));
+  if (!candidateChanged) await withManagedUpdateStage("Update Hold cleanup", async () => clearExactUpdateHold(dataRoot, manifest.releaseId));
   const common = {
     active: status.active,
     channel: status.channel,
@@ -430,21 +430,21 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
       const managerArchive = join(temporary, managerArtifact.name);
       const releaseArchive = join(temporary, downstream.artifact.name);
       stage = "Manager Release download";
-      await during(stage, () => transport.artifact(
+      await withManagedUpdateStage(stage, () => transport.artifact(
         new URL(managerArtifact.name, checked.source.manifestUrl).href,
         managerArchive,
         "Manager Release",
         managerArtifact,
       ));
       stage = "Downstream Release download";
-      await during(stage, () => transport.artifact(
+      await withManagedUpdateStage(stage, () => transport.artifact(
         new URL(downstream.artifact.name, checked.source.manifestUrl).href,
         releaseArchive,
         "Downstream Release",
         downstream.artifact,
       ));
       stage = "verification and activation";
-      const activation = await during(stage, async () => installAndActivateFromManagedConfig({
+      const activation = await withManagedUpdateStage(stage, async () => installAndActivateFromManagedConfig({
         dataRoot,
         trustEnvelope: checked.source.trustEnvelope,
         channelEnvelope: checked.source.channelEnvelope,
@@ -541,7 +541,7 @@ export function cachedManagedStartupNotice(dataRoot, options = {}) {
   return null;
 }
 
-export function claimManagedStartupCheck(dataRoot, options = {}) {
+function claimManagedStartupCheck(dataRoot, options = {}) {
   const environment = options.environment || process.env;
   if (environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE || options.offline) return false;
   const now = options.now || new Date();
@@ -594,6 +594,11 @@ export function claimManagedStartupCheck(dataRoot, options = {}) {
   } finally {
     rmSync(selected.startupLock, { force: true });
   }
+}
+
+export async function refreshManagedStartupStatus(dataRoot, options = {}) {
+  if (!claimManagedStartupCheck(dataRoot, options)) return;
+  await checkManagedUpdate(dataRoot, options);
 }
 
 export function formatManagedStatus(dataRoot) {

@@ -28,9 +28,8 @@ import {
 } from "./lib/managed-runtime.mjs";
 import {
   cachedManagedStartupNotice,
-  checkManagedUpdate,
-  claimManagedStartupCheck,
   formatManagedStatus,
+  refreshManagedStartupStatus,
   runManagedUpdate,
 } from "./lib/managed-update.mjs";
 
@@ -139,17 +138,19 @@ function packageUpdate(selected, options = []) {
 }
 
 function interactiveLaunch(args) {
-  if (!process.stdin.isTTY || !process.stderr.isTTY) return false;
-  if (args.includes("-p") || args.includes("--print") || args.includes("--json") || args.includes("--rpc")) return false;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
+  const nonInteractiveFlags = new Set([
+    "-h", "--help", "-v", "--version", "-p", "--print", "--json", "--rpc", "--export", "--list-models",
+  ]);
+  if (args.some((argument) => nonInteractiveFlags.has(argument))) return false;
+  if (["install", "remove", "uninstall", "list", "config"].includes(args[0])) return false;
   const mode = args.indexOf("--mode");
   return mode < 0 || !["json", "rpc"].includes(args[mode + 1]);
 }
 
 function beginStartupCheck(args) {
-  const root = dataRoot();
   const environment = process.env;
-  const offline = args.includes("--offline");
-  if (!claimManagedStartupCheck(root, { environment, offline })) return;
+  if (environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE || args.includes("--offline")) return;
   const manager = process.env.PI_MANAGED_MANAGER_DIR
     ? join(process.env.PI_MANAGED_MANAGER_DIR, "package", "manager")
     : process.execPath;
@@ -213,7 +214,7 @@ try {
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "status") {
     console.log(formatManagedStatus(dataRoot()));
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "_startup-check") {
-    try { await checkManagedUpdate(dataRoot()); } catch { /* Startup refresh is silent and never delays launch. */ }
+    try { await refreshManagedStartupStatus(dataRoot()); } catch { /* Startup refresh is silent and never delays launch. */ }
   } else if (args.length === 3 && args[0] === "managed" && args[1] === "recover" && args[2] === "--previous") {
     const activation = recoverPrevious(dataRoot());
     console.log(`Recovered ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
