@@ -115,6 +115,13 @@ function verifyRelease(root) {
   if (!manifest.sessionCompatibility || !manifest.manager || !manifest.provenance) {
     fail("Release candidate input must declare session, Manager Release, and provenance compatibility");
   }
+  const releasePackage = readJson(join(root, "package.json"));
+  expectEqual(releasePackage.piWaitForUser?.managerReleaseId, manifest.manager.releaseId, "Manager Release package identity");
+  expectEqual(
+    JSON.stringify(releasePackage.piWaitForUser?.compatibleReleaseManifestVersions),
+    JSON.stringify(manifest.manager.compatibleReleaseManifestVersions),
+    "Manager Release manifest compatibility",
+  );
 
   const releaseNotes = readFileSync(join(root, "releases", releaseId, "RELEASE_NOTES.md"), "utf8");
   expectIncludes(releaseNotes, `# Pi Wait for User · \`${releaseId}\``, "Release notes heading");

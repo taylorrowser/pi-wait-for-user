@@ -134,6 +134,8 @@ The tag workflow:
 7. generates checksums and metadata projections from the signed manifest; and
 8. attests and verifies every publishable artifact before publishing one immutable GitHub release.
 
+The release package also contains the `manager-v1` local managed-runtime foundation: the stable stage-0 dispatcher, atomic Activation engine, immutable pair receipts, lifecycle lock, process leases, recovery/disable operations, and layered verification. See [`docs/release/managed-runtime.md`](docs/release/managed-runtime.md). Command ownership and network update UX are delivered separately and are not enabled by the current fast installer.
+
 For local source verification:
 
 ```bash

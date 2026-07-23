@@ -6,9 +6,14 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "piWaitForUser": {
+    "managerReleaseId": "manager-v1",
+    "compatibleReleaseManifestVersions": [1]
+  },
   "files": [
     "LICENSE",
     "README.md",
+    "manager",
     "packages/question-tool/extensions",
     "packages/question-tool/src",
     "packages/question-tool/package.json",
@@ -22,6 +27,8 @@
     "scripts/install.mjs",
     "scripts/launch.mjs",
     "scripts/lib",
+    "scripts/managed-dispatcher.mjs",
+    "scripts/managed-manager.mjs",
     "scripts/package-binaries.mjs",
     "scripts/pi-patch.mjs",
     "scripts/release-metadata.mjs",

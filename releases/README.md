@@ -16,6 +16,8 @@ Versioned JSON Schemas live in [`schemas`](schemas):
 
 Runtime validators in `scripts/lib/release-metadata.mjs` reject unknown schemas, extra/missing fields, malformed values, invalid or unauthorized signatures, expired/revoked keys, expired metadata, digest drift, incomplete payload inventories, file-mode drift, replay, and provenance mismatch. Packaging and extracted-payload verification call the same filesystem inventory primitive, including path normalization, symlink, file-kind, digest, size, and mode rules.
 
+The local consumer of these identities is documented in [`docs/release/managed-runtime.md`](../docs/release/managed-runtime.md). The release package projects `manager.releaseId` and compatible manifest versions into `package.json`; its `manager` executable is the immutable Manager Release entrypoint selected by stage 0.
+
 ## Build and promotion
 
 1. Create a new release ID and immutable input directory; never edit an already published release.
