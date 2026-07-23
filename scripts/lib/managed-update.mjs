@@ -4,6 +4,7 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -19,6 +20,7 @@ import { pipeline } from "node:stream/promises";
 
 import {
   acceptManagedUpdateMetadata,
+  assertLifecycleCapability,
   inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
   readActivation,
@@ -141,8 +143,13 @@ function defaultTransport() {
     },
     async artifact(url, destination, label, expected) {
       const fetched = await response(url, label);
-      const declaredSize = Number(fetched.headers.get("content-length"));
-      if (Number.isFinite(declaredSize) && declaredSize !== expected.size) fail(`${label} download size mismatch`);
+      const contentLength = fetched.headers.get("content-length");
+      if (contentLength !== null) {
+        const declaredSize = Number(contentLength);
+        if (!Number.isSafeInteger(declaredSize) || declaredSize < 0 || declaredSize !== expected.size) {
+          fail(`${label} download size mismatch`);
+        }
+      }
       if (!fetched.body) fail(`${label} response has no body`);
       await pipeline(Readable.fromWeb(fetched.body), writeFileStream(destination, expected.size));
       const size = lstatSync(destination).size;
@@ -291,6 +298,15 @@ function validateStatus(status) {
   if (status.patchLag !== null && (!hasExactKeys(status.patchLag, ["currentReleaseId", "currentUpstreamVersion", "observedUpstreamVersion"])
     || !idPattern.test(status.patchLag.currentReleaseId) || !validVersion(status.patchLag.currentUpstreamVersion)
     || !validVersion(status.patchLag.observedUpstreamVersion))) fail("Malformed managed update status");
+  if ((status.compatibleUpdate !== null && (
+    status.compatibleUpdate.releaseId !== status.channel.releaseId
+    || status.compatibleUpdate.sequence !== status.channel.sequence
+    || status.patchLag !== null
+  )) || (status.patchLag !== null && (
+    status.patchLag.currentReleaseId !== status.active.releaseId
+    || status.patchLag.currentUpstreamVersion !== status.active.upstreamVersion
+    || status.patchLag.observedUpstreamVersion !== status.upstream.observedVersion
+  ))) fail("Malformed managed update status");
   return status;
 }
 
@@ -333,7 +349,7 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
     trustEnvelope,
     channelEnvelope,
     manifestEnvelope,
-  }, { now, lifecycleLockHeld: true }));
+  }, { now, lifecycleCapability: options.lifecycleCapability }));
 
   let observedUpstreamVersion;
   let upstreamError;
@@ -371,10 +387,13 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
 }
 
 export async function checkManagedUpdate(dataRoot, options = {}) {
-  if (options.lifecycleLockHeld) return checkManagedUpdateLocked(dataRoot, options);
-  return withLifecycleLockAsync(dataRoot, "check Managed Update", () => checkManagedUpdateLocked(dataRoot, {
+  if (options.lifecycleCapability !== undefined) {
+    assertLifecycleCapability(options.lifecycleCapability);
+    return checkManagedUpdateLocked(dataRoot, options);
+  }
+  return withLifecycleLockAsync(dataRoot, "check Managed Update", (lifecycleCapability) => checkManagedUpdateLocked(dataRoot, {
     ...options,
-    lifecycleLockHeld: true,
+    lifecycleCapability,
   }));
 }
 
@@ -415,7 +434,7 @@ function activatedStatus(checked, candidate, now) {
 async function performManagedUpdateLocked(dataRoot, options = {}) {
   let stage = "discovery";
   try {
-    const checked = await checkManagedUpdate(dataRoot, { ...options, lifecycleLockHeld: true });
+    const checked = await checkManagedUpdate(dataRoot, options);
     if (checked.kind === "incompatible") fail(`Managed Update failed during candidate compatibility: ${checked.incompatibility}`);
     if (checked.kind !== "compatible-update") return checked;
     const manifest = checked.source.manifestEnvelope.signed;
@@ -453,7 +472,7 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
         releaseArchive,
         now: options.now || new Date(),
         checkpoint: options.checkpoint,
-        lifecycleLockHeld: true,
+        lifecycleCapability: options.lifecycleCapability,
       }));
       stage = "post-activation cleanup";
       clearExactUpdateHold(dataRoot, checked.candidate.releaseId);
@@ -469,15 +488,18 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
 }
 
 export async function performManagedUpdate(dataRoot, options = {}) {
-  if (options.lifecycleLockHeld) return performManagedUpdateLocked(dataRoot, options);
-  return withLifecycleLockAsync(dataRoot, "perform Managed Update", () => performManagedUpdateLocked(dataRoot, {
+  if (options.lifecycleCapability !== undefined) {
+    assertLifecycleCapability(options.lifecycleCapability);
+    return performManagedUpdateLocked(dataRoot, options);
+  }
+  return withLifecycleLockAsync(dataRoot, "perform Managed Update", (lifecycleCapability) => performManagedUpdateLocked(dataRoot, {
     ...options,
-    lifecycleLockHeld: true,
+    lifecycleCapability,
   }));
 }
 
 async function runManagedUpdateLocked(dataRoot, options) {
-  const managed = await performManagedUpdate(dataRoot, { ...options, lifecycleLockHeld: true });
+  const managed = await performManagedUpdate(dataRoot, options);
   await options.managedPhaseComplete?.(managed);
   if (!options.all) return { managed, exitCode: 0, partial: false };
   const selected = validateActivePair(dataRoot);
@@ -504,7 +526,10 @@ export async function runManagedUpdate(dataRoot, options = {}) {
     await options.managedPhaseComplete?.(managed);
     return { managed, exitCode: 0, partial: false };
   }
-  return withLifecycleLockAsync(dataRoot, "perform Managed Update --all", () => runManagedUpdateLocked(dataRoot, options));
+  return withLifecycleLockAsync(dataRoot, "perform Managed Update --all", (lifecycleCapability) => runManagedUpdateLocked(dataRoot, {
+    ...options,
+    lifecycleCapability,
+  }));
 }
 
 function readUpdateHold(dataRoot) {
@@ -553,23 +578,30 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
     const stat = lstatSync(selected.startupLock);
     if (stat.isSymbolicLink() || !stat.isFile()) fail("Startup check lock is foreign");
     if (now.getTime() - stat.mtimeMs <= 5 * 60 * 1_000) return false;
-    const recoveryPath = join(selected.state, `startup-check-recovery-${Math.floor(stat.mtimeMs)}.json`);
-    let recovery;
-    try { recovery = openSync(recoveryPath, "wx", 0o600); } catch (recoveryError) {
-      if (recoveryError?.code === "EEXIST") return false;
-      throw recoveryError;
+    const recoveryPath = join(
+      selected.state,
+      `startup-check-recovery-${stat.dev}-${stat.ino}-${Math.floor(stat.mtimeMs)}-${stat.size}.json`,
+    );
+    try {
+      linkSync(selected.startupLock, recoveryPath);
+    } catch (recoveryError) {
+      if (recoveryError?.code !== "EEXIST") throw recoveryError;
+      const current = lstatSync(selected.startupLock);
+      const recovery = lstatSync(recoveryPath);
+      if (current.dev !== recovery.dev || current.ino !== recovery.ino) fail("Startup check recovery record is foreign");
     }
-    writeSync(recovery, serializeMetadata({
+    options.checkpoint?.("startup-check-recovery-claimed");
+    const current = lstatSync(selected.startupLock);
+    const recovery = lstatSync(recoveryPath);
+    if (current.dev !== stat.dev || current.ino !== stat.ino
+      || recovery.dev !== stat.dev || recovery.ino !== stat.ino) return false;
+    unlinkSync(selected.startupLock);
+    atomicWrite(recoveryPath, {
       schemaVersion: 1,
       type: "startup-check-lock-recovery",
       staleModifiedAt: new Date(stat.mtimeMs).toISOString(),
       claimedAt: now.toISOString(),
-    }));
-    fsyncSync(recovery);
-    closeSync(recovery);
-    const current = lstatSync(selected.startupLock);
-    if (current.mtimeMs !== stat.mtimeMs || current.size !== stat.size) return false;
-    unlinkSync(selected.startupLock);
+    });
     try { lock = openSync(selected.startupLock, "wx", 0o600); } catch (replacementError) {
       if (replacementError?.code === "EEXIST") return false;
       throw replacementError;

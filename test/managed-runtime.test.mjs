@@ -1395,7 +1395,8 @@ globalThis.fetch = async (input) => {
   const path = mapping[url];
   if (!path) return new Response("not found", { status: 404 });
   const body = readFileSync(path);
-  return new Response(body, { status: 200, headers: { "content-length": String(body.length) } });
+  const headers = process.env.PI_TEST_OMIT_CONTENT_LENGTH ? undefined : { "content-length": String(body.length) };
+  return new Response(body, { status: 200, headers });
 };
 `);
   return {
@@ -1481,6 +1482,58 @@ test("Managed Update downloads only signed-manifest artifacts and atomically act
       new URL(basename(candidate.releaseArchive), candidate.channelEnvelope.signed.manifest.url).href,
     ].sort());
     assert.equal(transport.requested.some((entry) => entry.url.includes("99.0.0")), false);
+  } finally {
+    destroy(dataRoot);
+    destroy(current.directory);
+    destroy(candidate.directory);
+  }
+});
+
+test("Managed Update rejects a changed manifest that reuses an immutable Downstream Release identity", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-reused-release-id-"));
+  const current = fixture();
+  try {
+    activate(dataRoot, current);
+    const manifestEnvelope = signMetadata({
+      ...current.manifestEnvelope.signed,
+      publishedAt: "2026-07-24T11:00:00.000Z",
+    }, "fixture-release", releasePrivate);
+    const channelEnvelope = signMetadata({
+      ...current.channelEnvelope.signed,
+      sequence: current.channelEnvelope.signed.sequence + 1,
+      manifest: {
+        ...current.channelEnvelope.signed.manifest,
+        sha256: digest(serializeMetadata(manifestEnvelope)),
+      },
+    }, "fixture-release", releasePrivate);
+    const candidate = { ...current, manifestEnvelope, channelEnvelope };
+
+    await assert.rejects(
+      performManagedUpdate(dataRoot, { transport: updateTransport(candidate), now }),
+      /Immutable downstream release identity already exists with different content/,
+    );
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
+    const launched = runDispatcher(dataRoot, ["--help"], { PI_OFFLINE: "1" });
+    assert.equal(launched.status, 0, launched.stderr);
+  } finally {
+    destroy(dataRoot);
+    destroy(current.directory);
+  }
+});
+
+test("Managed Update accepts streamed signed-size artifacts without Content-Length", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-chunked-download-"));
+  const current = fixture();
+  const candidate = fixture({ releaseId: "pi-v0.81.1-patch.7", managerArchive: current.managerArchive });
+  try {
+    activate(dataRoot, current);
+    const result = runDispatcher(dataRoot, ["update"], {
+      ...managedNetworkEnvironment(candidate, candidate.directory),
+      PI_TEST_OMIT_CONTENT_LENGTH: "1",
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /Activated Downstream Release pi-v0\.81\.1-patch\.7/);
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.7");
   } finally {
     destroy(dataRoot);
     destroy(current.directory);
@@ -1589,6 +1642,18 @@ test("cached startup status is throttled, isolated to interactive output, and re
     await checkManagedUpdate(dataRoot, { transport: updateTransport(candidate), now, cache: true });
     const cached = readManagedUpdateStatus(dataRoot);
     assert.equal(cached.compatibleUpdate.releaseId, "pi-v0.81.1-patch.7");
+    for (const malformed of [
+      { ...cached, compatibleUpdate: { ...cached.compatibleUpdate, sequence: cached.channel.sequence + 1 } },
+      { ...cached, patchLag: {
+        currentReleaseId: cached.active.releaseId,
+        currentUpstreamVersion: cached.active.upstreamVersion,
+        observedUpstreamVersion: "0.82.0",
+      } },
+    ]) {
+      writeFileSync(join(dataRoot, "state", "update-status.json"), serializeMetadata(malformed));
+      assert.throws(() => readManagedUpdateStatus(dataRoot), /Malformed managed update status/);
+    }
+    writeFileSync(join(dataRoot, "state", "update-status.json"), serializeMetadata(cached));
     assert.match(cachedManagedStartupNotice(dataRoot, { interactive: true }), /compatible Downstream Release.*patch\.7/i);
     writeFileSync(join(dataRoot, "state", "update-hold.json"), serializeMetadata({
       schemaVersion: 1,
@@ -1628,6 +1693,33 @@ test("cached startup status is throttled, isolated to interactive output, and re
     destroy(dataRoot);
     destroy(current.directory);
     destroy(candidate.directory);
+  }
+});
+
+test("detached startup refresh resumes after interruption immediately after its durable throttle claim", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-startup-recovery-"));
+  const current = fixture();
+  try {
+    activate(dataRoot, current);
+    writeFileSync(join(dataRoot, "state", "startup-check.lock"), "interrupted\n");
+    const transport = updateTransport(current);
+    await assert.rejects(
+      refreshManagedStartupStatus(dataRoot, {
+        transport,
+        now,
+        checkpoint(name) {
+          if (name === "startup-check-recovery-claimed") throw new Error(`Interrupted at ${name}`);
+        },
+      }),
+      /Interrupted at startup-check-recovery-claimed/,
+    );
+    assert.equal(transport.requested.length, 0);
+    await refreshManagedStartupStatus(dataRoot, { transport, now });
+    assert.ok(transport.requested.length > 0);
+    assert.equal(existsSync(join(dataRoot, "state", "startup-check.lock")), false);
+  } finally {
+    destroy(dataRoot);
+    destroy(current.directory);
   }
 });
 
@@ -1725,7 +1817,11 @@ test("candidate verification failure removes temporary payloads, bounds diagnost
     assert.ok(destinations.every((destination) => destination.startsWith(join(dataRoot, "tmp", "update.tmp-"))));
     assert.equal(readdirSync(join(dataRoot, "tmp")).some((name) => name.startsWith("update.tmp-")), false);
     let retained = readdirSync(diagnostics).filter((name) => name.endsWith(".json"));
-    assert.ok(retained.length <= 10);
+    const managedDiagnosticPattern = /^\d+-[0-9a-f-]{36}\.json$/;
+    assert.ok(retained.filter((name) => managedDiagnosticPattern.test(name)).length <= 10);
+    for (let index = 0; index < 12; index += 1) {
+      assert.equal(readFileSync(join(diagnostics, `000-${String(index).padStart(2, "0")}.json`), "utf8"), "{}\n");
+    }
     const diagnosticValues = retained.map((name) => JSON.parse(readFileSync(join(diagnostics, name), "utf8")));
     assert.ok(diagnosticValues.some(
       (value) => value.type === "activation-failure" && value.stage === "verification-and-activation",
@@ -1735,7 +1831,7 @@ test("candidate verification failure removes temporary payloads, bounds diagnost
       /Channel sequence replay/,
     );
     retained = readdirSync(diagnostics).filter((name) => name.endsWith(".json"));
-    assert.ok(retained.length <= 10);
+    assert.ok(retained.filter((name) => managedDiagnosticPattern.test(name)).length <= 10);
   } finally {
     destroy(dataRoot);
     destroy(current.directory);
@@ -1865,7 +1961,7 @@ test("interactive startup notices do not pollute TTY metadata and package-comman
     assert.match(interactive.stdout, /compatible Downstream Release is available/);
 
     for (const args of [
-      ["--help"], ["--version"], ["--list-models"], ["--export", "session.jsonl"], ["list"],
+      ["--help"], ["--version"], ["--list-models"], ["--export", "session.jsonl"], ["list"], ["conformance"],
     ]) {
       const output = runDispatcherInTty(dataRoot, [...args, "--offline"]);
       assert.equal(output.status, 0, `${output.stdout}\n${output.stderr}`);
@@ -1901,6 +1997,22 @@ test("Managed Update serializes lifecycle work and refuses symlink-substituted s
   } finally {
     destroy(dataRoot);
     destroy(foreignRoot);
+    destroy(current.directory);
+  }
+});
+
+test("Managed Update refuses a forged lifecycle-lock capability", async () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-forged-lock-"));
+  const current = fixture();
+  try {
+    activate(dataRoot, current);
+    await assert.rejects(
+      checkManagedUpdate(dataRoot, { transport: updateTransport(current), now, lifecycleCapability: {} }),
+      /Invalid managed lifecycle lock capability/,
+    );
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
+  } finally {
+    destroy(dataRoot);
     destroy(current.directory);
   }
 });

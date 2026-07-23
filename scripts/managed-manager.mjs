@@ -143,7 +143,7 @@ function interactiveLaunch(args) {
     "-h", "--help", "-v", "--version", "-p", "--print", "--json", "--rpc", "--export", "--list-models",
   ]);
   if (args.some((argument) => nonInteractiveFlags.has(argument))) return false;
-  if (["install", "remove", "uninstall", "list", "config"].includes(args[0])) return false;
+  if (["install", "remove", "uninstall", "list", "config", "conformance"].includes(args[0])) return false;
   const mode = args.indexOf("--mode");
   return mode < 0 || !["json", "rpc"].includes(args[mode + 1]);
 }

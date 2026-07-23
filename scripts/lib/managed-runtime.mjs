@@ -43,6 +43,7 @@ const sha256Pattern = /^[a-f0-9]{64}$/;
 const supportedPlatforms = new Set(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
 const rootKeyProvenanceType = Object.freeze({ callerSelected: "caller-selected", installerPinned: "installer-pinned" });
 const managedDiagnosticLimit = 10;
+const activeLifecycleCapabilities = new WeakSet();
 const receiptKeys = [
   "schemaVersion", "type", "ownedPath", "managerReleaseId", "downstreamReleaseId", "platform",
   "manifestSha256", "sourceArtifact", "verifiedAt", "payload",
@@ -265,24 +266,34 @@ function acquireLifecycleLock(dataRoot, operation) {
   writeSync(fd, serializeMetadata(lock));
   fsyncSync(fd);
   closeSync(fd);
-  return () => {
-    try {
-      const current = readJson(paths.lock, "lifecycle lock");
-      if (current.token === token) unlinkSync(paths.lock);
-    } catch {
-      // Never remove a lock that no longer proves this operation owns it.
-    }
+  const capability = Object.freeze({});
+  activeLifecycleCapabilities.add(capability);
+  return {
+    capability,
+    release() {
+      activeLifecycleCapabilities.delete(capability);
+      try {
+        const current = readJson(paths.lock, "lifecycle lock");
+        if (current.token === token) unlinkSync(paths.lock);
+      } catch {
+        // Never remove a lock that no longer proves this operation owns it.
+      }
+    },
   };
 }
 
+export function assertLifecycleCapability(capability) {
+  if (!capability || !activeLifecycleCapabilities.has(capability)) fail("Invalid managed lifecycle lock capability");
+}
+
 export function withLifecycleLock(dataRoot, operation, callback) {
-  const release = acquireLifecycleLock(dataRoot, operation);
-  try { return callback(); } finally { release(); }
+  const acquired = acquireLifecycleLock(dataRoot, operation);
+  try { return callback(acquired.capability); } finally { acquired.release(); }
 }
 
 export async function withLifecycleLockAsync(dataRoot, operation, callback) {
-  const release = acquireLifecycleLock(dataRoot, operation);
-  try { return await callback(); } finally { release(); }
+  const acquired = acquireLifecycleLock(dataRoot, operation);
+  try { return await callback(acquired.capability); } finally { acquired.release(); }
 }
 
 function validateArtifactBytes(path, expected, label) {
@@ -625,7 +636,8 @@ function publishStage(stage, destination, receipt, paths, checkpoint, boundary) 
       platform: receipt.platform,
     };
     validateReceipt(existingReceipt, receipt.type, destination, pair);
-    if (canonicalJson(existingReceipt.sourceArtifact) !== canonicalJson(receipt.sourceArtifact)
+    if ((receipt.type === "downstream" && existingReceipt.manifestSha256 !== receipt.manifestSha256)
+      || canonicalJson(existingReceipt.sourceArtifact) !== canonicalJson(receipt.sourceArtifact)
       || canonicalJson(existingReceipt.payload) !== canonicalJson(receipt.payload)) {
       fail(`Immutable ${receipt.type} release identity already exists with different content`);
     }
@@ -874,6 +886,23 @@ function saveArtifact(paths, source, expected) {
   return destination;
 }
 
+function isManagedDiagnostic(paths, name) {
+  if (!/^\d+-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/.test(name)) return false;
+  try {
+    const path = join(paths.diagnostics, name);
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2_048) return false;
+    const value = readJson(path, "managed diagnostic");
+    exactObject(value, "managed diagnostic", ["schemaVersion", "type", "stage", "recordedAt", "error"]);
+    if (value.schemaVersion !== 1 || !["activation-failure", "managed-update-failure"].includes(value.type)) return false;
+    expectString(value.stage, "managed diagnostic stage");
+    expectDate(value.recordedAt, "managed diagnostic date");
+    return typeof value.error === "string" && value.error.length <= 500;
+  } catch {
+    return false;
+  }
+}
+
 function writeManagedDiagnostic(paths, type, stage, error) {
   try {
     atomicWrite(join(paths.diagnostics, `${Date.now()}-${randomUUID()}.json`), {
@@ -883,7 +912,7 @@ function writeManagedDiagnostic(paths, type, stage, error) {
       recordedAt: new Date().toISOString(),
       error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
     });
-    const diagnostics = readdirSync(paths.diagnostics).filter((name) => name.endsWith(".json")).sort();
+    const diagnostics = readdirSync(paths.diagnostics).filter((name) => isManagedDiagnostic(paths, name)).sort();
     for (const name of diagnostics.slice(0, Math.max(0, diagnostics.length - managedDiagnosticLimit))) {
       unlinkSync(join(paths.diagnostics, name));
     }
@@ -914,7 +943,7 @@ function installAndActivateWithProvenance(options, provenanceType) {
     now = new Date(),
     checkpoint,
     legacyDirectories = [],
-    lifecycleLockHeld = false,
+    lifecycleCapability,
   } = options;
   ensurePlatform(platform);
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("Invalid activation verification date");
@@ -1046,9 +1075,11 @@ function installAndActivateWithProvenance(options, provenanceType) {
       throw error;
     }
   };
-  return lifecycleLockHeld
-    ? activate()
-    : withLifecycleLock(dataRoot, `activate ${manifestEnvelope?.signed?.releaseId ?? "candidate"}`, activate);
+  if (lifecycleCapability !== undefined) {
+    assertLifecycleCapability(lifecycleCapability);
+    return activate();
+  }
+  return withLifecycleLock(dataRoot, `activate ${manifestEnvelope?.signed?.releaseId ?? "candidate"}`, activate);
 }
 
 export function readManagedUpdateContext(dataRoot) {
@@ -1108,9 +1139,11 @@ export function acceptManagedUpdateMetadata(dataRoot, metadata, options = {}) {
     atomicWrite(selected.paths.accepted, { schemaVersion: 1, trust: authority.acceptedState, channel });
     return { trust: authority.acceptedState, channel };
   };
-  return options.lifecycleLockHeld
-    ? accept()
-    : withLifecycleLock(dataRoot, "accept Managed Update metadata", accept);
+  if (options.lifecycleCapability !== undefined) {
+    assertLifecycleCapability(options.lifecycleCapability);
+    return accept();
+  }
+  return withLifecycleLock(dataRoot, "accept Managed Update metadata", accept);
 }
 
 export function installAndActivate(options) {
