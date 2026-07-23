@@ -8,6 +8,7 @@ import {
   fsyncSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -15,11 +16,11 @@ import {
   realpathSync,
   renameSync,
   rmSync,
-  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
 import {
@@ -69,6 +70,8 @@ function expectDate(value, label) {
 
 function readJson(path, label = basename(path)) {
   try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) fail(`Malformed ${label}`);
     return JSON.parse(readFileSync(path, "utf8"));
   } catch {
     fail(`Malformed ${label}`);
@@ -427,11 +430,24 @@ function publishStage(stage, destination, receipt, paths, checkpoint, boundary) 
     immutableTree(destination);
     removeStage(stage.stage);
   }
-  atomicWrite(
-    receiptPath(paths, receipt.type, receipt.type === "manager" ? receipt.managerReleaseId : receipt.downstreamReleaseId),
-    publishedReceipt,
+  const centralReceipt = receiptPath(
+    paths,
+    receipt.type,
+    receipt.type === "manager" ? receipt.managerReleaseId : receipt.downstreamReleaseId,
   );
+  ensureManagedDirectory(dirname(centralReceipt));
+  atomicWrite(centralReceipt, publishedReceipt);
   checkpoint?.(boundary);
+}
+
+function readAcceptedMetadataState(paths) {
+  if (!existsSync(paths.accepted)) return undefined;
+  const accepted = readJson(paths.accepted, "accepted metadata state");
+  exactObject(accepted, "accepted metadata state", ["schemaVersion", "trust", "channel"]);
+  if (accepted.schemaVersion !== 1) fail("Malformed accepted metadata state");
+  exactObject(accepted.trust, "accepted trust state", ["version", "envelopeSha256"]);
+  exactObject(accepted.channel, "accepted Channel state", ["sequence", "releaseId", "manifestSha256", "envelopeSha256"]);
+  return accepted;
 }
 
 function writeConfig(paths, platform, rootKeys) {
@@ -473,6 +489,8 @@ function validatePairShape(value, label) {
 
 export function readActivation(dataRoot) {
   const paths = layout(dataRoot);
+  ensureManagedDirectory(paths.root);
+  ensureManagedDirectory(paths.state);
   const activation = readJson(paths.activation, "Activation");
   exactObject(activation, "Activation", ["schemaVersion", "type", "createdAt", "active", "previous"]);
   if (activation.schemaVersion !== 1 || activation.type !== "activation") fail("Malformed Activation");
@@ -483,14 +501,17 @@ export function readActivation(dataRoot) {
 }
 
 function readReceiptCopies(paths, type, id, ownedPath, pair) {
-  const central = validateReceipt(readJson(receiptPath(paths, type, id), `${type} receipt`), type, ownedPath, pair);
-  const embedded = validateReceipt(readJson(join(ownedPath, ".managed", "receipt.json"), `${type} receipt`), type, ownedPath, pair);
+  const centralPath = ensureNoSymlinkPath(paths.receipts, receiptPath(paths, type, id), `${type} receipt path`);
+  const embeddedPath = ensureNoSymlinkPath(ownedPath, join(ownedPath, ".managed", "receipt.json"), `${type} embedded receipt path`);
+  const central = validateReceipt(readJson(centralPath, `${type} receipt`), type, ownedPath, pair);
+  const embedded = validateReceipt(readJson(embeddedPath, `${type} receipt`), type, ownedPath, pair);
   if (canonicalJson(central) !== canonicalJson(embedded)) fail(`${type} receipt copies mismatch`);
   return central;
 }
 
 export function validateActivePair(dataRoot, pair = readActivation(dataRoot).active) {
   const paths = layout(dataRoot);
+  for (const path of [paths.root, paths.state, paths.managers, paths.releases, paths.receipts]) ensureManagedDirectory(path);
   const config = readConfig(paths);
   validatePairShape(pair, "Activation pair");
   if (pair.platform !== config.platform) fail("Activation platform mismatch");
@@ -500,11 +521,19 @@ export function validateActivePair(dataRoot, pair = readActivation(dataRoot).act
   const managerReceipt = readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
   const releaseReceipt = readReceiptCopies(paths, "downstream", pair.downstreamReleaseId, releasePath, pair);
   if (releaseReceipt.manifestSha256 !== pair.manifestSha256) fail("Activation manifest identity mismatch");
-  const managerExecutable = join(managerPath, "package", "manager");
-  const pi = join(releasePath, "pi-wait-for-user", "pi-core");
-  const question = join(releasePath, "pi-wait-for-user", "question-tool", "extensions", "question-tool.ts");
-  const releaseMetadata = join(releasePath, "pi-wait-for-user", "release.json");
-  const manifest = join(releasePath, ".managed", "release-manifest.json");
+  const managerExecutable = ensureNoSymlinkPath(managerPath, join(managerPath, "package", "manager"), "Manager Release executable path");
+  const pi = ensureNoSymlinkPath(releasePath, join(releasePath, "pi-wait-for-user", "pi-core"), "Pi executable path");
+  const question = ensureNoSymlinkPath(
+    releasePath,
+    join(releasePath, "pi-wait-for-user", "question-tool", "extensions", "question-tool.ts"),
+    "Question Tool path",
+  );
+  const releaseMetadata = ensureNoSymlinkPath(
+    releasePath,
+    join(releasePath, "pi-wait-for-user", "release.json"),
+    "Downstream Release metadata path",
+  );
+  const manifest = ensureNoSymlinkPath(releasePath, join(releasePath, ".managed", "release-manifest.json"), "Release Manifest path");
   for (const [path, label, executable] of [
     [managerExecutable, "Manager Release executable", true],
     [pi, "Pi executable", true],
@@ -523,6 +552,20 @@ export function validateActivePair(dataRoot, pair = readActivation(dataRoot).act
   return { paths, config, pair, managerPath, releasePath, managerExecutable, pi, managerReceipt, releaseReceipt };
 }
 
+function verifyPayloadAgainstArtifact(installedPath, artifactPath, label) {
+  const temporary = mkdtempSync(join(tmpdir(), "pi-managed-artifact-verification-"));
+  const payload = join(temporary, "payload");
+  mkdirSync(payload, { mode: 0o700 });
+  try {
+    extractArchive(artifactPath, payload);
+    comparePayload(payloadWithoutManagerFiles(installedPath), payloadWithoutManagerFiles(payload));
+  } catch (error) {
+    fail(`${label} payload verification failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    removeStage(temporary);
+  }
+}
+
 function verifyPair(dataRoot, pair, { provenance = false, gh = "gh" } = {}) {
   const selected = validateActivePair(dataRoot, pair);
   const metadataRoot = join(selected.releasePath, ".managed");
@@ -539,8 +582,20 @@ function verifyPair(dataRoot, pair, { provenance = false, gh = "gh" } = {}) {
   if (!managerArtifact) fail("Manager Release artifact identity mismatch");
   const downstream = manifest.platformArchives.find((entry) => entry.platform === pair.platform);
   if (!downstream || canonicalJson(downstream.artifact) !== canonicalJson(selected.releaseReceipt.sourceArtifact)) fail("Downstream Release artifact identity mismatch");
-  validateArtifactBytes(join(selected.paths.artifacts, managerArtifact.sha256), managerArtifact, "Cached Manager Release");
-  validateArtifactBytes(join(selected.paths.artifacts, downstream.artifact.sha256), downstream.artifact, "Cached Downstream Release");
+  ensureManagedDirectory(selected.paths.artifacts);
+  const cachedManagerArtifact = ensureNoSymlinkPath(
+    selected.paths.artifacts,
+    join(selected.paths.artifacts, managerArtifact.sha256),
+    "Cached Manager Release path",
+  );
+  const cachedDownstreamArtifact = ensureNoSymlinkPath(
+    selected.paths.artifacts,
+    join(selected.paths.artifacts, downstream.artifact.sha256),
+    "Cached Downstream Release path",
+  );
+  validateArtifactBytes(cachedManagerArtifact, managerArtifact, "Cached Manager Release");
+  validateArtifactBytes(cachedDownstreamArtifact, downstream.artifact, "Cached Downstream Release");
+  verifyPayloadAgainstArtifact(selected.managerPath, cachedManagerArtifact, "Manager Release");
   comparePayload(payloadWithoutManagerFiles(selected.managerPath), selected.managerReceipt.payload);
   comparePayload(payloadWithoutManagerFiles(selected.releasePath), downstream.payload);
   runChecked(selected.managerExecutable, ["--manager-version"], "Manager reported version", pair.managerReleaseId);
@@ -580,13 +635,20 @@ export function verifyManagedInstallation(dataRoot, options = {}) {
 function saveArtifact(paths, source, expected) {
   const destination = join(paths.artifacts, expected.sha256);
   if (existsSync(destination)) {
-    if (sha256File(destination) !== expected.sha256 || statSync(destination).size !== expected.size) fail("Cached artifact identity mismatch");
-    return;
+    validateArtifactBytes(destination, expected, "Cached artifact");
+    return destination;
   }
   const temporary = `${destination}.tmp-${randomUUID()}`;
-  copyFileSync(source, temporary);
-  chmodSync(temporary, 0o444);
-  renameSync(temporary, destination);
+  try {
+    copyFileSync(source, temporary);
+    validateArtifactBytes(temporary, expected, "Copied artifact");
+    chmodSync(temporary, 0o444);
+    renameSync(temporary, destination);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+  return destination;
 }
 
 function diagnostic(paths, error) {
@@ -624,7 +686,7 @@ export function installAndActivate(options) {
     let releaseStage;
     try {
       writeConfig(paths, platform, rootKeys);
-      const accepted = existsSync(paths.accepted) ? readJson(paths.accepted, "accepted metadata state") : undefined;
+      const accepted = readAcceptedMetadataState(paths);
       const authority = verifyTrustMetadata(trustEnvelope, {
         trustedRootKeys: rootKeys,
         now,
@@ -645,9 +707,11 @@ export function installAndActivate(options) {
       if (!downstream) fail(`Platform is not declared by Release Manifest: ${platform}`);
       validateArtifact(managerArchive, managerArtifact, "Manager Release");
       validateArtifact(releaseArchive, downstream.artifact, "Downstream Release");
+      const cachedManagerArchive = saveArtifact(paths, managerArchive, managerArtifact);
+      const cachedReleaseArchive = saveArtifact(paths, releaseArchive, downstream.artifact);
 
       managerStage = createStage(paths, "manager");
-      extractArchive(managerArchive, managerStage.payload);
+      extractArchive(cachedManagerArchive, managerStage.payload);
       const managerExecutable = join(managerStage.payload, "package", "manager");
       if (!existsSync(managerExecutable) || (lstatSync(managerExecutable).mode & 0o111) === 0) fail("Manager Release executable is missing");
       const managerPackage = readJson(join(managerStage.payload, "package", "package.json"), "Manager Release package manifest");
@@ -660,7 +724,7 @@ export function installAndActivate(options) {
       checkpoint?.("manager-staged");
 
       releaseStage = createStage(paths, "downstream");
-      extractArchive(releaseArchive, releaseStage.payload);
+      extractArchive(cachedReleaseArchive, releaseStage.payload);
       comparePayload(payloadWithoutManagerFiles(releaseStage.payload), downstream.payload);
       validateQuestionTool(releaseStage.payload, manifest);
       const core = join(releaseStage.payload, "pi-wait-for-user", "pi-core");
@@ -672,8 +736,6 @@ export function installAndActivate(options) {
 
       atomicWrite(paths.accepted, { schemaVersion: 1, trust: authority.acceptedState, channel: selection });
       checkpoint?.("metadata-accepted");
-      saveArtifact(paths, managerArchive, managerArtifact);
-      saveArtifact(paths, releaseArchive, downstream.artifact);
 
       const verifiedAt = now.toISOString();
       const managerDestination = join(paths.managers, manifest.manager.releaseId);
@@ -929,25 +991,44 @@ export function removeInstalledPair(dataRoot, pair) {
       return "deferred";
     }
     const releasePath = join(paths.releases, pair.downstreamReleaseId);
+    const centralReleaseReceipt = ensureNoSymlinkPath(
+      paths.receipts,
+      receiptPath(paths, "downstream", pair.downstreamReleaseId),
+      "Downstream cleanup receipt path",
+    );
     if (existsSync(releasePath)) {
       readReceiptCopies(paths, "downstream", pair.downstreamReleaseId, releasePath, pair);
       removeThroughTombstone(paths, releasePath, "downstream");
-      unlinkSync(receiptPath(paths, "downstream", pair.downstreamReleaseId));
+      unlinkSync(centralReleaseReceipt);
+    } else if (existsSync(centralReleaseReceipt)) {
+      validateReceipt(readJson(centralReleaseReceipt, "downstream receipt"), "downstream", releasePath, pair);
+      unlinkSync(centralReleaseReceipt);
     }
 
     const retainedManager = [activation.active, activation.previous]
       .filter(Boolean)
       .some((entry) => entry.managerReleaseId === pair.managerReleaseId);
-    const releaseReceipts = join(paths.receipts, "releases");
+    const releaseReceipts = ensureNoSymlinkPath(paths.receipts, join(paths.receipts, "releases"), "Downstream receipt directory");
     const installedManagerReference = existsSync(releaseReceipts) && readdirSync(releaseReceipts).some((name) => {
-      const receipt = readJson(join(releaseReceipts, name), "downstream receipt");
+      const path = ensureNoSymlinkPath(releaseReceipts, join(releaseReceipts, name), "Installed Downstream receipt path");
+      const receipt = readJson(path, "downstream receipt");
       return receipt.managerReleaseId === pair.managerReleaseId;
     });
     const managerPath = join(paths.managers, pair.managerReleaseId);
-    if (!retainedManager && !installedManagerReference && existsSync(managerPath)) {
-      readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
-      removeThroughTombstone(paths, managerPath, "manager");
-      unlinkSync(receiptPath(paths, "manager", pair.managerReleaseId));
+    const centralManagerReceipt = ensureNoSymlinkPath(
+      paths.receipts,
+      receiptPath(paths, "manager", pair.managerReleaseId),
+      "Manager cleanup receipt path",
+    );
+    if (!retainedManager && !installedManagerReference) {
+      if (existsSync(managerPath)) {
+        readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
+        removeThroughTombstone(paths, managerPath, "manager");
+        unlinkSync(centralManagerReceipt);
+      } else if (existsSync(centralManagerReceipt)) {
+        validateReceipt(readJson(centralManagerReceipt, "manager receipt"), "manager", managerPath, pair);
+        unlinkSync(centralManagerReceipt);
+      }
     }
     writePendingPairs(paths, readPendingPairs(paths).filter((entry) => canonicalJson(entry) !== canonicalJson(pair)));
     return "removed";

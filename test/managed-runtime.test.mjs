@@ -315,6 +315,13 @@ test("launch fails closed for malformed state, pair mismatch, foreign paths, and
       value.active.managerReleaseId = "manager-foreign";
       writeFileSync(path, JSON.stringify(value));
     }],
+    ["symlinked state", (root) => {
+      const path = join(root, "state", "activation.json");
+      const target = join(root, "activation-target.json");
+      writeFileSync(target, readFileSync(path));
+      rmSync(path);
+      symlinkSync(target, path);
+    }],
     ["foreign path", (root) => {
       const path = join(root, "receipts", "managers", "manager-v1.json");
       const value = JSON.parse(readFileSync(path, "utf8"));
@@ -326,6 +333,17 @@ test("launch fails closed for malformed state, pair mismatch, foreign paths, and
       const value = JSON.parse(readFileSync(path, "utf8"));
       value.platform = "darwin-arm64";
       writeFileSync(path, JSON.stringify(value));
+    }],
+    ["symlinked receipt directory", (root) => {
+      const receiptDirectory = join(root, "receipts", "managers");
+      const foreignDirectory = join(root, "foreign-manager-receipts");
+      mkdirSync(foreignDirectory);
+      writeFileSync(
+        join(foreignDirectory, "manager-v1.json"),
+        readFileSync(join(receiptDirectory, "manager-v1.json")),
+      );
+      rmSync(receiptDirectory, { recursive: true });
+      symlinkSync(foreignDirectory, receiptDirectory);
     }],
   ];
   for (const [name, mutate] of mutations) {
@@ -397,6 +415,69 @@ test("optional online provenance verification audits both selected payload artif
     destroy(dataRoot);
     destroy(candidate.directory);
     destroy(fakeGhRoot);
+  }
+});
+
+test("activation rejects malformed accepted metadata state instead of resetting replay checkpoints", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-accepted-state-"));
+  const active = fixture();
+  const replay = fixture({
+    releaseId: "pi-v0.81.1-patch.5",
+    managerArchive: active.managerArchive,
+  });
+  try {
+    activate(dataRoot, active);
+    writeFileSync(join(dataRoot, "state", "accepted-metadata.json"), "{}\n");
+
+    assert.throws(() => activate(dataRoot, replay), /Malformed accepted metadata state/);
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
+  } finally {
+    destroy(dataRoot);
+    destroy(active.directory);
+    destroy(replay.directory);
+  }
+});
+
+test("activation rejects a symlink-substituted cached artifact before publication", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-artifact-symlink-"));
+  const candidate = fixture();
+  try {
+    const managerArtifact = candidate.manifestEnvelope.signed.manager.artifacts[0];
+    mkdirSync(join(dataRoot, "artifacts"), { recursive: true });
+    symlinkSync(candidate.managerArchive, join(dataRoot, "artifacts", managerArtifact.sha256));
+
+    assert.throws(() => activate(dataRoot, candidate), /Cached artifact.*regular file/i);
+    assert.equal(existsSync(join(dataRoot, "state", "activation.json")), false);
+  } finally {
+    destroy(dataRoot);
+    destroy(candidate.directory);
+  }
+});
+
+test("full verification derives Manager Release payload identity from its signed artifact", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-manager-tamper-"));
+  const candidate = fixture();
+  try {
+    activate(dataRoot, candidate);
+    const managerPath = join(dataRoot, "managers", "manager-v1", "package", "manager");
+    const tamperedManager = "#!/bin/sh\nif [ \"$1\" = \"--manager-version\" ]; then echo manager-v1; fi\n";
+    writeExecutable(managerPath, tamperedManager);
+
+    const centralReceipt = join(dataRoot, "receipts", "managers", "manager-v1.json");
+    const embeddedReceipt = join(dataRoot, "managers", "manager-v1", ".managed", "receipt.json");
+    const receipt = JSON.parse(readFileSync(centralReceipt, "utf8"));
+    const managerEntry = receipt.payload.find((entry) => entry.path === "package/manager");
+    managerEntry.sha256 = digest(tamperedManager);
+    managerEntry.size = Buffer.byteLength(tamperedManager);
+    managerEntry.mode = 0o755;
+    const tamperedReceipt = serializeMetadata(receipt);
+    writeFileSync(centralReceipt, tamperedReceipt);
+    writeFileSync(embeddedReceipt, tamperedReceipt);
+
+    assert.throws(() => verifyManagedInstallation(dataRoot), /Manager Release payload|Payload (?:size|digest) mismatch/i);
+  } finally {
+    destroy(dataRoot);
+    destroy(candidate.directory);
   }
 });
 
@@ -486,6 +567,36 @@ test("leased payload cleanup is deferred and receipt-scoped cleanup rejects fore
     lease.release();
     assert.equal(cleanupManagedState(dataRoot) >= 1, true);
     assert.equal(existsSync(join(dataRoot, "releases", oldPair.downstreamReleaseId)), false);
+    assert.equal(existsSync(join(dataRoot, "state", "pending-cleanup.json")), false);
+  } finally {
+    destroy(dataRoot);
+    destroy(old.directory);
+    destroy(previous.directory);
+    destroy(active.directory);
+  }
+});
+
+test("leased cleanup retries converge after a tombstone was removed before its central receipts", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-cleanup-retry-"));
+  const old = fixture({ releaseId: "pi-v0.81.1-patch.4" });
+  const previous = fixture({ releaseId: "pi-v0.81.1-patch.5", managerId: "manager-v2" });
+  const active = fixture({ managerId: "manager-v3" });
+  try {
+    activate(dataRoot, old);
+    const oldPair = readActivation(dataRoot).active;
+    activate(dataRoot, previous);
+    activate(dataRoot, active);
+
+    destroy(join(dataRoot, "releases", oldPair.downstreamReleaseId));
+    writeFileSync(join(dataRoot, "state", "pending-cleanup.json"), serializeMetadata({
+      schemaVersion: 1,
+      pairs: [oldPair],
+    }));
+
+    assert.equal(cleanupManagedState(dataRoot) >= 1, true);
+    assert.equal(existsSync(join(dataRoot, "receipts", "releases", `${oldPair.downstreamReleaseId}.json`)), false);
+    assert.equal(existsSync(join(dataRoot, "managers", oldPair.managerReleaseId)), false);
+    assert.equal(existsSync(join(dataRoot, "receipts", "managers", `${oldPair.managerReleaseId}.json`)), false);
     assert.equal(existsSync(join(dataRoot, "state", "pending-cleanup.json")), false);
   } finally {
     destroy(dataRoot);
