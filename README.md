@@ -109,15 +109,17 @@ The source installer verifies the immutable release manifest and report, clones 
 
 ## Exact release identity
 
-[`releases/active.json`](releases/active.json) points to the one supported active target. Its immutable release directory records:
+One root-authorized, signed [Release Channel](releases/README.md) selects the supported signed Release Manifest. The manifest records:
 
 - exact upstream repository, tag, commit, and lockstep package version;
-- every ordered patch path and SHA-256;
-- exact Question Tool package, protocol, handler, and schema versions;
-- the required fixture inventory; and
-- the completed release-candidate report.
+- every ordered patch path, digest, and size;
+- exact Question Tool, session, protocol, handler, and schema compatibility;
+- compatible Manager Release identity and artifacts;
+- every platform archive plus its complete extracted-file inventory, digests, sizes, and modes;
+- required release-gate results; and
+- verified GitHub repository, workflow, source commit, and artifact provenance.
 
-`node scripts/release.mjs verify` fails if any pinned input changes. Every source, platform binary, Question Tool package, report, and manifest is covered by the published `SHA256SUMS` and GitHub provenance attestation.
+`node scripts/release.mjs verify` fails if any pinned build input, package version, or shell identity changes. `artifact-manifest.json`, `SHA256SUMS`, archive metadata, receipts, and the temporary `active.json` compatibility output are generated projections—not independent identity authorities. Unknown schemas, unauthorized/expired keys, invalid signatures, digest drift, and Channel replay fail closed.
 
 ## Maintainer workflow
 
@@ -127,8 +129,10 @@ The tag workflow:
 2. uses Pi's upstream Bun cross-compilation path to build macOS, Linux, and Windows binaries for ARM64 and x64;
 3. packages the exact Question Tool beside each binary;
 4. smoke-tests the Linux binary, conformance command, and package payload;
-5. builds all checksummed source and binary assets; and
-6. publishes one immutable GitHub release.
+5. verifies GitHub provenance for every payload;
+6. signs the complete Release Manifest and monotonic Release Channel;
+7. generates checksums and metadata projections from the signed manifest; and
+8. attests and verifies every publishable artifact before publishing one immutable GitHub release.
 
 For local source verification:
 
@@ -139,9 +143,9 @@ node scripts/release-gate.mjs
 
 The gate covers the legacy 22-probe journal harness, all patched Pi tests, public conformance, Question Tool typechecking, and Question Tool integration/package tests. Any failed required stage prevents bundling.
 
-### Active and archived patch policy
+### Selected and archived patch policy
 
-Exactly one release is active. A newer release gets a new release ID, tag, manifest directory, report, and assets. Promotion changes only `releases/active.json`; it never edits or replaces an older release directory, tag, report, checksum file, or downloadable artifact.
+Exactly one release is selected by the signed Channel. A newer release gets a new release ID, tag, signed manifest, higher Channel sequence, report, and assets. Promotion never edits or replaces an older release directory, tag, manifest, report, checksum file, provenance attestation, or downloadable artifact.
 
 Older releases are **archived**, not supported. They remain reproducible and downloadable for their pinned Pi source but receive no rebases, feature updates, or retroactive fixes.
 

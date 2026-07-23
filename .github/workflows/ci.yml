@@ -28,6 +28,9 @@ jobs:
           node --check scripts/launch.mjs
           node --check scripts/package-binaries.mjs
           node --check scripts/release-gate.mjs
+          node --check scripts/release-metadata.mjs
+          node --check scripts/lib/release-input.mjs
+          node --check scripts/lib/release-metadata.mjs
           node --check scripts/release.mjs
           node --check scripts/test-question-tool.mjs
           sh -n scripts/bootstrap.sh

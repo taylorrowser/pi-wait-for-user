@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/taylorrowser/pi-wait-for-user/main/releases/schemas/release-trust-v1.schema.json",
+  "title": "Release trust metadata v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["signed", "signatures"],
+  "properties": {
+    "signed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "type", "version", "expires", "channelUrl", "releaseKeys"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "type": { "const": "release-trust" },
+        "version": { "type": "integer", "minimum": 1 },
+        "expires": { "type": "string", "format": "date-time" },
+        "channelUrl": { "type": "string", "format": "uri", "pattern": "^https://" },
+        "releaseKeys": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["keyId", "algorithm", "publicKey", "expires", "revoked"],
+            "properties": {
+              "keyId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]+$" },
+              "algorithm": { "const": "ed25519" },
+              "publicKey": { "type": "string", "minLength": 1 },
+              "expires": { "type": "string", "format": "date-time" },
+              "revoked": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "signatures": { "$ref": "#/$defs/signatures" }
+  },
+  "$defs": {
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["keyId", "algorithm", "signature"],
+        "properties": {
+          "keyId": { "type": "string" },
+          "algorithm": { "const": "ed25519" },
+          "signature": { "type": "string", "contentEncoding": "base64" }
+        }
+      }
+    }
+  }
+}

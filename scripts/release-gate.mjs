@@ -4,13 +4,13 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { loadReleaseInput } from "./lib/release-input.mjs";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const active = JSON.parse(readFileSync(join(projectRoot, "releases", "active.json"), "utf8"));
-const releaseDirectory = join(projectRoot, "releases", active.releaseId);
-const manifest = JSON.parse(readFileSync(join(releaseDirectory, "manifest.json"), "utf8"));
+const { releaseId, manifest } = loadReleaseInput(projectRoot);
+const releaseDirectory = join(projectRoot, "releases", releaseId);
 const gate = JSON.parse(readFileSync(join(releaseDirectory, "fixture-gate.json"), "utf8"));
-const workspace = join(projectRoot, ".work", "pi-v0.81.1");
+const workspace = join(projectRoot, ".work", `pi-v${manifest.upstream.packageVersion}`);
 
 function fail(message) {
   throw new Error(message);
