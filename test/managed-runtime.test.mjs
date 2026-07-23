@@ -736,6 +736,7 @@ test("caller-selected activation roots cannot claim Command Ownership", () => {
 test("installer claims pi only with explicit --manage-pi", () => {
   const root = mkdtempSync(join(tmpdir(), "managed-runtime-installer-"));
   const candidate = fixture();
+  const nextCandidate = fixture({ releaseId: "pi-v0.81.1-patch.7", managerId: "manager-v2" });
   const trust = join(root, "trust.json");
   const channel = join(root, "channel.json");
   const manifest = join(root, "manifest.json");
@@ -791,6 +792,23 @@ test("installer claims pi only with explicit --manage-pi", () => {
     assert.match(managed.stdout, /hash -r/);
     assert.match(managed.stdout, /command -v pi/);
 
+    writeFileSync(trust, serializeMetadata(nextCandidate.trustEnvelope));
+    writeFileSync(channel, serializeMetadata(nextCandidate.channelEnvelope));
+    writeFileSync(manifest, serializeMetadata(nextCandidate.manifestEnvelope));
+    const failedAfterActivation = spawnSync(process.execPath, [pinnedInstaller,
+      "--manage-pi",
+      "--platform", "linux-x64",
+      "--trust", trust,
+      "--channel", channel,
+      "--manifest", manifest,
+      "--manager-archive", nextCandidate.managerArchive,
+      "--release-archive", nextCandidate.releaseArchive,
+      "--data-root", managedRoot,
+      "--bin-dir", managedBin,
+    ], { encoding: "utf8", env: { ...process.env, PATH: `${dirname(process.execPath)}:/usr/bin:/bin` } });
+    assert.notEqual(failedAfterActivation.status, 0);
+    assert.equal(readActivation(managedRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
+
     const collisionRoot = join(root, "collision-data");
     const collisionBin = join(root, "collision-bin");
     mkdirSync(collisionBin);
@@ -805,6 +823,7 @@ test("installer claims pi only with explicit --manage-pi", () => {
   } finally {
     destroy(root);
     destroy(candidate.directory);
+    destroy(nextCandidate.directory);
   }
 });
 
