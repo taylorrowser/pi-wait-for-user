@@ -438,6 +438,26 @@ test("activation rejects malformed accepted metadata state instead of resetting 
   }
 });
 
+test("activation rejects missing replay checkpoints for an existing Activation", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-missing-accepted-state-"));
+  const active = fixture();
+  const replay = fixture({
+    releaseId: "pi-v0.81.1-patch.5",
+    managerArchive: active.managerArchive,
+  });
+  try {
+    activate(dataRoot, active);
+    rmSync(join(dataRoot, "state", "accepted-metadata.json"));
+
+    assert.throws(() => activate(dataRoot, replay), /Accepted metadata state is missing for existing Activation/);
+    assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.6");
+  } finally {
+    destroy(dataRoot);
+    destroy(active.directory);
+    destroy(replay.directory);
+  }
+});
+
 test("activation rejects a symlink-substituted cached artifact before publication", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-artifact-symlink-"));
   const candidate = fixture();

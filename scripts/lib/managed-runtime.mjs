@@ -78,6 +78,16 @@ function readJson(path, label = basename(path)) {
   }
 }
 
+function pathExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function digestBytes(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -687,6 +697,7 @@ export function installAndActivate(options) {
     try {
       writeConfig(paths, platform, rootKeys);
       const accepted = readAcceptedMetadataState(paths);
+      if (!accepted && pathExists(paths.activation)) fail("Accepted metadata state is missing for existing Activation");
       const authority = verifyTrustMetadata(trustEnvelope, {
         trustedRootKeys: rootKeys,
         now,
