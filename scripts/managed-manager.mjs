@@ -227,7 +227,7 @@ try {
     fail("Unknown managed command; refusing to delegate it to Pi");
   } else {
     const route = classifyManagedUpdateArgs(args);
-    if (route.type === "reject") fail("Unknown update syntax; refusing to delegate a possible Stock Pi self-update path");
+    if (route.type === "reject") fail("Unknown update syntax; refusing to delegate a possible self-inclusive Stock Pi update path");
     if (route.type === "managed") await update(args.slice(1), route);
     else {
       if (args[0] !== "update") {

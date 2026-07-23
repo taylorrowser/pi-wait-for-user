@@ -8,6 +8,7 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -235,23 +236,27 @@ function acquireLifecycleLock(dataRoot, operation) {
       fail(`Managed lifecycle operation already active: ${String(active.operation)}`);
     }
     const recoveryPath = join(paths.state, `lifecycle-recovery-${digestBytes(String(active.token))}.json`);
-    let recovery;
-    try { recovery = openSync(recoveryPath, "wx", 0o600); } catch (recoveryError) {
-      if (recoveryError?.code === "EEXIST") fail("Stale lifecycle lock recovery is already claimed; review the manager-owned recovery record");
-      throw recoveryError;
+    try {
+      linkSync(paths.lock, recoveryPath);
+    } catch (recoveryError) {
+      if (recoveryError?.code !== "EEXIST") throw recoveryError;
+      const lockStat = lstatSync(paths.lock);
+      const recoveryStat = lstatSync(recoveryPath);
+      if (lockStat.dev !== recoveryStat.dev || lockStat.ino !== recoveryStat.ino) {
+        fail("Stale lifecycle lock recovery record does not match the interrupted lock");
+      }
     }
-    writeSync(recovery, serializeMetadata({
+    const current = readJson(paths.lock, "lifecycle lock");
+    const claimed = readJson(recoveryPath, "lifecycle recovery claim");
+    if (current.token !== active.token || claimed.token !== active.token) fail("Lifecycle lock changed during stale recovery");
+    unlinkSync(paths.lock);
+    atomicWrite(recoveryPath, {
       schemaVersion: 1,
       type: "lifecycle-lock-recovery",
       staleToken: active.token,
       claimedByToken: token,
       claimedAt: new Date().toISOString(),
-    }));
-    fsyncSync(recovery);
-    closeSync(recovery);
-    const current = readJson(paths.lock, "lifecycle lock");
-    if (current.token !== active.token) fail("Lifecycle lock changed during stale recovery");
-    unlinkSync(paths.lock);
+    });
     try { fd = openSync(paths.lock, "wx", 0o600); } catch (replacementError) {
       if (replacementError?.code === "EEXIST") return acquireLifecycleLock(dataRoot, operation);
       throw replacementError;

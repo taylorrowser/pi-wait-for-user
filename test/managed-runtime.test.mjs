@@ -13,6 +13,7 @@ import {
   realpathSync,
   renameSync,
   lstatSync,
+  linkSync,
   rmSync,
   writeFileSync,
   symlinkSync,
@@ -106,6 +107,7 @@ function fixture({
   managerArchive: providedManagerArchive,
   upstreamVersion = "0.81.1",
   questionVersion = "0.1.3",
+  readableHandlers = [{ id: "dev.taylorrowser.pi-question-tool.question", versions: [1] }],
   sequence = Number(releaseId.match(/patch\.(\d+)$/)?.[1] ?? 1),
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "managed-runtime-fixture-"));
@@ -212,7 +214,7 @@ esac
       sessions: {
         identities: [{ id: "dev.taylorrowser.pi-wait-for-user/session", version: 1 }],
         readableCoreProtocolVersions: [1],
-        readableHandlers: [{ id: "dev.taylorrowser.pi-question-tool.question", versions: [1] }],
+        readableHandlers,
       },
     },
     manager: { releaseId: managerId, compatibleReleaseManifestVersions: [1], artifacts: [manager] },
@@ -1619,7 +1621,12 @@ test("cached startup status is throttled, isolated to interactive output, and re
 
 test("managed status reports pair compatibility, Stock Pi, Channel, Patch Lag, and Update Hold", async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-status-"));
-  const current = fixture();
+  const current = fixture({
+    readableHandlers: [
+      { id: "dev.taylorrowser.pi-question-tool.question", versions: [1] },
+      { id: "dev.taylorrowser.pi-question-tool.legacy", versions: [1, 2] },
+    ],
+  });
   try {
     activate(dataRoot, current);
     await checkManagedUpdate(dataRoot, { transport: updateTransport(current, { upstreamVersion: "0.82.0" }), now, cache: true });
@@ -1635,7 +1642,7 @@ test("managed status reports pair compatibility, Stock Pi, Channel, Patch Lag, a
     for (const expected of [
       "pi-v0.81.1-patch.6", "manager-v1", "0.81.1", "linux-x64",
       "dev.taylorrowser.pi-wait-for-user/session@1", "protocol versions: 1",
-      "dev.taylorrowser.pi-question-tool.question@1", "Channel sequence: 6",
+      "dev.taylorrowser.pi-question-tool.question@1", "dev.taylorrowser.pi-question-tool.legacy@1,2", "Channel sequence: 6",
       "Patch Lag: upstream Pi 0.82.0", "Update Hold: pi-v0.81.1-patch.7", "Stock Pi: not recorded",
     ]) assert.match(status, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
   } finally {
@@ -1644,7 +1651,7 @@ test("managed status reports pair compatibility, Stock Pi, Channel, Patch Lag, a
   }
 });
 
-test("Managed Dispatcher never exposes Stock Pi self-update while preserving package update commands", () => {
+test("Managed Dispatcher never exposes self-inclusive Stock Pi updates while preserving package update commands", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-dispatch-"));
   const current = fixture();
   try {
@@ -1935,6 +1942,31 @@ test("stale lifecycle recovery has one durable claim before a new owner mutates 
     const recovery = readdirSync(join(dataRoot, "state")).find((name) => name.startsWith("lifecycle-recovery-"));
     assert.ok(recovery);
     assert.equal(JSON.parse(readFileSync(join(dataRoot, "state", recovery), "utf8")).staleToken, "stale-owner-token");
+  } finally {
+    destroy(dataRoot);
+    destroy(current.directory);
+  }
+});
+
+test("stale lifecycle recovery resumes after interruption immediately after its durable claim", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-interrupted-recovery-"));
+  const current = fixture();
+  try {
+    activate(dataRoot, current);
+    const lock = join(dataRoot, "state", "lifecycle.lock");
+    const staleToken = "interrupted-recovery-token";
+    writeFileSync(lock, serializeMetadata({
+      schemaVersion: 1,
+      pid: 999_999_999,
+      token: staleToken,
+      operation: "interrupted update",
+      startedAt: "2020-01-01T00:00:00.000Z",
+    }));
+    const recovery = join(dataRoot, "state", `lifecycle-recovery-${digest(staleToken)}.json`);
+    linkSync(lock, recovery);
+
+    assert.equal(withLifecycleLock(dataRoot, "resumed recovery", () => "recovered"), "recovered");
+    assert.equal(JSON.parse(readFileSync(recovery, "utf8")).staleToken, staleToken);
   } finally {
     destroy(dataRoot);
     destroy(current.directory);

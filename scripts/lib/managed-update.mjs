@@ -383,12 +383,8 @@ function failureStage(error, fallback) {
 }
 
 function clearExactUpdateHold(dataRoot, releaseId) {
-  const holdPath = paths(dataRoot).hold;
-  if (!existsSync(holdPath)) return;
-  const hold = readJson(holdPath, "Update Hold");
-  if (hold?.schemaVersion !== 1 || hold.type !== "update-hold" || !idPattern.test(hold.releaseId)
-    || typeof hold.createdAt !== "string") fail("Malformed Update Hold");
-  if (hold.releaseId === releaseId) unlinkSync(holdPath);
+  const hold = readUpdateHold(dataRoot);
+  if (hold?.releaseId === releaseId) unlinkSync(paths(dataRoot).hold);
 }
 
 function activatedStatus(checked, candidate, now) {
@@ -612,6 +608,8 @@ export function formatManagedStatus(dataRoot) {
   }
   const sessions = context.active.compatibility.sessions.identities.map((entry) => `${entry.id}@${entry.version}`).join(", ");
   const protocols = context.active.compatibility.sessions.readableCoreProtocolVersions.join(", ");
+  const handlers = context.active.compatibility.sessions.readableHandlers
+    .map((entry) => `${entry.id}@${entry.versions.join(",")}`).join("; ");
   const question = context.active.compatibility.questionTool;
   const cacheMatches = statusMatchesContext(status, context);
   const channel = cacheMatches
@@ -628,7 +626,8 @@ export function formatManagedStatus(dataRoot) {
     `Platform: ${context.active.platform}`,
     `Session identities: ${sessions}`,
     `Readable durable-deferral protocol versions: ${protocols}`,
-    `Question Tool handler: ${question.handlerId}@${question.handlerVersion}`,
+    `Readable Question Tool handlers: ${handlers}`,
+    `Active Question Tool handler: ${question.handlerId}@${question.handlerVersion}`,
     `Stock Pi: ${stock}`,
     `Channel sequence: ${channel}`,
     `Compatible Downstream Update: ${compatible}`,

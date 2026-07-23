@@ -111,4 +111,4 @@ Only fixture private keys are used by automated tests. This runtime stores pinne
 
 ## Ticket traceability
 
-Issue #61 acceptance behavior is exercised in `test/managed-runtime.test.mjs`: pair-change selection (patch-only, Manager Release, Question Tool, and upstream rebase), replay/schema/outage handling, atomic activation, Patch Lag, update syntax routing, `--all` partial results, startup throttling/output isolation, status fields, and Dispatcher-level proof that no managed self-update form reaches Pi core. The Activation crash/failure matrix from #59 remains the shared verification seam used by Managed Update.
+Issue #61 acceptance behavior is exercised in `test/managed-runtime.test.mjs`: pair-change selection (patch-only, Manager Release, Question Tool, and upstream rebase), replay/schema/outage handling, atomic activation, Patch Lag, update syntax routing, `--all` partial results, startup throttling/output isolation, status fields, and Dispatcher-level proof that no self-inclusive update form reaches Pi core. The Activation crash/failure matrix from #59 remains the shared verification seam used by Managed Update.
