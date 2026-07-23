@@ -1415,6 +1415,7 @@ function writeStaleStartupCheckLock(dataRoot, token = "00000000-0000-4000-8000-0
     schemaVersion: 1,
     type: "managed-startup-check-lock",
     pid: 999_999_999,
+    processStartIdentity: "fixture-dead-process",
     token,
     createdAt: "2020-01-01T00:00:00.000Z",
   }));
@@ -2301,6 +2302,7 @@ test("concurrent stale lifecycle recovery never admits overlapping mutators", as
     writeFileSync(join(dataRoot, "state", "lifecycle.lock"), serializeMetadata({
       schemaVersion: 1,
       pid: 999_999_999,
+      processStartIdentity: "fixture-dead-process",
       token: "concurrent-stale-owner-token",
       operation: "interrupted update",
       startedAt: "2020-01-01T00:00:00.000Z",
@@ -2350,7 +2352,8 @@ test("stale lifecycle recovery has one durable claim before a new owner mutates 
     activate(dataRoot, current);
     writeFileSync(join(dataRoot, "state", "lifecycle.lock"), serializeMetadata({
       schemaVersion: 1,
-      pid: 999_999_999,
+      pid: process.pid,
+      processStartIdentity: "fixture-reused-pid",
       token: "stale-owner-token",
       operation: "interrupted update",
       startedAt: "2020-01-01T00:00:00.000Z",
@@ -2375,6 +2378,7 @@ test("stale lifecycle recovery resumes after interruption immediately after its 
     writeFileSync(lock, serializeMetadata({
       schemaVersion: 1,
       pid: 999_999_999,
+      processStartIdentity: "fixture-dead-process",
       token: staleToken,
       operation: "interrupted update",
       startedAt: "2020-01-01T00:00:00.000Z",

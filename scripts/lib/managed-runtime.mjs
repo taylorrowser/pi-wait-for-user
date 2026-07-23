@@ -256,11 +256,21 @@ export function publishManagedStateFileExclusive(dataRoot, name, value) {
   return publishStateFileExclusive(state, managedStatePath(dataRoot, name), value);
 }
 
-export function removeManagedStateFileIfOwned(dataRoot, name, identity) {
+export function managedStateFileIsOwned(dataRoot, name, identity) {
   const path = managedStatePath(dataRoot, name);
   try {
     const stat = lstatSync(path);
-    if (!identity || stat.dev !== identity.dev || stat.ino !== identity.ino) return false;
+    return Boolean(identity && stat.dev === identity.dev && stat.ino === identity.ino);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export function removeManagedStateFileIfOwned(dataRoot, name, identity) {
+  const path = managedStatePath(dataRoot, name);
+  if (!managedStateFileIsOwned(dataRoot, name, identity)) return false;
+  try {
     unlinkSync(path);
     return true;
   } catch (error) {
@@ -277,13 +287,33 @@ function initializeLayout(dataRoot) {
   return paths;
 }
 
-function processAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
+export function managedProcessStartIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return null;
+  if (process.platform === "linux") {
+    try {
+      const value = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = value.slice(value.lastIndexOf(") ") + 2).trim().split(/\s+/);
+      return fields[19] ? `linux-proc-start:${fields[19]}` : null;
+    } catch {
+      return null;
+    }
   }
+  if (process.platform === "darwin") {
+    const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+    const startedAt = result.status === 0 ? result.stdout.trim() : "";
+    return startedAt ? `darwin-ps-start:${startedAt}` : null;
+  }
+  return null;
+}
+
+export function managedProcessIdentityIsLive(pid, startIdentity) {
+  return typeof startIdentity === "string" && managedProcessStartIdentity(pid) === startIdentity;
+}
+
+function currentManagedProcessStartIdentity() {
+  const identity = managedProcessStartIdentity(process.pid);
+  if (!identity) fail("Cannot identify the managed lifecycle process");
+  return identity;
 }
 
 function publishLifecycleLock(paths, lock) {
@@ -318,20 +348,24 @@ function acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken) {
     type: "lifecycle-lock-recovery-owner",
     staleToken,
     pid: process.pid,
+    processStartIdentity: currentManagedProcessStartIdentity(),
     claimantToken,
     claimedAt: new Date().toISOString(),
   };
   const published = publishStateFileExclusive(paths.state, ownerPath, owner);
   if (published.published) return { path: ownerPath, identity: published.identity };
   const active = readJson(ownerPath, "lifecycle recovery owner");
-  exactObject(active, "lifecycle recovery owner", ["schemaVersion", "type", "staleToken", "pid", "claimantToken", "claimedAt"]);
+  exactObject(active, "lifecycle recovery owner", ["schemaVersion", "type", "staleToken", "pid", "processStartIdentity", "claimantToken", "claimedAt"]);
   if (active.schemaVersion !== 1 || active.type !== "lifecycle-lock-recovery-owner"
-    || active.staleToken !== staleToken || !Number.isSafeInteger(active.pid) || active.pid < 1) {
+    || active.staleToken !== staleToken || !Number.isSafeInteger(active.pid) || active.pid < 1
+    || typeof active.processStartIdentity !== "string" || !active.processStartIdentity) {
     fail("Malformed lifecycle recovery owner");
   }
   expectString(active.claimantToken, "lifecycle recovery claimant token");
   expectDate(active.claimedAt, "lifecycle recovery claim date");
-  if (processAlive(active.pid)) fail("Stale lifecycle lock recovery is already active");
+  if (managedProcessIdentityIsLive(active.pid, active.processStartIdentity)) {
+    fail("Stale lifecycle lock recovery is already active");
+  }
   const stat = lstatSync(ownerPath);
   if (!unlinkIfOwned(ownerPath, { dev: stat.dev, ino: stat.ino })) {
     return acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken);
@@ -343,15 +377,23 @@ function acquireLifecycleLock(dataRoot, operation) {
   expectString(operation, "lifecycle operation");
   const paths = initializeLayout(dataRoot);
   const token = randomUUID();
-  const lock = { schemaVersion: 1, pid: process.pid, token, operation, startedAt: new Date().toISOString() };
+  const lock = {
+    schemaVersion: 1,
+    pid: process.pid,
+    processStartIdentity: currentManagedProcessStartIdentity(),
+    token,
+    operation,
+    startedAt: new Date().toISOString(),
+  };
   if (!publishLifecycleLock(paths, lock)) {
     const active = readJson(paths.lock, "lifecycle lock");
-    exactObject(active, "lifecycle lock", ["schemaVersion", "pid", "token", "operation", "startedAt"]);
+    exactObject(active, "lifecycle lock", ["schemaVersion", "pid", "processStartIdentity", "token", "operation", "startedAt"]);
     if (active.schemaVersion !== 1 || !Number.isSafeInteger(active.pid) || active.pid < 1) fail("Malformed lifecycle lock");
+    expectString(active.processStartIdentity, "lifecycle lock process identity");
     expectString(active.token, "lifecycle lock token");
     expectString(active.operation, "lifecycle lock operation");
     expectDate(active.startedAt, "lifecycle lock start date");
-    if (processAlive(active.pid)) {
+    if (managedProcessIdentityIsLive(active.pid, active.processStartIdentity)) {
       fail(`Managed lifecycle operation already active: ${String(active.operation)}`);
     }
     const recoveryPath = join(paths.state, `lifecycle-recovery-${digestBytes(String(active.token))}.json`);

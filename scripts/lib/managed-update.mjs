@@ -18,7 +18,10 @@ import {
   assertLifecycleCapability,
   inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
+  managedProcessIdentityIsLive,
+  managedProcessStartIdentity,
   managedStateDirectory,
+  managedStateFileIsOwned,
   publishManagedStateFileExclusive,
   readActivation,
   readManagedStartupContext,
@@ -542,9 +545,10 @@ export function cachedManagedStartupNotice(dataRoot, options = {}) {
 }
 
 function validateStartupCheckLock(value) {
-  if (!hasExactKeys(value, ["schemaVersion", "type", "pid", "token", "createdAt"])
+  if (!hasExactKeys(value, ["schemaVersion", "type", "pid", "processStartIdentity", "token", "createdAt"])
     || value.schemaVersion !== 1 || value.type !== "managed-startup-check-lock"
     || !Number.isSafeInteger(value.pid) || value.pid < 1
+    || typeof value.processStartIdentity !== "string" || !value.processStartIdentity
     || typeof value.token !== "string"
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.token)
     || !validDate(value.createdAt)) fail("Malformed startup check lock");
@@ -556,10 +560,13 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
   if (environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE || options.offline) return false;
   const now = options.now || new Date();
   const selected = paths(dataRoot);
+  const processStartIdentity = managedProcessStartIdentity(process.pid);
+  if (!processStartIdentity) fail("Cannot identify the startup-check process");
   const lockRecord = {
     schemaVersion: 1,
     type: "managed-startup-check-lock",
     pid: process.pid,
+    processStartIdentity,
     token: randomUUID(),
     createdAt: now.toISOString(),
   };
@@ -572,7 +579,8 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
       { maximumSize: metadataLimit },
     ));
     const stat = lstatSync(selected.startupLock);
-    if (now.getTime() - Date.parse(active.createdAt) <= 5 * 60 * 1_000) return false;
+    if (managedProcessIdentityIsLive(active.pid, active.processStartIdentity)
+      || now.getTime() - Date.parse(active.createdAt) <= 5 * 60 * 1_000) return false;
     const recoveryPath = join(selected.state, `startup-check-recovery-${active.token}.json`);
     try {
       linkSync(selected.startupLock, recoveryPath);
@@ -596,6 +604,7 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
     if (!acquired.published) return false;
   }
   try {
+    if (!managedStateFileIsOwned(dataRoot, "startup-check.lock", acquired.identity)) return false;
     if (existsSync(selected.startup)) {
       const state = readManagedStateJson(dataRoot, "startup-check.json", "startup check state", { maximumSize: metadataLimit });
       if (!hasExactKeys(state, ["schemaVersion", "type", "lastAttemptAt"])
@@ -605,6 +614,7 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
       const elapsed = now.getTime() - Date.parse(state.lastAttemptAt);
       if (Number.isFinite(elapsed) && elapsed >= 0 && elapsed < startupThrottleMilliseconds) return false;
     }
+    if (!managedStateFileIsOwned(dataRoot, "startup-check.lock", acquired.identity)) return false;
     writeManagedStateJson(dataRoot, "startup-check.json", {
       schemaVersion: 1,
       type: "managed-startup-check",
