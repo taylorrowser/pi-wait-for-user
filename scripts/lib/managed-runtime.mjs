@@ -369,6 +369,27 @@ function comparePayload(actual, expected) {
 function publishStableDispatcher(paths, selected) {
   const destination = join(paths.root, "dispatcher");
   const receiptPath = join(paths.state, "dispatcher.json");
+  const source = join(selected.managerPath, "package", "scripts");
+  const required = ["managed-dispatcher.mjs", "lib/managed-runtime.mjs", "lib/release-metadata.mjs"];
+  const pinnedRootConfiguration = serializeMetadata({
+    schemaVersion: 1,
+    rootKeys: [...selected.config.rootKeys]
+      .map(([keyId, publicKey]) => ({ keyId, publicKey }))
+      .sort((left, right) => left.keyId.localeCompare(right.keyId)),
+  });
+  const expectedPayload = required.map((relativePath) => {
+    const sourcePath = ensureNoSymlinkPath(selected.managerPath, join(source, relativePath), "Manager Release Dispatcher source path");
+    const declaredPath = relative(selected.managerPath, sourcePath).split(sep).join("/");
+    const entry = selected.managerReceipt.payload.find((candidate) => candidate.path === declaredPath);
+    if (!entry) fail(`Manager Release does not own Dispatcher source: ${relativePath}`);
+    return { ...entry, path: relativePath, mode: relativePath === "managed-dispatcher.mjs" ? 0o755 : 0o444 };
+  });
+  expectedPayload.push({
+    path: "managed-root-keys.json",
+    sha256: digestBytes(pinnedRootConfiguration),
+    size: Buffer.byteLength(pinnedRootConfiguration),
+    mode: 0o444,
+  });
   if (pathExists(destination)) {
     if (lstatSync(destination).isSymbolicLink() || !lstatSync(destination).isDirectory()) fail("Managed Dispatcher path is foreign");
     const embeddedPath = join(destination, ".managed", "receipt.json");
@@ -386,7 +407,12 @@ function publishStableDispatcher(paths, selected) {
     if (!Number.isSafeInteger(receipt.sourceArtifact.size) || receipt.sourceArtifact.size < 0) fail("Malformed Dispatcher source artifact");
     expectDate(receipt.createdAt, "Dispatcher creation date");
     receipt.payload.forEach((entry, index) => validatePayloadEntry(entry, `Managed Dispatcher receipt payload[${index}]`));
-    comparePayload(createPayloadInventory(destination).filter((entry) => !entry.path.startsWith(".managed/")), receipt.payload);
+    if (receipt.managerReleaseId !== selected.pair.managerReleaseId || receipt.platform !== selected.pair.platform
+      || canonicalJson(receipt.sourceArtifact) !== canonicalJson(selected.managerReceipt.sourceArtifact)) {
+      fail("Managed Dispatcher receipt does not match the verified Manager Release");
+    }
+    comparePayload(receipt.payload, expectedPayload);
+    comparePayload(createPayloadInventory(destination).filter((entry) => !entry.path.startsWith(".managed/")), expectedPayload);
     if (pathExists(receiptPath)) {
       const central = readJson(receiptPath, "Managed Dispatcher receipt");
       if (canonicalJson(central) !== canonicalJson(receipt)) fail("Managed Dispatcher receipt copies mismatch");
@@ -394,13 +420,6 @@ function publishStableDispatcher(paths, selected) {
     return join(destination, "managed-dispatcher.mjs");
   }
   if (pathExists(receiptPath)) fail("Managed Dispatcher receipt exists without its owned payload");
-  const source = join(selected.managerPath, "package", "scripts");
-  const required = ["managed-dispatcher.mjs", "lib/managed-runtime.mjs", "lib/release-metadata.mjs"];
-  for (const relativePath of required) {
-    const sourcePath = ensureNoSymlinkPath(selected.managerPath, join(source, relativePath), "Manager Release Dispatcher source path");
-    const declaredPath = relative(selected.managerPath, sourcePath).split(sep).join("/");
-    if (!selected.managerReceipt.payload.some((entry) => entry.path === declaredPath)) fail(`Manager Release does not own Dispatcher source: ${relativePath}`);
-  }
   const stage = createStage(paths, "dispatcher");
   try {
     for (const relativePath of required) {
@@ -409,7 +428,9 @@ function publishStableDispatcher(paths, selected) {
       copyFileSync(join(source, relativePath), output);
       chmodSync(output, relativePath === "managed-dispatcher.mjs" ? 0o755 : 0o444);
     }
+    writeFileSync(join(stage.payload, "managed-root-keys.json"), pinnedRootConfiguration, { flag: "wx", mode: 0o444 });
     const payload = createPayloadInventory(stage.payload);
+    comparePayload(payload, expectedPayload);
     const receipt = {
       schemaVersion: 1,
       type: "managed-dispatcher",
@@ -867,10 +888,10 @@ export function installAndActivate(options) {
       const conformance = runChecked(core, ["conformance"], "Pi conformance");
       if (!/conformance passed/i.test(conformance)) fail("Pi conformance did not report success");
       const legacyPaths = discoverLegacyPaths(paths, manifest.releaseId, legacyDirectories);
-      const candidateLegacyPath = join(paths.root, "releases", manifest.releaseId);
-      const legacyAdopted = legacyPaths.includes(candidateLegacyPath)
-        && adoptVerifiedLegacyPayload(releaseStage, candidateLegacyPath, downstream.payload);
-      const legacyPath = legacyAdopted ? candidateLegacyPath : legacyPaths[0];
+      const verifiedLegacyPath = legacyPaths.find((path) => legacyPayloadInventory(path, downstream.payload));
+      const legacyAdopted = Boolean(verifiedLegacyPath)
+        && adoptVerifiedLegacyPayload(releaseStage, verifiedLegacyPath, downstream.payload);
+      const legacyPath = legacyAdopted ? verifiedLegacyPath : legacyPaths[0];
       checkpoint?.("downstream-staged");
 
       atomicWrite(paths.accepted, { schemaVersion: 1, trust: authority.acceptedState, channel: selection });
@@ -1242,6 +1263,10 @@ export function readManagedOwnership(dataRoot) {
   return ownership;
 }
 
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
 function commandPath(name, environment) {
   for (const directory of (environment.PATH || "").split(":")) {
     if (!directory) continue;
@@ -1345,19 +1370,24 @@ function validateBinDirectory(binDirectory) {
   }
 }
 
+function requireOwnedCompatibility(paths, expected) {
+  if (!pathExists(compatibilityReceiptPath(paths))) fail(`Unowned foreign command collision: ${expected.path}`);
+  const installed = readCompatibilityEntrypoint(paths);
+  if (resolve(installed.path) !== resolve(expected.path) || resolve(installed.target) !== resolve(expected.target)
+    || !entrypointMatches(installed)) fail(`Managed compatibility entrypoint ownership mismatch: ${expected.path}`);
+  return installed;
+}
+
 export function preflightManagedCommandOwnership(dataRoot, options = {}) {
   const environment = options.environment || process.env;
   const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
   validateBinDirectory(binDirectory);
   const paths = layout(dataRoot);
-  const compatibilityPath = join(binDirectory, "pi-wait-for-user");
-  if (pathExists(compatibilityPath)) {
-    if (!pathExists(compatibilityReceiptPath(paths))) fail(`Unowned foreign command collision: ${compatibilityPath}`);
-    const compatibility = readCompatibilityEntrypoint(paths);
-    if (resolve(compatibility.path) !== compatibilityPath || !entrypointMatches(compatibility)) {
-      fail(`Managed compatibility entrypoint ownership mismatch: ${compatibilityPath}`);
-    }
-  }
+  const expectedCompatibility = {
+    path: join(binDirectory, "pi-wait-for-user"),
+    target: join(paths.root, "dispatcher", "managed-dispatcher.mjs"),
+  };
+  if (pathExists(expectedCompatibility.path)) requireOwnedCompatibility(paths, expectedCompatibility);
   if (options.managePi) {
     const piPath = join(binDirectory, "pi");
     if (pathExists(piPath)) {
@@ -1385,11 +1415,7 @@ export function installManagedCompatibility(dataRoot, options = {}) {
     };
     const receiptPath = compatibilityReceiptPath(paths);
     if (pathExists(receiptPath)) {
-      const existing = readCompatibilityEntrypoint(paths);
-      if (resolve(existing.path) !== expected.path || resolve(existing.target) !== expected.target) {
-        fail("Managed compatibility command configuration mismatch");
-      }
-      assertEntrypointAvailable(existing);
+      requireOwnedCompatibility(paths, expected);
     } else {
       if (pathExists(expected.path)) fail(`Unowned foreign command collision: ${expected.path}`);
       validateBinDirectory(binDirectory);
@@ -1432,12 +1458,7 @@ export function enableManagedOwnership(dataRoot, options = {}) {
       const pi = { path: join(binDirectory, "pi"), target: expectedDispatcherPath };
       const compatibility = { path: join(binDirectory, "pi-wait-for-user"), target: expectedDispatcherPath };
       if (pathExists(pi.path)) fail(`Unowned foreign command collision: ${pi.path}`);
-      if (pathExists(compatibility.path)) {
-        if (!pathExists(compatibilityReceiptPath(paths))) fail(`Unowned foreign command collision: ${compatibility.path}`);
-        const installedCompatibility = readCompatibilityEntrypoint(paths);
-        if (resolve(installedCompatibility.path) !== compatibility.path || resolve(installedCompatibility.target) !== compatibility.target
-          || !entrypointMatches(installedCompatibility)) fail(`Managed compatibility entrypoint ownership mismatch: ${compatibility.path}`);
-      }
+      if (pathExists(compatibility.path)) requireOwnedCompatibility(paths, compatibility);
       validateBinDirectory(binDirectory);
       const resolvedStock = commandPath("pi", environment);
       if (resolvedStock && isManagedDispatcherExecutable(resolvedStock)) {
@@ -1480,7 +1501,7 @@ export function enableManagedOwnership(dataRoot, options = {}) {
     const resolvedCommand = commandPath("pi", environment);
     if (resolvedCommand !== resolve(ownership.entrypoints.pi.path)) {
       const selectedDirectory = resolvedCommand ? dirname(resolvedCommand) : "the currently selected command directory";
-      fail(`Managed Dispatcher is installed but current command resolution selects ${resolvedCommand || "no pi command"}. Put ${binDirectory} before ${selectedDirectory} in PATH, run \`hash -r\`, then rerun: pi-wait-for-user managed enable --bin-dir ${binDirectory}`);
+      fail(`Managed Dispatcher is installed but current command resolution selects ${resolvedCommand || "no pi command"}. Put ${binDirectory} before ${selectedDirectory} in PATH, run \`hash -r\`, then rerun: pi-wait-for-user managed enable --bin-dir ${shellQuote(binDirectory)}`);
     }
     return alreadyEnabled ? "already enabled" : "enabled";
   });

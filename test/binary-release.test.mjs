@@ -118,8 +118,6 @@ test("a binary release loads the clearly named Question Tool without a source ch
     join(fixture.installation, "question-tool"),
     "--version",
   ]);
-  assert.equal(existsSync(join(fixture.installation, "managed-bootstrap", "managed-installer.mjs")), true);
-  assert.match(readFileSync(join(fixture.installation, "install.sh"), "utf8"), /managed-installer\.mjs.*--manage-pi/);
   const questionManifest = readFileSync(join(fixture.installation, "question-tool", "package.json"), "utf8");
   assert.equal(JSON.parse(questionManifest).version, expectedQuestionVersion);
   assert.match(questionManifest, /\.\/extensions\/question-tool\.ts/);

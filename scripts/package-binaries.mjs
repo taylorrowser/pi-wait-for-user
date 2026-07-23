@@ -105,14 +105,6 @@ function packagePlatform(input, output, platform, release, question) {
       filter: (path) => !path.includes(`${join("question-tool", "test")}`),
     });
     cpSync(join(projectRoot, "scripts", "install-binary.sh"), join(payload, "install.sh"));
-    const managedBootstrap = join(payload, "managed-bootstrap");
-    if (!windows) {
-      mkdirSync(join(managedBootstrap, "lib"), { recursive: true });
-      cpSync(join(projectRoot, "scripts", "managed-installer.mjs"), join(managedBootstrap, "managed-installer.mjs"));
-      cpSync(join(projectRoot, "scripts", "lib", "managed-command.mjs"), join(managedBootstrap, "lib", "managed-command.mjs"));
-      cpSync(join(projectRoot, "scripts", "lib", "managed-runtime.mjs"), join(managedBootstrap, "lib", "managed-runtime.mjs"));
-      cpSync(join(projectRoot, "scripts", "lib", "release-metadata.mjs"), join(managedBootstrap, "lib", "release-metadata.mjs"));
-    }
     const archiveMetadata = {
       schemaVersion: 1,
       releaseId: release.releaseId,
@@ -129,7 +121,6 @@ function packagePlatform(input, output, platform, release, question) {
       chmodSync(join(payload, "pi-wait-for-user"), 0o755);
       chmodSync(join(payload, "pi-core"), 0o755);
       chmodSync(join(payload, "install.sh"), 0o755);
-      chmodSync(join(managedBootstrap, "managed-installer.mjs"), 0o755);
     }
 
     const inventory = createPayloadInventory(temporaryRoot);

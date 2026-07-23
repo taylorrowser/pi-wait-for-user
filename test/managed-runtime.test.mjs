@@ -651,14 +651,13 @@ test("signed-payload-identical legacy installation is adopted only after complet
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-legacy-adopt-"));
   const candidate = fixture();
   const extracted = join(candidate.directory, "legacy-extracted");
-  const legacy = join(dataRoot, "releases", "pi-v0.81.1-patch.6");
+  const legacy = join(candidate.directory, "custom-legacy-installation");
   try {
     mkdirSync(extracted);
     assert.equal(spawnSync("tar", ["-xzf", candidate.releaseArchive, "-C", extracted]).status, 0);
-    mkdirSync(dirname(legacy), { recursive: true });
     cpSync(join(extracted, "pi-wait-for-user"), legacy, { recursive: true });
 
-    activate(dataRoot, candidate);
+    activate(dataRoot, candidate, { legacyDirectories: [legacy] });
     const migration = readLegacyMigration(dataRoot);
     assert.equal(migration.disposition, "adopted-after-signed-verification");
     assert.equal(existsSync(legacy), true);
@@ -923,7 +922,8 @@ test("managed enable never records another Managed Dispatcher as Stock Pi", () =
 
 test("managed enable leaves a losing-PATH installation incomplete with exact shell remediation", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-path-"));
-  const bin = mkdtempSync(join(tmpdir(), "managed-runtime-path-bin-"));
+  const binParent = mkdtempSync(join(tmpdir(), "managed-runtime-path-bin-"));
+  const bin = join(binParent, "Managed Bin");
   const stockBin = mkdtempSync(join(tmpdir(), "managed-runtime-path-stock-"));
   const candidate = fixture();
   try {
@@ -935,6 +935,7 @@ test("managed enable leaves a losing-PATH installation incomplete with exact she
     assert.notEqual(losing.status, 0);
     assert.match(losing.stderr, new RegExp(`Put ${bin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} before ${stockBin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} in PATH`));
     assert.match(losing.stderr, /hash -r/);
+    assert.match(losing.stderr, new RegExp(`--bin-dir '${bin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'`));
     assert.equal(readlinkSync(join(bin, "pi")), join(dataRoot, "dispatcher", "managed-dispatcher.mjs"));
     assert.equal(readlinkSync(join(bin, "pi-wait-for-user")), join(dataRoot, "dispatcher", "managed-dispatcher.mjs"));
 
@@ -949,7 +950,7 @@ test("managed enable leaves a losing-PATH installation incomplete with exact she
     assert.match(converged.stdout, /already enabled/);
   } finally {
     destroy(dataRoot);
-    destroy(bin);
+    destroy(binParent);
     destroy(stockBin);
     destroy(candidate.directory);
   }

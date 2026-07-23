@@ -4,17 +4,9 @@ set -eu
 release_id="pi-v0.81.1-patch.6"
 pi_version="0.81.1"
 payload_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-usage="Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH] | install.sh --manage-pi <signed managed-install options>"
+usage="Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH]"
 action=${1:-install}
 if [ "$#" -gt 0 ]; then shift; fi
-
-if [ "$action" = "--manage-pi" ]; then
-  if ! command -v node >/dev/null 2>&1; then
-    echo "pi-wait-for-user: managed installation requires Node.js 22.19 or newer" >&2
-    exit 1
-  fi
-  exec node "$payload_dir/managed-bootstrap/managed-installer.mjs" --manage-pi "$@"
-fi
 
 case "$(uname -s)" in
   Darwin) data_root="$HOME/Library/Application Support" ;;
@@ -69,21 +61,9 @@ inspect_launcher() {
   if [ ! -e "$launcher" ] && [ ! -L "$launcher" ]; then
     return 0
   fi
-  if [ -L "$launcher" ]; then
-    launcher_target=$(readlink "$launcher")
-    if [ "$launcher_target" = "$install_dir/pi-wait-for-user" ]; then
-      launcher_status=current
-      return 0
-    fi
-    case "$launcher_target" in
-      "$data_root/pi-wait-for-user/releases/"*/pi-wait-for-user)
-        legacy_directory=$(dirname "$launcher_target")
-        if [ -x "$launcher_target" ] && [ -f "$legacy_directory/release.json" ]; then
-          launcher_status=legacy-owned
-          return 0
-        fi
-        ;;
-    esac
+  if [ -L "$launcher" ] && [ "$(readlink "$launcher")" = "$install_dir/pi-wait-for-user" ]; then
+    launcher_status=current
+    return 0
   fi
   echo "pi-wait-for-user: unowned foreign command collision: $launcher" >&2
   return 1
@@ -94,16 +74,6 @@ activate() {
   mkdir -p "$bin_dir"
   if [ "$launcher_status" = absent ]; then
     ln -s "$install_dir/pi-wait-for-user" "$launcher"
-  elif [ "$launcher_status" = legacy-owned ]; then
-    temporary_link="$bin_dir/.pi-wait-for-user.tmp.$$"
-    rm -f "$temporary_link"
-    ln -s "$install_dir/pi-wait-for-user" "$temporary_link"
-    if [ "$(readlink "$launcher")" != "$launcher_target" ]; then
-      rm -f "$temporary_link"
-      echo "pi-wait-for-user: launcher changed during activation: $launcher" >&2
-      return 1
-    fi
-    mv -f "$temporary_link" "$launcher"
   fi
 }
 
