@@ -1,6 +1,6 @@
 # Managed Installation components and command ownership
 
-This local runtime implements the stable Managed Dispatcher, versioned Manager Release seam, and macOS/Linux command ownership defined by [`docs/design/managed-installation.md`](../design/managed-installation.md). GitHub issue [#59](https://github.com/taylorrowser/pi-wait-for-user/issues/59) delivered Activation; [#60](https://github.com/taylorrowser/pi-wait-for-user/issues/60) adds the side-by-side Compatibility Entrypoint, explicit Command Ownership, Stock Pi Identity recording, and Legacy Downstream Installation adoption. Network update discovery and the complete retention/uninstall UX remain assigned to #61–#62.
+This local runtime implements the stable Managed Dispatcher, versioned Manager Release seam, macOS/Linux command ownership, and patch-aware Managed Update flow defined by [`docs/design/managed-installation.md`](../design/managed-installation.md). GitHub issue [#59](https://github.com/taylorrowser/pi-wait-for-user/issues/59) delivered Activation; [#60](https://github.com/taylorrowser/pi-wait-for-user/issues/60) added Command Ownership and Legacy Downstream Installation adoption; [#61](https://github.com/taylorrowser/pi-wait-for-user/issues/61) adds authenticated network discovery, update routing, startup status, and Patch Lag. The complete retention/uninstall UX remains assigned to #62.
 
 ## Entrypoints
 
@@ -27,6 +27,10 @@ state/entrypoints.json             strict Command Ownership and Stock Pi Identit
 state/compatibility-entrypoint.json side-by-side compatibility ownership
 state/legacy-adoption.json         Legacy Downstream Installation adoption result and cleanup text
 state/lifecycle.lock               exclusive mutating-operation owner
+state/lifecycle-recovery-*.json    durable stale-owner recovery claims
+state/update-status.json           last safe authenticated Channel/upstream status
+state/startup-check.json           24-hour startup-check throttle
+state/update-hold.json             optional exact Downstream Release hold
 dispatcher/                        immutable receipt-owned stage 0 copied from a verified Manager Release
 managers/<manager-release-id>/     immutable Manager Release payload
 downstream-releases/<downstream-release-id>/ immutable Downstream Release payload
@@ -58,6 +62,23 @@ The previous successfully active pair is copied into the new Activation. The cra
 
 Unknown signed metadata schemas fail activation with reviewed re-bootstrap instructions, but stage 0 does not need to parse those envelopes during a cheap launch, so an already active pair remains usable.
 
+## Patch-aware Managed Update
+
+The active, previously authenticated trust document supplies the base location for `release-trust.json`. A newly fetched root-signed trust document authenticates the Channel URL; the signed Channel authenticates the Release Manifest URL and digest; only that manifest supplies Manager Release and platform Downstream Release artifact names, sizes, and digests. Artifact URLs are resolved beside the immutable manifest URL. `https://pi.dev/api/latest-version` is queried separately and can establish Patch Lag only—it never supplies a URL, release identity, or artifact.
+
+The Manager Release classifies `pi update` before invoking Pi core:
+
+- `pi update`, positional `pi|self`, `--self`, and their known force forms run a Managed Update;
+- `--all` (including Pi's known self-plus-extensions aliases) activates first, then invokes `update --extensions` through the newly active Pi;
+- `--extensions`, `--models`, and documented one-package forms delegate unchanged to active Pi; and
+- every other update shape fails closed.
+
+When `--force` finds no compatible candidate to activate, the Managed Update fully verifies the current Activation instead of silently discarding the option. A package-phase failure after `--all` is an explicit nonzero partial result and never rolls back the verified Activation. Discovery, download, signature, digest, identity, smoke, and conformance failures retain the current Activation, remove receipt-scoped temporary payloads, and retain at most ten strictly validated manager-owned, non-executable stage diagnostics; foreign diagnostic files are untouched. The highest authenticated trust version and Channel sequence are persisted as soon as the complete signed metadata chain is accepted, even if payload download later fails; equal retries must be envelope-identical and lower versions/sequences are rejected. Patch-only, Manager Release, Question Tool, and upstream-rebase changes are all selected by Channel sequence plus exact Downstream Release identity rather than by upstream semantic version.
+
+Explicit updates are synchronous. Normal launch instead renders only a cache whose active pair and Channel sequence/identity still match the authenticated Activation checkpoints, then starts a detached refresh process. That detached process—not the launching process—claims the throttle and performs at most one refresh per 24 hours, so normal launch remains lock-free apart from its pair lease. `PI_SKIP_VERSION_CHECK`, `PI_OFFLINE`, and `--offline` suppress refresh; Pi core always receives `PI_SKIP_VERSION_CHECK=1` so its upstream-only notice cannot conflict with managed status. Human notices are emitted only when Pi will enter its interactive TUI, never metadata/package commands, print, JSON, or RPC output.
+
+`pi managed status` reports the active pair and platform; upstream basis; session identities, readable protocol versions, readable handler versions, and the active Question Tool handler; recorded Stock Pi Identity and any observed divergence; Channel sequence/candidate; compatible Downstream Release; Patch Lag; and Update Hold. An exact hold suppresses only its passive compatible-update notice. Explicit update bypasses it and clears it after activation.
+
 If a Legacy Downstream Installation for the selected release exists, Activation compares every file path, mode, size, and digest with the signed platform payload. Only an exact match is adopted into the managed staging tree. Otherwise Activation installs the fresh signed archive under `downstream-releases/`, leaves the Legacy Downstream Installation unchanged, and records exact manual cleanup guidance.
 
 ## Ownership safety and Stock Pi
@@ -82,8 +103,12 @@ The default command fully verifies the active pair. `--all` also verifies the re
 
 ## Concurrency and cleanup
 
-One exclusive lifecycle lock records the active operation and serializes mutation. Launches do not take that lock. Each launch creates a uniquely named pair lease before reading payload files, transfers it to the Manager child process, and removes it after the child exits. Cleanup defers a leased pair and retries later.
+One exclusive lifecycle lock records the active operation and serializes mutation, including the entire managed-plus-package `--all` sequence. Atomic durable recovery claims ensure only one contender may remove a dead owner's stale lock. Launches do not take that lock. Each launch creates a uniquely named pair lease before reading payload files, transfers it to the Manager child process, and removes it after the child exits. Cleanup defers a leased pair and retries later.
 
 Staging and deletion use uniquely named `*.tmp-<uuid>` and `*.tombstone-<uuid>` directories with exact owner receipts. Cleanup ignores malformed, foreign, and symlink-substituted paths. Published payload deletion first validates both embedded and central receipts, then moves the payload through a receipt-scoped tombstone.
 
 Only fixture private keys are used by automated tests. This runtime stores pinned public keys and does not create, expose, or accept production signing secrets.
+
+## Ticket traceability
+
+Issue #61 acceptance behavior is exercised in `test/managed-runtime.test.mjs`: pair-change selection (patch-only, Manager Release, Question Tool, and upstream rebase), replay/schema/outage handling, immutable identity reuse rejection, streamed artifact downloads, reported-identity/smoke/conformance failure boundaries, atomic activation, Patch Lag, update syntax routing, `--all` partial results, retryable startup throttling/output isolation, safe cached status, and Dispatcher-level proof that no self-inclusive update form reaches Pi core. The Activation crash/failure matrix from #59 remains the shared verification seam used by Managed Update.

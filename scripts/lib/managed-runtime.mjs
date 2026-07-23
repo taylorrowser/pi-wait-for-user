@@ -8,6 +8,7 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -41,6 +42,8 @@ const idPattern = /^[a-z0-9][a-z0-9.-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const supportedPlatforms = new Set(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
 const rootKeyProvenanceType = Object.freeze({ callerSelected: "caller-selected", installerPinned: "installer-pinned" });
+const managedDiagnosticLimit = 10;
+const activeLifecycleCapabilities = new WeakSet();
 const receiptKeys = [
   "schemaVersion", "type", "ownedPath", "managerReleaseId", "downstreamReleaseId", "platform",
   "manifestSha256", "sourceArtifact", "verifiedAt", "payload",
@@ -197,6 +200,85 @@ function layout(dataRoot) {
   };
 }
 
+export function managedStateDirectory(dataRoot) {
+  const paths = layout(dataRoot);
+  ensureManagedDirectory(paths.root);
+  ensureManagedDirectory(paths.state);
+  return paths.state;
+}
+
+function managedStatePath(dataRoot, name) {
+  if (typeof name !== "string" || basename(name) !== name || name === "." || name === "..") {
+    fail("Malformed managed state filename");
+  }
+  return join(managedStateDirectory(dataRoot), name);
+}
+
+export function readManagedStateJson(dataRoot, name, label, { maximumSize = 2 * 1024 * 1024 } = {}) {
+  const path = managedStatePath(dataRoot, name);
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maximumSize) fail(`Malformed ${label}`);
+  return readJson(path, label);
+}
+
+export function writeManagedStateJson(dataRoot, name, value) {
+  const path = managedStatePath(dataRoot, name);
+  if (pathExists(path)) {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) fail("Managed state path is foreign");
+  }
+  atomicWrite(path, value);
+}
+
+function publishStateFileExclusive(stateDirectory, path, value) {
+  const temporary = join(stateDirectory, `.${basename(path)}.tmp-${randomUUID()}`);
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeSync(fd, serializeMetadata(value));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    linkSync(temporary, path);
+    const stat = lstatSync(path);
+    return { published: true, identity: { dev: stat.dev, ino: stat.ino } };
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    return { published: false, identity: null };
+  } finally {
+    unlinkSync(temporary);
+  }
+}
+
+export function publishManagedStateFileExclusive(dataRoot, name, value) {
+  const state = managedStateDirectory(dataRoot);
+  return publishStateFileExclusive(state, managedStatePath(dataRoot, name), value);
+}
+
+export function managedStateFileIsOwned(dataRoot, name, identity) {
+  const path = managedStatePath(dataRoot, name);
+  try {
+    const stat = lstatSync(path);
+    return Boolean(identity && stat.dev === identity.dev && stat.ino === identity.ino);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export function removeManagedStateFileIfOwned(dataRoot, name, identity) {
+  const path = managedStatePath(dataRoot, name);
+  if (!managedStateFileIsOwned(dataRoot, name, identity)) return false;
+  try {
+    unlinkSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function initializeLayout(dataRoot) {
   const paths = layout(dataRoot);
   for (const path of [paths.root, paths.state, paths.managers, paths.releases, paths.receipts, paths.artifacts, paths.leases, paths.temporary, paths.diagnostics]) {
@@ -205,46 +287,200 @@ function initializeLayout(dataRoot) {
   return paths;
 }
 
-function processAlive(pid) {
+export function managedProcessStartIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return null;
+  if (process.platform === "linux") {
+    try {
+      const value = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = value.slice(value.lastIndexOf(") ") + 2).trim().split(/\s+/);
+      return fields[19] ? `linux-proc-start:${fields[19]}` : null;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "darwin") {
+    const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
+    const startedAt = result.status === 0 ? result.stdout.trim() : "";
+    return startedAt ? `darwin-ps-start:${startedAt}` : null;
+  }
+  return null;
+}
+
+export function managedProcessStatus(pid) {
   try {
     process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") return { status: "dead", identity: null };
+    if (error?.code !== "EPERM") return { status: "unknown", identity: null };
+  }
+  const identity = managedProcessStartIdentity(pid);
+  return identity ? { status: "live", identity } : { status: "unknown", identity: null };
+}
+
+export function managedProcessIdentityIsLive(pid, startIdentity) {
+  const observed = managedProcessStatus(pid);
+  return observed.status === "live" && observed.identity === startIdentity;
+}
+
+function currentManagedProcessStartIdentity() {
+  const identity = managedProcessStartIdentity(process.pid);
+  if (!identity) fail("Cannot identify the managed lifecycle process");
+  return identity;
+}
+
+function publishLifecycleLock(paths, lock) {
+  const result = publishStateFileExclusive(paths.state, paths.lock, lock);
+  if (result.published) {
+    try {
+      const directory = openSync(paths.state, "r");
+      try { fsyncSync(directory); } finally { closeSync(directory); }
+    } catch {
+      // The complete hard-linked lock remains atomic when directory fsync is unavailable.
+    }
+  }
+  return result.published;
+}
+
+function unlinkIfOwned(path, identity) {
+  try {
+    const stat = lstatSync(path);
+    if (stat.dev !== identity.dev || stat.ino !== identity.ino) return false;
+    unlinkSync(path);
     return true;
   } catch (error) {
-    return error?.code === "EPERM";
+    if (error?.code === "ENOENT") return false;
+    throw error;
   }
 }
 
-export function withLifecycleLock(dataRoot, operation, callback) {
+function acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken) {
+  const ownerPath = join(paths.state, `lifecycle-recovery-${digestBytes(String(staleToken))}.owner`);
+  const owner = {
+    schemaVersion: 1,
+    type: "lifecycle-lock-recovery-owner",
+    staleToken,
+    pid: process.pid,
+    processStartIdentity: currentManagedProcessStartIdentity(),
+    claimantToken,
+    claimedAt: new Date().toISOString(),
+  };
+  const published = publishStateFileExclusive(paths.state, ownerPath, owner);
+  if (published.published) return { path: ownerPath, identity: published.identity };
+  const active = readJson(ownerPath, "lifecycle recovery owner");
+  exactObject(active, "lifecycle recovery owner", ["schemaVersion", "type", "staleToken", "pid", "processStartIdentity", "claimantToken", "claimedAt"]);
+  if (active.schemaVersion !== 1 || active.type !== "lifecycle-lock-recovery-owner"
+    || active.staleToken !== staleToken || !Number.isSafeInteger(active.pid) || active.pid < 1
+    || typeof active.processStartIdentity !== "string" || !active.processStartIdentity) {
+    fail("Malformed lifecycle recovery owner");
+  }
+  expectString(active.claimantToken, "lifecycle recovery claimant token");
+  expectDate(active.claimedAt, "lifecycle recovery claim date");
+  const ownerProcess = managedProcessStatus(active.pid);
+  if (ownerProcess.status === "unknown"
+    || (ownerProcess.status === "live" && ownerProcess.identity === active.processStartIdentity)) {
+    fail("Stale lifecycle lock recovery is already active");
+  }
+  const stat = lstatSync(ownerPath);
+  if (!unlinkIfOwned(ownerPath, { dev: stat.dev, ino: stat.ino })) {
+    return acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken);
+  }
+  return acquireLifecycleRecoveryOwner(paths, staleToken, claimantToken);
+}
+
+function acquireLifecycleLock(dataRoot, operation) {
   expectString(operation, "lifecycle operation");
   const paths = initializeLayout(dataRoot);
   const token = randomUUID();
-  const lock = { schemaVersion: 1, pid: process.pid, token, operation, startedAt: new Date().toISOString() };
-  let fd;
-  try {
-    fd = openSync(paths.lock, "wx", 0o600);
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
+  const lock = {
+    schemaVersion: 1,
+    pid: process.pid,
+    processStartIdentity: currentManagedProcessStartIdentity(),
+    token,
+    operation,
+    startedAt: new Date().toISOString(),
+  };
+  if (!publishLifecycleLock(paths, lock)) {
     const active = readJson(paths.lock, "lifecycle lock");
-    exactObject(active, "lifecycle lock", ["schemaVersion", "pid", "token", "operation", "startedAt"]);
-    if (Number.isSafeInteger(active.pid) && active.pid > 0 && processAlive(active.pid)) {
+    const legacy = plainObject(active)
+      && canonicalJson(Object.keys(active).sort()) === canonicalJson(["schemaVersion", "pid", "token", "operation", "startedAt"].sort());
+    exactObject(active, "lifecycle lock", legacy
+      ? ["schemaVersion", "pid", "token", "operation", "startedAt"]
+      : ["schemaVersion", "pid", "processStartIdentity", "token", "operation", "startedAt"]);
+    if (active.schemaVersion !== 1 || !Number.isSafeInteger(active.pid) || active.pid < 1) fail("Malformed lifecycle lock");
+    if (!legacy) expectString(active.processStartIdentity, "lifecycle lock process identity");
+    expectString(active.token, "lifecycle lock token");
+    expectString(active.operation, "lifecycle lock operation");
+    expectDate(active.startedAt, "lifecycle lock start date");
+    const activeProcess = managedProcessStatus(active.pid);
+    if ((legacy && activeProcess.status !== "dead")
+      || (!legacy && (activeProcess.status === "unknown"
+        || (activeProcess.status === "live" && activeProcess.identity === active.processStartIdentity)))) {
       fail(`Managed lifecycle operation already active: ${String(active.operation)}`);
     }
-    unlinkSync(paths.lock);
-    fd = openSync(paths.lock, "wx", 0o600);
-  }
-  writeSync(fd, serializeMetadata(lock));
-  fsyncSync(fd);
-  closeSync(fd);
-  try {
-    return callback();
-  } finally {
+    const recoveryPath = join(paths.state, `lifecycle-recovery-${digestBytes(String(active.token))}.json`);
+    try {
+      linkSync(paths.lock, recoveryPath);
+    } catch (recoveryError) {
+      if (recoveryError?.code !== "EEXIST") throw recoveryError;
+      const lockStat = lstatSync(paths.lock);
+      const recoveryStat = lstatSync(recoveryPath);
+      if (lockStat.dev !== recoveryStat.dev || lockStat.ino !== recoveryStat.ino) {
+        fail("Stale lifecycle lock recovery record does not match the interrupted lock");
+      }
+    }
+    const recoveryOwner = acquireLifecycleRecoveryOwner(paths, active.token, token);
     try {
       const current = readJson(paths.lock, "lifecycle lock");
-      if (current.token === token) unlinkSync(paths.lock);
-    } catch {
-      // Never remove a lock that no longer proves this operation owns it.
+      const claimed = readJson(recoveryPath, "lifecycle recovery claim");
+      const staleStat = lstatSync(paths.lock);
+      const recoveryStat = lstatSync(recoveryPath);
+      if (current.token !== active.token || claimed.token !== active.token
+        || staleStat.dev !== recoveryStat.dev || staleStat.ino !== recoveryStat.ino) {
+        fail("Lifecycle lock changed during stale recovery");
+      }
+      if (!unlinkIfOwned(paths.lock, { dev: staleStat.dev, ino: staleStat.ino })) {
+        return acquireLifecycleLock(dataRoot, operation);
+      }
+      atomicWrite(recoveryPath, {
+        schemaVersion: 1,
+        type: "lifecycle-lock-recovery",
+        staleToken: active.token,
+        claimedByToken: token,
+        claimedAt: new Date().toISOString(),
+      });
+      if (!publishLifecycleLock(paths, lock)) return acquireLifecycleLock(dataRoot, operation);
+    } finally {
+      unlinkIfOwned(recoveryOwner.path, recoveryOwner.identity);
     }
   }
+  const capability = Object.freeze({});
+  activeLifecycleCapabilities.add(capability);
+  return {
+    capability,
+    release() {
+      activeLifecycleCapabilities.delete(capability);
+      try {
+        const current = readJson(paths.lock, "lifecycle lock");
+        if (current.token === token) unlinkSync(paths.lock);
+      } catch {
+        // Never remove a lock that no longer proves this operation owns it.
+      }
+    },
+  };
+}
+
+export function assertLifecycleCapability(capability) {
+  if (!capability || !activeLifecycleCapabilities.has(capability)) fail("Invalid managed lifecycle lock capability");
+}
+
+export function withLifecycleLock(dataRoot, operation, callback) {
+  const acquired = acquireLifecycleLock(dataRoot, operation);
+  try { return callback(acquired.capability); } finally { acquired.release(); }
+}
+
+export async function withLifecycleLockAsync(dataRoot, operation, callback) {
+  const acquired = acquireLifecycleLock(dataRoot, operation);
+  try { return await callback(acquired.capability); } finally { acquired.release(); }
 }
 
 function validateArtifactBytes(path, expected, label) {
@@ -314,6 +550,12 @@ function removeStage(stage) {
   if (!existsSync(stage)) return;
   makeWritable(stage);
   rmSync(stage, { recursive: true, force: true });
+}
+
+export async function withManagedTemporaryDirectory(dataRoot, kind, callback) {
+  ensureIdentifier(kind, "managed temporary kind");
+  const stage = createStage(initializeLayout(dataRoot), kind);
+  try { return await callback(stage.payload); } finally { removeStage(stage.stage); }
 }
 
 function immutableTree(path) {
@@ -581,7 +823,8 @@ function publishStage(stage, destination, receipt, paths, checkpoint, boundary) 
       platform: receipt.platform,
     };
     validateReceipt(existingReceipt, receipt.type, destination, pair);
-    if (canonicalJson(existingReceipt.sourceArtifact) !== canonicalJson(receipt.sourceArtifact)
+    if ((receipt.type === "downstream" && existingReceipt.manifestSha256 !== receipt.manifestSha256)
+      || canonicalJson(existingReceipt.sourceArtifact) !== canonicalJson(receipt.sourceArtifact)
       || canonicalJson(existingReceipt.payload) !== canonicalJson(receipt.payload)) {
       fail(`Immutable ${receipt.type} release identity already exists with different content`);
     }
@@ -830,17 +1073,48 @@ function saveArtifact(paths, source, expected) {
   return destination;
 }
 
-function diagnostic(paths, error) {
+function isManagedDiagnostic(paths, name) {
+  if (!/^\d+-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$/.test(name)) return false;
+  try {
+    const path = join(paths.diagnostics, name);
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2_048) return false;
+    const value = readJson(path, "managed diagnostic");
+    exactObject(value, "managed diagnostic", ["schemaVersion", "type", "stage", "recordedAt", "error"]);
+    if (value.schemaVersion !== 1 || !["activation-failure", "managed-update-failure"].includes(value.type)) return false;
+    expectString(value.stage, "managed diagnostic stage");
+    expectDate(value.recordedAt, "managed diagnostic date");
+    return typeof value.error === "string" && value.error.length <= 500;
+  } catch {
+    return false;
+  }
+}
+
+function writeManagedDiagnostic(paths, type, stage, error) {
   try {
     atomicWrite(join(paths.diagnostics, `${Date.now()}-${randomUUID()}.json`), {
       schemaVersion: 1,
-      type: "activation-failure",
+      type,
+      stage,
       recordedAt: new Date().toISOString(),
-      error: error instanceof Error ? error.message : String(error),
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
     });
+    const diagnostics = readdirSync(paths.diagnostics).filter((name) => isManagedDiagnostic(paths, name)).sort();
+    for (const name of diagnostics.slice(0, Math.max(0, diagnostics.length - managedDiagnosticLimit))) {
+      unlinkSync(join(paths.diagnostics, name));
+    }
   } catch {
     // A diagnostic must never mask the original verification failure.
   }
+}
+
+function diagnostic(paths, error) {
+  writeManagedDiagnostic(paths, "activation-failure", "verification-and-activation", error);
+}
+
+export function recordManagedUpdateDiagnostic(dataRoot, stage, error) {
+  expectString(stage, "Managed Update diagnostic stage");
+  writeManagedDiagnostic(initializeLayout(dataRoot), "managed-update-failure", stage, error);
 }
 
 function installAndActivateWithProvenance(options, provenanceType) {
@@ -856,11 +1130,12 @@ function installAndActivateWithProvenance(options, provenanceType) {
     now = new Date(),
     checkpoint,
     legacyDirectories = [],
+    lifecycleCapability,
   } = options;
   ensurePlatform(platform);
   if (!(now instanceof Date) || !Number.isFinite(now.getTime())) fail("Invalid activation verification date");
   if (!(rootKeys instanceof Map) || rootKeys.size === 0) fail("No pinned root keys configured");
-  return withLifecycleLock(dataRoot, `activate ${manifestEnvelope?.signed?.releaseId ?? "candidate"}`, () => {
+  const activate = () => {
     const paths = initializeLayout(dataRoot);
     let managerStage;
     let releaseStage;
@@ -986,11 +1261,136 @@ function installAndActivateWithProvenance(options, provenanceType) {
       diagnostic(paths, error);
       throw error;
     }
-  });
+  };
+  if (lifecycleCapability !== undefined) {
+    assertLifecycleCapability(lifecycleCapability);
+    return activate();
+  }
+  return withLifecycleLock(dataRoot, `activate ${manifestEnvelope?.signed?.releaseId ?? "candidate"}`, activate);
+}
+
+export function readManagedStartupContext(dataRoot) {
+  const selected = validateActivePair(dataRoot);
+  const accepted = readAcceptedMetadataState(selected.paths);
+  if (!accepted) fail("Accepted metadata state is missing for existing Activation");
+  return {
+    active: {
+      releaseId: selected.pair.downstreamReleaseId,
+      managerReleaseId: selected.pair.managerReleaseId,
+      manifestSha256: selected.pair.manifestSha256,
+    },
+    accepted,
+  };
+}
+
+export function managedCandidateIdentityConflict(dataRoot, manifest, manifestSha256, platform) {
+  const paths = layout(dataRoot);
+  const managerArtifact = manifest.manager.artifacts[0];
+  const managerPath = join(paths.managers, manifest.manager.releaseId);
+  const managerReceiptPath = receiptPath(paths, "manager", manifest.manager.releaseId);
+  if (pathExists(managerReceiptPath)) {
+    const receiptValue = readJson(managerReceiptPath, "manager receipt");
+    const receipt = validateReceipt(receiptValue, "manager", managerPath, {
+      managerReleaseId: manifest.manager.releaseId,
+      downstreamReleaseId: manifest.releaseId,
+      platform: receiptValue.platform,
+    });
+    if (canonicalJson(receipt.sourceArtifact) !== canonicalJson(managerArtifact)) {
+      return `signed candidate reuses immutable Manager Release identity ${manifest.manager.releaseId}`;
+    }
+  }
+  const downstreamPath = join(paths.releases, manifest.releaseId);
+  const downstreamReceiptPath = receiptPath(paths, "downstream", manifest.releaseId);
+  if (pathExists(downstreamReceiptPath)) {
+    const receiptValue = readJson(downstreamReceiptPath, "downstream receipt");
+    const receipt = validateReceipt(receiptValue, "downstream", downstreamPath, {
+      managerReleaseId: receiptValue.managerReleaseId,
+      downstreamReleaseId: manifest.releaseId,
+      platform: receiptValue.platform,
+    });
+    const archive = manifest.platformArchives.find((entry) => entry.platform === platform)?.artifact;
+    if (receipt.manifestSha256 !== manifestSha256
+      || !archive || canonicalJson(receipt.sourceArtifact) !== canonicalJson(archive)) {
+      return `signed candidate reuses immutable Downstream Release identity ${manifest.releaseId}`;
+    }
+  }
+  return null;
+}
+
+export function readManagedUpdateContext(dataRoot) {
+  const selected = validateActivePair(dataRoot);
+  if (selected.config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {
+    fail("Managed Update requires root keys pinned by the reviewed installer");
+  }
+  const metadataRoot = join(selected.releasePath, ".managed");
+  const trustEnvelope = readJson(join(metadataRoot, "release-trust.json"), "release trust metadata");
+  const channelEnvelope = readJson(join(metadataRoot, "release-channel.json"), "Release Channel");
+  const manifestEnvelope = readJson(join(metadataRoot, "release-manifest.json"), "Release Manifest");
+  const verificationTime = new Date(selected.releaseReceipt.verifiedAt);
+  const authority = verifyTrustMetadata(trustEnvelope, { trustedRootKeys: selected.config.rootKeys, now: verificationTime });
+  verifyChannel(channelEnvelope, { trust: authority, now: verificationTime, manifest: manifestEnvelope });
+  const manifest = verifyReleaseManifest(manifestEnvelope, { trust: authority, now: verificationTime });
+  if (manifest.releaseId !== selected.pair.downstreamReleaseId || manifest.manager.releaseId !== selected.pair.managerReleaseId) {
+    fail("Release Manifest pair mismatch");
+  }
+  const accepted = readAcceptedMetadataState(selected.paths);
+  if (!accepted) fail("Accepted metadata state is missing for existing Activation");
+  return {
+    active: {
+      releaseId: manifest.releaseId,
+      managerReleaseId: manifest.manager.releaseId,
+      upstreamVersion: manifest.upstream.packageVersion,
+      platform: selected.pair.platform,
+      manifestSha256: selected.pair.manifestSha256,
+      compatibility: manifest.compatibility,
+    },
+    accepted,
+    rootKeys: selected.config.rootKeys,
+    trustEnvelope,
+    channelEnvelope,
+    manifestEnvelope,
+  };
+}
+
+export function acceptManagedUpdateMetadata(dataRoot, metadata, options = {}) {
+  const accept = () => {
+    const selected = validateActivePair(dataRoot);
+    if (selected.config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {
+      fail("Managed Update requires root keys pinned by the reviewed installer");
+    }
+    const accepted = readAcceptedMetadataState(selected.paths);
+    if (!accepted) fail("Accepted metadata state is missing for existing Activation");
+    const authority = verifyTrustMetadata(metadata.trustEnvelope, {
+      trustedRootKeys: selected.config.rootKeys,
+      now: options.now || new Date(),
+      accepted: accepted.trust,
+    });
+    const channel = verifyChannel(metadata.channelEnvelope, {
+      trust: authority,
+      now: options.now || new Date(),
+      manifest: metadata.manifestEnvelope,
+      accepted: accepted.channel,
+    });
+    atomicWrite(selected.paths.accepted, { schemaVersion: 1, trust: authority.acceptedState, channel });
+    return { trust: authority.acceptedState, channel };
+  };
+  if (options.lifecycleCapability !== undefined) {
+    assertLifecycleCapability(options.lifecycleCapability);
+    return accept();
+  }
+  return withLifecycleLock(dataRoot, "accept Managed Update metadata", accept);
 }
 
 export function installAndActivate(options) {
   return installAndActivateWithProvenance(options, rootKeyProvenanceType.callerSelected);
+}
+
+export function installAndActivateFromManagedConfig(options) {
+  const config = readConfig(layout(options.dataRoot));
+  if (config.rootKeyProvenance.type !== rootKeyProvenanceType.installerPinned) {
+    fail("Managed Update requires root keys pinned by the reviewed installer");
+  }
+  return installAndActivateWithProvenance({ ...options, platform: config.platform, rootKeys: config.rootKeys }, rootKeyProvenanceType.installerPinned);
 }
 
 export function installAndActivateFromPinnedRoot(options) {
@@ -1035,16 +1435,21 @@ function livePairLeases(paths, pair) {
     let lease;
     try {
       lease = readJson(path, "pair lease");
-      exactObject(lease, "pair lease", ["schemaVersion", "pid", "token", "createdAt"]);
-      if (lease.schemaVersion !== 1 || !Number.isSafeInteger(lease.pid) || lease.pid < 1) fail("Malformed pair lease");
+      exactObject(lease, "pair lease", ["schemaVersion", "pid", "processStartIdentity", "token", "createdAt"]);
+      if (lease.schemaVersion !== 1 || !Number.isSafeInteger(lease.pid) || lease.pid < 1
+        || (lease.processStartIdentity !== null && (typeof lease.processStartIdentity !== "string" || !lease.processStartIdentity))) {
+        fail("Malformed pair lease");
+      }
       expectString(lease.token, "pair lease token");
       expectDate(lease.createdAt, "pair lease creation date");
     } catch {
       live.push(path); // Ambiguous lease state must defer deletion.
       continue;
     }
-    if (processAlive(lease.pid)) live.push(path);
-    else unlinkSync(path);
+    const observed = managedProcessStatus(lease.pid);
+    if (observed.status === "unknown" || (observed.status === "live" && observed.identity === lease.processStartIdentity)) {
+      live.push(path);
+    } else unlinkSync(path);
   }
   return live;
 }
@@ -1056,12 +1461,20 @@ export function acquirePairLease(dataRoot, pair) {
   ensureManagedDirectory(directory);
   const token = randomUUID();
   const path = join(directory, `${token}.json`);
-  const lease = { schemaVersion: 1, pid: process.pid, token, createdAt: new Date().toISOString() };
+  const lease = {
+    schemaVersion: 1,
+    pid: process.pid,
+    processStartIdentity: currentManagedProcessStartIdentity(),
+    token,
+    createdAt: new Date().toISOString(),
+  };
   writeFileSync(path, serializeMetadata(lease), { flag: "wx", mode: 0o600 });
   return {
     transfer(pid) {
       if (!Number.isSafeInteger(pid) || pid < 1) fail("Invalid pair lease process");
-      atomicWrite(path, { ...lease, pid });
+      const processStatus = managedProcessStatus(pid);
+      if (processStatus.status !== "live") fail("Cannot identify pair lease process");
+      atomicWrite(path, { ...lease, pid, processStartIdentity: processStatus.identity });
     },
     release() {
       try {
@@ -1581,6 +1994,17 @@ export function enableManagedOwnership(dataRoot, options = {}) {
     }
     return alreadyEnabled ? "already enabled" : "enabled";
   });
+}
+
+export function inspectStockPiIdentity(dataRoot, { environment = process.env } = {}) {
+  const recorded = readManagedOwnership(dataRoot).stock;
+  if (!recorded) return { recorded: null, divergence: null };
+  try {
+    const current = executableIdentity(recorded.resolvedPath, environment, recorded);
+    return { recorded, divergence: canonicalJson(current) === canonicalJson(recorded) ? null : "Stock Pi identity changed" };
+  } catch (error) {
+    return { recorded, divergence: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 export function executeStockPi(dataRoot, args, { environment = process.env } = {}) {
