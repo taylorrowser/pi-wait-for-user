@@ -1550,7 +1550,9 @@ export function enableManagedOwnership(dataRoot, options = {}) {
     options.checkpoint?.("pi-entrypoint-published");
 
     const resolvedCommand = commandPath("pi", environment);
-    if (resolvedCommand !== resolve(ownership.entrypoints.pi.path)) {
+    const resolvesToManagedDispatcher = resolvedCommand
+      && realpathSync(resolvedCommand) === realpathSync(ownership.entrypoints.pi.path);
+    if (!resolvesToManagedDispatcher) {
       const pathRemediation = resolvedCommand
         ? `Put ${binDirectory} before ${dirname(resolvedCommand)} in PATH`
         : `Add ${binDirectory} to the front of PATH, for example: export PATH=${shellQuote(binDirectory)}:"$PATH"`;
