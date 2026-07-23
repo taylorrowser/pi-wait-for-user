@@ -1798,7 +1798,7 @@ test("managed status reports pair compatibility, Stock Pi, Channel, Patch Lag, a
   }
 });
 
-test("Managed Dispatcher never exposes self-inclusive Stock Pi updates while preserving package update commands", () => {
+test("Managed Dispatcher never exposes upstream-only Pi updates while preserving package update commands", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-update-dispatch-"));
   const current = fixture();
   try {
