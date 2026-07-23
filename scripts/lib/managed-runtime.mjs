@@ -230,6 +230,45 @@ export function writeManagedStateJson(dataRoot, name, value) {
   atomicWrite(path, value);
 }
 
+function publishStateFileExclusive(stateDirectory, path, value) {
+  const temporary = join(stateDirectory, `.${basename(path)}.tmp-${randomUUID()}`);
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    writeSync(fd, serializeMetadata(value));
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    linkSync(temporary, path);
+    const stat = lstatSync(path);
+    return { published: true, identity: { dev: stat.dev, ino: stat.ino } };
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    return { published: false, identity: null };
+  } finally {
+    unlinkSync(temporary);
+  }
+}
+
+export function publishManagedStateFileExclusive(dataRoot, name, value) {
+  const state = managedStateDirectory(dataRoot);
+  return publishStateFileExclusive(state, managedStatePath(dataRoot, name), value);
+}
+
+export function removeManagedStateFileIfOwned(dataRoot, name, identity) {
+  const path = managedStatePath(dataRoot, name);
+  try {
+    const stat = lstatSync(path);
+    if (!identity || stat.dev !== identity.dev || stat.ino !== identity.ino) return false;
+    unlinkSync(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function initializeLayout(dataRoot) {
   const paths = layout(dataRoot);
   for (const path of [paths.root, paths.state, paths.managers, paths.releases, paths.receipts, paths.artifacts, paths.leases, paths.temporary, paths.diagnostics]) {
@@ -248,24 +287,8 @@ function processAlive(pid) {
 }
 
 function publishLifecycleLock(paths, lock) {
-  const temporary = join(paths.state, `.lifecycle.lock.tmp-${randomUUID()}`);
-  const fd = openSync(temporary, "wx", 0o600);
-  try {
-    writeSync(fd, serializeMetadata(lock));
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  let published = false;
-  try {
-    linkSync(temporary, paths.lock);
-    published = true;
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-  } finally {
-    unlinkSync(temporary);
-  }
-  if (published) {
+  const result = publishStateFileExclusive(paths.state, paths.lock, lock);
+  if (result.published) {
     try {
       const directory = openSync(paths.state, "r");
       try { fsyncSync(directory); } finally { closeSync(directory); }
@@ -273,7 +296,7 @@ function publishLifecycleLock(paths, lock) {
       // The complete hard-linked lock remains atomic when directory fsync is unavailable.
     }
   }
-  return published;
+  return result.published;
 }
 
 function acquireLifecycleLock(dataRoot, operation) {

@@ -1410,6 +1410,16 @@ globalThis.fetch = async (input) => {
   };
 }
 
+function writeStaleStartupCheckLock(dataRoot, token = "00000000-0000-4000-8000-000000000001") {
+  writeFileSync(join(dataRoot, "state", "startup-check.lock"), serializeMetadata({
+    schemaVersion: 1,
+    type: "managed-startup-check-lock",
+    pid: 999_999_999,
+    token,
+    createdAt: "2020-01-01T00:00:00.000Z",
+  }));
+}
+
 function updateTransport(candidate, { upstreamVersion = candidate.manifestEnvelope.signed.upstream.packageVersion, fail = new Map() } = {}) {
   const manifestUrl = candidate.channelEnvelope.signed.manifest.url;
   const documents = new Map([
@@ -1687,7 +1697,7 @@ test("cached startup status is throttled, isolated to interactive output, and re
     assert.equal(startupTransport.requested.length, 0);
     assert.equal(existsSync(join(dataRoot, "state", "startup-check.json")), false);
 
-    writeFileSync(join(dataRoot, "state", "startup-check.lock"), "interrupted\n");
+    writeStaleStartupCheckLock(dataRoot);
     await refreshManagedStartupStatus(dataRoot, { transport: startupTransport, now });
     const requestCount = startupTransport.requested.length;
     assert.ok(requestCount > 0);
@@ -1726,7 +1736,15 @@ test("detached startup refresh resumes after interruption immediately after its 
   const current = fixture();
   try {
     activate(dataRoot, current);
-    writeFileSync(join(dataRoot, "state", "startup-check.lock"), "interrupted\n");
+    const startupLock = join(dataRoot, "state", "startup-check.lock");
+    writeFileSync(startupLock, "foreign\n");
+    await assert.rejects(
+      refreshManagedStartupStatus(dataRoot, { transport: updateTransport(current), now }),
+      /Malformed startup check lock/,
+    );
+    assert.equal(readFileSync(startupLock, "utf8"), "foreign\n");
+    rmSync(startupLock);
+    writeStaleStartupCheckLock(dataRoot, "00000000-0000-4000-8000-000000000002");
     const transport = updateTransport(current);
     await assert.rejects(
       refreshManagedStartupStatus(dataRoot, {
@@ -1920,6 +1938,13 @@ test("startup never advertises a signed Channel candidate incompatible with the 
       performManagedUpdate(dataRoot, { transport: updateTransport(candidate), now }),
       /candidate compatibility: platform is not declared: linux-x64/,
     );
+    const forced = await performManagedUpdate(dataRoot, {
+      transport: updateTransport(candidate),
+      now,
+      force: true,
+    });
+    assert.equal(forced.kind, "incompatible");
+    assert.equal(forced.fullyVerifiedCurrent, true);
     const patchLag = await performManagedUpdate(dataRoot, {
       transport: updateTransport(candidate, { upstreamVersion: "0.82.0" }),
       now,
@@ -2030,9 +2055,12 @@ test("interactive startup notices do not pollute TTY metadata and package-comman
     const interactive = runDispatcherInTty(dataRoot, ["--offline"]);
     assert.equal(interactive.status, 0, `${interactive.stdout}\n${interactive.stderr}`);
     assert.match(interactive.stdout, /compatible Downstream Release is available/);
+    const textMode = runDispatcherInTty(dataRoot, ["--mode", "text", "--offline"]);
+    assert.equal(textMode.status, 0, `${textMode.stdout}\n${textMode.stderr}`);
+    assert.match(textMode.stdout, /compatible Downstream Release is available/);
 
     for (const args of [
-      ["--help"], ["--version"], ["--list-models"], ["--export", "session.jsonl"], ["--mode", "text"], ["list"], ["conformance"],
+      ["--help"], ["--version"], ["--list-models"], ["--export", "session.jsonl"], ["list"], ["conformance"],
     ]) {
       const output = runDispatcherInTty(dataRoot, [...args, "--offline"]);
       assert.equal(output.status, 0, `${output.stdout}\n${output.stderr}`);

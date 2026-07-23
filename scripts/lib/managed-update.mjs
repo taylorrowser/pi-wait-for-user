@@ -1,10 +1,10 @@
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
   lstatSync,
   linkSync,
   openSync,
-  rmSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -19,11 +19,13 @@ import {
   inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
   managedStateDirectory,
+  publishManagedStateFileExclusive,
   readActivation,
   readManagedStartupContext,
   readManagedStateJson,
   readManagedUpdateContext,
   recordManagedUpdateDiagnostic,
+  removeManagedStateFileIfOwned,
   validateActivePair,
   verifyManagedInstallation,
   withLifecycleLockAsync,
@@ -400,7 +402,9 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
   let stage = "discovery";
   try {
     const checked = await checkManagedUpdate(dataRoot, options);
-    if (checked.kind === "incompatible") fail(`Managed Update failed during candidate compatibility: ${checked.incompatibility}`);
+    if (checked.kind === "incompatible" && !options.force) {
+      fail(`Managed Update failed during candidate compatibility: ${checked.incompatibility}`);
+    }
     if (checked.kind !== "compatible-update") {
       if (!options.force) return checked;
       verifyManagedInstallation(dataRoot);
@@ -537,21 +541,39 @@ export function cachedManagedStartupNotice(dataRoot, options = {}) {
   return null;
 }
 
+function validateStartupCheckLock(value) {
+  if (!hasExactKeys(value, ["schemaVersion", "type", "pid", "token", "createdAt"])
+    || value.schemaVersion !== 1 || value.type !== "managed-startup-check-lock"
+    || !Number.isSafeInteger(value.pid) || value.pid < 1
+    || typeof value.token !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.token)
+    || !validDate(value.createdAt)) fail("Malformed startup check lock");
+  return value;
+}
+
 function claimManagedStartupCheck(dataRoot, options = {}) {
   const environment = options.environment || process.env;
   if (environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE || options.offline) return false;
   const now = options.now || new Date();
   const selected = paths(dataRoot);
-  let lock;
-  try { lock = openSync(selected.startupLock, "wx", 0o600); } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
+  const lockRecord = {
+    schemaVersion: 1,
+    type: "managed-startup-check-lock",
+    pid: process.pid,
+    token: randomUUID(),
+    createdAt: now.toISOString(),
+  };
+  let acquired = publishManagedStateFileExclusive(dataRoot, "startup-check.lock", lockRecord);
+  if (!acquired.published) {
+    const active = validateStartupCheckLock(readManagedStateJson(
+      dataRoot,
+      "startup-check.lock",
+      "startup check lock",
+      { maximumSize: metadataLimit },
+    ));
     const stat = lstatSync(selected.startupLock);
-    if (stat.isSymbolicLink() || !stat.isFile()) fail("Startup check lock is foreign");
-    if (now.getTime() - stat.mtimeMs <= 5 * 60 * 1_000) return false;
-    const recoveryPath = join(
-      selected.state,
-      `startup-check-recovery-${stat.dev}-${stat.ino}-${Math.floor(stat.mtimeMs)}-${stat.size}.json`,
-    );
+    if (now.getTime() - Date.parse(active.createdAt) <= 5 * 60 * 1_000) return false;
+    const recoveryPath = join(selected.state, `startup-check-recovery-${active.token}.json`);
     try {
       linkSync(selected.startupLock, recoveryPath);
     } catch (recoveryError) {
@@ -561,23 +583,18 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
       if (current.dev !== recovery.dev || current.ino !== recovery.ino) fail("Startup check recovery record is foreign");
     }
     options.checkpoint?.("startup-check-recovery-claimed");
-    const current = lstatSync(selected.startupLock);
     const recovery = lstatSync(recoveryPath);
-    if (current.dev !== stat.dev || current.ino !== stat.ino
-      || recovery.dev !== stat.dev || recovery.ino !== stat.ino) return false;
-    unlinkSync(selected.startupLock);
+    if (recovery.dev !== stat.dev || recovery.ino !== stat.ino
+      || !removeManagedStateFileIfOwned(dataRoot, "startup-check.lock", { dev: stat.dev, ino: stat.ino })) return false;
     writeManagedStateJson(dataRoot, basename(recoveryPath), {
       schemaVersion: 1,
       type: "startup-check-lock-recovery",
-      staleModifiedAt: new Date(stat.mtimeMs).toISOString(),
+      staleToken: active.token,
       claimedAt: now.toISOString(),
     });
-    try { lock = openSync(selected.startupLock, "wx", 0o600); } catch (replacementError) {
-      if (replacementError?.code === "EEXIST") return false;
-      throw replacementError;
-    }
+    acquired = publishManagedStateFileExclusive(dataRoot, "startup-check.lock", lockRecord);
+    if (!acquired.published) return false;
   }
-  closeSync(lock);
   try {
     if (existsSync(selected.startup)) {
       const state = readManagedStateJson(dataRoot, "startup-check.json", "startup check state", { maximumSize: metadataLimit });
@@ -595,7 +612,7 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
     });
     return true;
   } finally {
-    rmSync(selected.startupLock, { force: true });
+    removeManagedStateFileIfOwned(dataRoot, "startup-check.lock", acquired.identity);
   }
 }
 

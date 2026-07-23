@@ -146,7 +146,7 @@ function interactiveLaunch(args) {
   if (args.some((argument) => nonInteractiveFlags.has(argument))) return false;
   if (["install", "remove", "uninstall", "list", "config", "conformance"].includes(args[0])) return false;
   const mode = args.indexOf("--mode");
-  return mode < 0 || !["text", "json", "rpc"].includes(args[mode + 1]);
+  return mode < 0 || !["json", "rpc"].includes(args[mode + 1]);
 }
 
 function beginStartupCheck(args) {
@@ -172,6 +172,8 @@ function printManagedUpdate(result) {
     console.log(`Activated Downstream Release ${result.active.releaseId} (upstream Pi ${result.active.upstreamVersion}); Channel sequence ${result.channel.sequence}.`);
   } else if (result.kind === "patch-lag") {
     console.log(`Patch Lag: ${result.patchLag.currentReleaseId} is based on upstream Pi ${result.patchLag.currentUpstreamVersion}; observed upstream Pi ${result.patchLag.observedUpstreamVersion} is newer. The verified Activation remains active.`);
+  } else if (result.kind === "incompatible") {
+    console.log(`No compatible Downstream Release can be activated: ${result.incompatibility}. The current Activation remains active.`);
   } else {
     console.log(`Already current: ${result.active.releaseId} (upstream Pi ${result.active.upstreamVersion}); Channel sequence ${result.channel.sequence}.`);
     if (result.upstreamError) console.log(`Upstream Pi status unavailable (informational only): ${result.upstreamError}`);
