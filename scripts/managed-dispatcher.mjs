@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   defaultManagedDataRoot,
-  disableManagedEntrypoint,
+  disableManagedCommandOwnership,
   dispatchActivePair,
   recoverPrevious,
 } from "./lib/managed-runtime.mjs";
@@ -39,7 +39,7 @@ try {
     const activation = recoverPrevious(root);
     console.log(`Recovered ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "disable") {
-    console.log(`Managed command ownership ${disableManagedEntrypoint(root)}.`);
+    console.log(`Command Ownership ${disableManagedCommandOwnership(root)}.`);
   } else {
     process.exitCode = await dispatchActivePair(root, args);
   }

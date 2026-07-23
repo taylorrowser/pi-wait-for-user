@@ -412,16 +412,20 @@ function publishStableDispatcher(paths, selected) {
     if (!Number.isSafeInteger(receipt.sourceArtifact.size) || receipt.sourceArtifact.size < 0) fail("Malformed Dispatcher source artifact");
     expectDate(receipt.createdAt, "Dispatcher creation date");
     receipt.payload.forEach((entry, index) => validatePayloadEntry(entry, `Managed Dispatcher receipt payload[${index}]`));
-    if (receipt.managerReleaseId !== selected.pair.managerReleaseId || receipt.platform !== selected.pair.platform
-      || canonicalJson(receipt.sourceArtifact) !== canonicalJson(selected.managerReceipt.sourceArtifact)) {
-      fail("Managed Dispatcher receipt does not match the verified Manager Release");
-    }
-    comparePayload(receipt.payload, expectedPayload);
-    comparePayload(createPayloadInventory(destination).filter((entry) => !entry.path.startsWith(".managed/")), expectedPayload);
+    const installedPayload = createPayloadInventory(destination).filter((entry) => !entry.path.startsWith(".managed/"));
     if (pathExists(receiptPath)) {
       const central = readJson(receiptPath, "Managed Dispatcher receipt");
       if (canonicalJson(central) !== canonicalJson(receipt)) fail("Managed Dispatcher receipt copies mismatch");
-    } else atomicWrite(receiptPath, receipt);
+      comparePayload(installedPayload, receipt.payload);
+    } else {
+      if (receipt.managerReleaseId !== selected.pair.managerReleaseId || receipt.platform !== selected.pair.platform
+        || canonicalJson(receipt.sourceArtifact) !== canonicalJson(selected.managerReceipt.sourceArtifact)) {
+        fail("Unreceipted Managed Dispatcher does not match the verified Manager Release");
+      }
+      comparePayload(receipt.payload, expectedPayload);
+      comparePayload(installedPayload, expectedPayload);
+      atomicWrite(receiptPath, receipt);
+    }
     return join(destination, "managed-dispatcher.mjs");
   }
   if (pathExists(receiptPath)) fail("Managed Dispatcher receipt exists without its owned payload");
@@ -1544,8 +1548,10 @@ export function enableManagedOwnership(dataRoot, options = {}) {
 
     const resolvedCommand = commandPath("pi", environment);
     if (resolvedCommand !== resolve(ownership.entrypoints.pi.path)) {
-      const selectedDirectory = resolvedCommand ? dirname(resolvedCommand) : "the currently selected command directory";
-      fail(`Managed Dispatcher is installed but current command resolution selects ${resolvedCommand || "no pi command"}. Put ${binDirectory} before ${selectedDirectory} in PATH, run \`hash -r\`, then rerun: pi-wait-for-user managed enable --bin-dir ${shellQuote(binDirectory)}`);
+      const pathRemediation = resolvedCommand
+        ? `Put ${binDirectory} before ${dirname(resolvedCommand)} in PATH`
+        : `Add ${binDirectory} to the front of PATH, for example: export PATH=${shellQuote(binDirectory)}:"$PATH"`;
+      fail(`Managed Dispatcher is installed but current command resolution selects ${resolvedCommand || "no pi command"}. ${pathRemediation}, run \`hash -r\`, then rerun: pi-wait-for-user managed enable --bin-dir ${shellQuote(binDirectory)}`);
     }
     return alreadyEnabled ? "already enabled" : "enabled";
   });
@@ -1568,13 +1574,13 @@ export function executeStockPi(dataRoot, args, { environment = process.env } = {
   }
   if (canonicalJson(current) !== canonicalJson(stock)) fail(`Stock Pi identity changed at ${stock.resolvedPath}`);
   console.error("Warning: Stock Pi cannot open downstream session files. Use it only for Stock Pi sessions.");
-  if (typeof process.execve === "function") process.execve(stock.resolvedPath, [stock.resolvedPath, ...args], environment);
-  const result = spawnSync(stock.resolvedPath, args, { stdio: "inherit", env: environment });
+  if (typeof process.execve === "function") process.execve(current.executablePath, [current.executablePath, ...args], environment);
+  const result = spawnSync(current.executablePath, args, { stdio: "inherit", env: environment });
   if (result.error) throw result.error;
   return result.status ?? 1;
 }
 
-export function disableManagedEntrypoint(dataRoot) {
+export function disableManagedCommandOwnership(dataRoot) {
   const paths = initializeLayout(dataRoot);
   const ownershipPath = join(paths.state, "entrypoints.json");
   if (!existsSync(ownershipPath)) return "already disabled";

@@ -16,7 +16,7 @@ import {
   cleanupManagedState,
   defaultManagedBinDirectory,
   defaultManagedDataRoot,
-  disableManagedEntrypoint,
+  disableManagedCommandOwnership,
   enableManagedOwnership,
   executeStockPi,
   installAndActivate,
@@ -124,7 +124,7 @@ try {
     const activation = recoverPrevious(dataRoot());
     console.log(`Recovered ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "disable") {
-    console.log(`Managed command ownership ${disableManagedEntrypoint(dataRoot())}.`);
+    console.log(`Command Ownership ${disableManagedCommandOwnership(dataRoot())}.`);
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "cleanup") {
     console.log(`Removed ${cleanupManagedState(dataRoot())} verified temporary path(s).`);
   } else if (args[0] === "managed" && args[1] === "stock" && args[2] === "--") {

@@ -865,6 +865,27 @@ test("Command Ownership publication interruption never claims pi before the Comp
   }
 });
 
+test("Command Ownership converges after Activation selects a newer Manager Release", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-manager-update-"));
+  const bin = mkdtempSync(join(tmpdir(), "managed-runtime-manager-update-bin-"));
+  const first = fixture();
+  const next = fixture({ releaseId: "pi-v0.81.1-patch.7", managerId: "manager-v2" });
+  try {
+    activate(dataRoot, first);
+    const environment = { PATH: `${bin}:/usr/bin:/bin` };
+    assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
+    activate(dataRoot, next);
+    const repeated = runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment);
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.match(repeated.stdout, /already enabled/);
+  } finally {
+    destroy(dataRoot);
+    destroy(bin);
+    destroy(first.directory);
+    destroy(next.directory);
+  }
+});
+
 test("managed enable records Stock Pi and publishes both command names to one Dispatcher", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-enable-"));
   const bin = mkdtempSync(join(tmpdir(), "managed-runtime-enable-bin-"));
@@ -984,6 +1005,7 @@ test("managed enable leaves a losing-PATH installation incomplete with exact she
     const absent = runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], { PATH: "/usr/bin:/bin" });
     assert.notEqual(absent.status, 0);
     assert.match(absent.stderr, /current command resolution selects no pi command/);
+    assert.match(absent.stderr, /export PATH='.*Managed Bin':"\$PATH"/);
 
     const converged = runManager(dataRoot, [
       "managed", "enable", "--bin-dir", bin,
