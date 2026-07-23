@@ -130,9 +130,9 @@ function executePi(args) {
   process.exitCode = result.status ?? 1;
 }
 
-function packageUpdate(selected) {
+function packageUpdate(selected, options = []) {
   console.log("Package update phase (newly active Pi):");
-  const { pi, piArgs } = piCommand(selected.releasePath, ["update", "--extensions"]);
+  const { pi, piArgs } = piCommand(selected.releasePath, ["update", "--extensions", ...options]);
   const result = spawnSync(pi, piArgs.slice(1), { stdio: "inherit", env: piEnvironment() });
   if (result.error) throw result.error;
   return result.status ?? 1;
@@ -176,18 +176,22 @@ function printManagedUpdate(result) {
   }
 }
 
-async function update(route) {
+async function update(args, route) {
   if (process.env.PI_OFFLINE) fail("Managed Update is unavailable while PI_OFFLINE is set");
   console.log("Managed Update phase:");
+  const packageOptions = args.filter((argument) => ["--approve", "--no-approve", "-a", "-na"].includes(argument));
   const result = await runManagedUpdate(dataRoot(), {
     all: route.all,
     checkpoint: interruptionCheckpoint(),
-    packagePhase: packageUpdate,
+    packagePhase: (selected) => packageUpdate(selected, packageOptions),
     managedPhaseComplete: printManagedUpdate,
   });
   if (route.all && result.partial) {
     const detail = result.packageError ? `: ${result.packageError}` : "";
-    console.error(`Managed Update activated successfully, but the package update phase failed with exit code ${result.packageExitCode}${detail}; the verified release remains active.`);
+    const managedOutcome = result.managed.kind === "activated"
+      ? "Managed Update activated successfully"
+      : `Managed Update completed as ${result.managed.kind} without activation`;
+    console.error(`${managedOutcome}, but the package update phase failed with exit code ${result.packageExitCode}${detail}; the verified release remains active.`);
   }
   process.exitCode = result.exitCode;
 }
@@ -224,7 +228,7 @@ try {
   } else {
     const route = classifyManagedUpdateArgs(args);
     if (route.type === "reject") fail("Unknown update syntax; refusing to delegate a possible Stock Pi self-update path");
-    if (route.type === "managed") await update(route);
+    if (route.type === "managed") await update(args.slice(1), route);
     else {
       if (args[0] !== "update") {
         try {

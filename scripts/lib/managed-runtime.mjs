@@ -227,11 +227,35 @@ function acquireLifecycleLock(dataRoot, operation) {
     if (error?.code !== "EEXIST") throw error;
     const active = readJson(paths.lock, "lifecycle lock");
     exactObject(active, "lifecycle lock", ["schemaVersion", "pid", "token", "operation", "startedAt"]);
-    if (Number.isSafeInteger(active.pid) && active.pid > 0 && processAlive(active.pid)) {
+    if (active.schemaVersion !== 1 || !Number.isSafeInteger(active.pid) || active.pid < 1) fail("Malformed lifecycle lock");
+    expectString(active.token, "lifecycle lock token");
+    expectString(active.operation, "lifecycle lock operation");
+    expectDate(active.startedAt, "lifecycle lock start date");
+    if (processAlive(active.pid)) {
       fail(`Managed lifecycle operation already active: ${String(active.operation)}`);
     }
+    const recoveryPath = join(paths.state, `lifecycle-recovery-${digestBytes(String(active.token))}.json`);
+    let recovery;
+    try { recovery = openSync(recoveryPath, "wx", 0o600); } catch (recoveryError) {
+      if (recoveryError?.code === "EEXIST") fail("Stale lifecycle lock recovery is already claimed; review the manager-owned recovery record");
+      throw recoveryError;
+    }
+    writeSync(recovery, serializeMetadata({
+      schemaVersion: 1,
+      type: "lifecycle-lock-recovery",
+      staleToken: active.token,
+      claimedByToken: token,
+      claimedAt: new Date().toISOString(),
+    }));
+    fsyncSync(recovery);
+    closeSync(recovery);
+    const current = readJson(paths.lock, "lifecycle lock");
+    if (current.token !== active.token) fail("Lifecycle lock changed during stale recovery");
     unlinkSync(paths.lock);
-    fd = openSync(paths.lock, "wx", 0o600);
+    try { fd = openSync(paths.lock, "wx", 0o600); } catch (replacementError) {
+      if (replacementError?.code === "EEXIST") return acquireLifecycleLock(dataRoot, operation);
+      throw replacementError;
+    }
   }
   writeSync(fd, serializeMetadata(lock));
   fsyncSync(fd);

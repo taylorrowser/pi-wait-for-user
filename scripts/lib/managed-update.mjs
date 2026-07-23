@@ -41,7 +41,7 @@ const startupThrottleMilliseconds = 24 * 60 * 60 * 1_000;
 const metadataLimit = 2 * 1024 * 1024;
 const idPattern = /^[a-z0-9][a-z0-9.-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
-const versionPattern = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+const versionPattern = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function fail(message) {
   throw new Error(message);
@@ -175,16 +175,29 @@ function writeFileStream(path, maximumSize) {
   });
 }
 
+function parseVersion(value) {
+  const match = value.match(versionPattern);
+  if (!match || match.slice(1, 4).some((part) => part.length > 1 && part.startsWith("0"))) return null;
+  const prerelease = match[4]?.split(".");
+  if (prerelease?.some((part) => /^\d+$/.test(part) && part.length > 1 && part.startsWith("0"))) return null;
+  return { core: match.slice(1, 4), prerelease };
+}
+
+function compareNumericIdentifiers(left, right) {
+  if (left.length !== right.length) return left.length - right.length;
+  return left === right ? 0 : left < right ? -1 : 1;
+}
+
 function compareVersions(left, right) {
-  const leftMatch = left.match(versionPattern);
-  const rightMatch = right.match(versionPattern);
-  if (!leftMatch || !rightMatch) return undefined;
-  for (let index = 1; index <= 3; index += 1) {
-    const difference = Number(leftMatch[index]) - Number(rightMatch[index]);
+  const leftVersion = parseVersion(left);
+  const rightVersion = parseVersion(right);
+  if (!leftVersion || !rightVersion) return undefined;
+  for (let index = 0; index < 3; index += 1) {
+    const difference = compareNumericIdentifiers(leftVersion.core[index], rightVersion.core[index]);
     if (difference !== 0) return difference;
   }
-  const leftPrerelease = leftMatch[4]?.split(".");
-  const rightPrerelease = rightMatch[4]?.split(".");
+  const leftPrerelease = leftVersion.prerelease;
+  const rightPrerelease = rightVersion.prerelease;
   if (!leftPrerelease || !rightPrerelease) return leftPrerelease ? -1 : rightPrerelease ? 1 : 0;
   const length = Math.max(leftPrerelease.length, rightPrerelease.length);
   for (let index = 0; index < length; index += 1) {
@@ -194,11 +207,15 @@ function compareVersions(left, right) {
     if (leftPart === rightPart) continue;
     const leftNumeric = /^\d+$/.test(leftPart);
     const rightNumeric = /^\d+$/.test(rightPart);
-    if (leftNumeric && rightNumeric) return Number(leftPart) - Number(rightPart);
+    if (leftNumeric && rightNumeric) return compareNumericIdentifiers(leftPart, rightPart);
     if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
-    return leftPart.localeCompare(rightPart);
+    return leftPart < rightPart ? -1 : 1;
   }
   return 0;
+}
+
+function validVersion(value) {
+  return typeof value === "string" && parseVersion(value) !== null;
 }
 
 function updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError, candidateCompatible) {
@@ -260,20 +277,20 @@ function validateStatus(status) {
     if (typeof id !== "string" || !idPattern.test(id)) fail("Malformed managed update status");
   }
   if (!Number.isSafeInteger(status.channel.sequence) || status.channel.sequence < 1
-    || !sha256Pattern.test(status.channel.manifestSha256) || !versionPattern.test(status.active.upstreamVersion)
-    || (status.upstream.observedVersion !== null && !versionPattern.test(status.upstream.observedVersion))
+    || !sha256Pattern.test(status.channel.manifestSha256) || !validVersion(status.active.upstreamVersion)
+    || (status.upstream.observedVersion !== null && !validVersion(status.upstream.observedVersion))
     || (status.upstream.error !== null && (typeof status.upstream.error !== "string" || status.upstream.error.length > 500))) {
     fail("Malformed managed update status");
   }
   if (status.compatibleUpdate !== null && (!hasExactKeys(status.compatibleUpdate, ["releaseId", "managerReleaseId", "upstreamVersion", "sequence"])
     || !idPattern.test(status.compatibleUpdate.releaseId) || !idPattern.test(status.compatibleUpdate.managerReleaseId)
-    || !versionPattern.test(status.compatibleUpdate.upstreamVersion)
+    || !validVersion(status.compatibleUpdate.upstreamVersion)
     || !Number.isSafeInteger(status.compatibleUpdate.sequence) || status.compatibleUpdate.sequence < 1)) {
     fail("Malformed managed update status");
   }
   if (status.patchLag !== null && (!hasExactKeys(status.patchLag, ["currentReleaseId", "currentUpstreamVersion", "observedUpstreamVersion"])
-    || !idPattern.test(status.patchLag.currentReleaseId) || !versionPattern.test(status.patchLag.currentUpstreamVersion)
-    || !versionPattern.test(status.patchLag.observedUpstreamVersion))) fail("Malformed managed update status");
+    || !idPattern.test(status.patchLag.currentReleaseId) || !validVersion(status.patchLag.currentUpstreamVersion)
+    || !validVersion(status.patchLag.observedUpstreamVersion))) fail("Malformed managed update status");
   return status;
 }
 
@@ -322,7 +339,7 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   let upstreamError;
   try {
     const latest = await transport.json(options.upstreamUrl || upstreamLatestVersionUrl, "upstream Pi latest version");
-    if (typeof latest?.version !== "string" || !versionPattern.test(latest.version.trim())) fail("Malformed upstream Pi latest-version response");
+    if (typeof latest?.version !== "string" || !validVersion(latest.version.trim())) fail("Malformed upstream Pi latest-version response");
     observedUpstreamVersion = latest.version.trim();
   } catch (error) {
     upstreamError = errorMessage(error);
@@ -336,6 +353,7 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   const status = updateStatus(context, selection, manifest, observedUpstreamVersion, upstreamError, candidateCompatible);
   status.checkedAt = now.toISOString();
   if (options.cache !== false) atomicWrite(paths(dataRoot).status, status);
+  if (!candidateChanged) await during("Update Hold cleanup", async () => clearExactUpdateHold(dataRoot, manifest.releaseId));
   const common = {
     active: status.active,
     channel: status.channel,
@@ -441,25 +459,29 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
         checkpoint: options.checkpoint,
         lifecycleLockHeld: true,
       }));
+      stage = "post-activation cleanup";
       clearExactUpdateHold(dataRoot, checked.candidate.releaseId);
       atomicWrite(paths(dataRoot).status, activatedStatus(checked, checked.candidate, options.now || new Date()));
       return { kind: "activated", active: checked.candidate, channel: checked.channel, activation };
     });
   } catch (error) {
-    recordManagedUpdateDiagnostic(dataRoot, failureStage(error, stage), error);
+    if (stage !== "verification and activation") {
+      recordManagedUpdateDiagnostic(dataRoot, failureStage(error, stage), error);
+    }
     throw error;
   }
 }
 
 export async function performManagedUpdate(dataRoot, options = {}) {
+  if (options.lifecycleLockHeld) return performManagedUpdateLocked(dataRoot, options);
   return withLifecycleLockAsync(dataRoot, "perform Managed Update", () => performManagedUpdateLocked(dataRoot, {
     ...options,
     lifecycleLockHeld: true,
   }));
 }
 
-export async function runManagedUpdate(dataRoot, options = {}) {
-  const managed = await performManagedUpdate(dataRoot, options);
+async function runManagedUpdateLocked(dataRoot, options) {
+  const managed = await performManagedUpdate(dataRoot, { ...options, lifecycleLockHeld: true });
   await options.managedPhaseComplete?.(managed);
   if (!options.all) return { managed, exitCode: 0, partial: false };
   const selected = validateActivePair(dataRoot);
@@ -480,6 +502,15 @@ export async function runManagedUpdate(dataRoot, options = {}) {
   };
 }
 
+export async function runManagedUpdate(dataRoot, options = {}) {
+  if (!options.all) {
+    const managed = await performManagedUpdate(dataRoot, options);
+    await options.managedPhaseComplete?.(managed);
+    return { managed, exitCode: 0, partial: false };
+  }
+  return withLifecycleLockAsync(dataRoot, "perform Managed Update --all", () => runManagedUpdateLocked(dataRoot, options));
+}
+
 function readUpdateHold(dataRoot) {
   const holdPath = paths(dataRoot).hold;
   if (!existsSync(holdPath)) return null;
@@ -489,13 +520,21 @@ function readUpdateHold(dataRoot) {
   return hold;
 }
 
+function statusMatchesContext(status, context) {
+  return status?.active.releaseId === context.active.releaseId
+    && status.active.managerReleaseId === context.active.managerReleaseId
+    && status.channel.sequence === context.accepted.channel.sequence
+    && status.channel.releaseId === context.accepted.channel.releaseId
+    && status.channel.manifestSha256 === context.accepted.channel.manifestSha256;
+}
+
 export function cachedManagedStartupNotice(dataRoot, options = {}) {
   const environment = options.environment || process.env;
   if (!options.interactive || environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE) return null;
   const status = readManagedUpdateStatus(dataRoot);
   if (!status) return null;
-  const active = readActivation(dataRoot).active;
-  if (status.active.releaseId !== active.downstreamReleaseId) return null;
+  const context = readManagedUpdateContext(dataRoot);
+  if (!statusMatchesContext(status, context)) return null;
   const hold = readUpdateHold(dataRoot);
   if (status.compatibleUpdate && hold?.releaseId !== status.compatibleUpdate.releaseId) {
     return `A compatible Downstream Release is available: ${status.compatibleUpdate.releaseId}. Run \`pi update\`.`;
@@ -518,8 +557,27 @@ export function claimManagedStartupCheck(dataRoot, options = {}) {
     const stat = lstatSync(selected.startupLock);
     if (stat.isSymbolicLink() || !stat.isFile()) fail("Startup check lock is foreign");
     if (now.getTime() - stat.mtimeMs <= 5 * 60 * 1_000) return false;
+    const recoveryPath = join(selected.state, `startup-check-recovery-${Math.floor(stat.mtimeMs)}.json`);
+    let recovery;
+    try { recovery = openSync(recoveryPath, "wx", 0o600); } catch (recoveryError) {
+      if (recoveryError?.code === "EEXIST") return false;
+      throw recoveryError;
+    }
+    writeSync(recovery, serializeMetadata({
+      schemaVersion: 1,
+      type: "startup-check-lock-recovery",
+      staleModifiedAt: new Date(stat.mtimeMs).toISOString(),
+      claimedAt: now.toISOString(),
+    }));
+    fsyncSync(recovery);
+    closeSync(recovery);
+    const current = lstatSync(selected.startupLock);
+    if (current.mtimeMs !== stat.mtimeMs || current.size !== stat.size) return false;
     unlinkSync(selected.startupLock);
-    lock = openSync(selected.startupLock, "wx", 0o600);
+    try { lock = openSync(selected.startupLock, "wx", 0o600); } catch (replacementError) {
+      if (replacementError?.code === "EEXIST") return false;
+      throw replacementError;
+    }
   }
   closeSync(lock);
   try {
@@ -555,7 +613,7 @@ export function formatManagedStatus(dataRoot) {
   const sessions = context.active.compatibility.sessions.identities.map((entry) => `${entry.id}@${entry.version}`).join(", ");
   const protocols = context.active.compatibility.sessions.readableCoreProtocolVersions.join(", ");
   const question = context.active.compatibility.questionTool;
-  const cacheMatches = status?.active.releaseId === context.active.releaseId;
+  const cacheMatches = statusMatchesContext(status, context);
   const channel = cacheMatches
     ? `${status.channel.sequence} (candidate ${status.channel.releaseId})`
     : `${context.accepted.channel.sequence} (candidate ${context.accepted.channel.releaseId}; cached check unavailable)`;

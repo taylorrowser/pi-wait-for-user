@@ -27,6 +27,7 @@ state/entrypoints.json             strict Command Ownership and Stock Pi Identit
 state/compatibility-entrypoint.json side-by-side compatibility ownership
 state/legacy-adoption.json         Legacy Downstream Installation adoption result and cleanup text
 state/lifecycle.lock               exclusive mutating-operation owner
+state/lifecycle-recovery-*.json    durable stale-owner recovery claims
 state/update-status.json           last safe authenticated Channel/upstream status
 state/startup-check.json           24-hour startup-check throttle
 state/update-hold.json             optional exact Downstream Release hold
@@ -74,7 +75,7 @@ The Manager Release classifies `pi update` before invoking Pi core:
 
 A package-phase failure after `--all` is an explicit nonzero partial result and never rolls back the verified Activation. Discovery, download, signature, digest, identity, smoke, and conformance failures retain the current Activation, remove receipt-scoped temporary payloads, and retain at most ten non-executable stage diagnostics. The highest authenticated trust version and Channel sequence are persisted as soon as the complete signed metadata chain is accepted, even if payload download later fails; equal retries must be envelope-identical and lower versions/sequences are rejected. Patch-only, Manager Release, Question Tool, and upstream-rebase changes are all selected by Channel sequence plus exact Downstream Release identity rather than by upstream semantic version.
 
-Explicit updates are synchronous. Normal launch instead renders only a matching authenticated cache and starts a detached refresh at most once per 24 hours. `PI_SKIP_VERSION_CHECK`, `PI_OFFLINE`, and `--offline` suppress refresh; Pi core always receives `PI_SKIP_VERSION_CHECK=1` so its upstream-only notice cannot conflict with managed status. Human notices are emitted only for interactive startup, never print, JSON, or RPC output.
+Explicit updates are synchronous. Normal launch instead renders only a cache whose active pair and Channel sequence/identity still match the authenticated Activation checkpoints, and starts a detached refresh at most once per 24 hours. `PI_SKIP_VERSION_CHECK`, `PI_OFFLINE`, and `--offline` suppress refresh; Pi core always receives `PI_SKIP_VERSION_CHECK=1` so its upstream-only notice cannot conflict with managed status. Human notices are emitted only for interactive startup, never print, JSON, or RPC output.
 
 `pi managed status` reports the active pair and platform; upstream basis; session, protocol, and Question Tool handler compatibility; recorded Stock Pi Identity and any observed divergence; Channel sequence/candidate; compatible Downstream Update; Patch Lag; and Update Hold. An exact hold suppresses only its passive compatible-update notice. Explicit update bypasses it and clears it after activation.
 
@@ -102,7 +103,7 @@ The default command fully verifies the active pair. `--all` also verifies the re
 
 ## Concurrency and cleanup
 
-One exclusive lifecycle lock records the active operation and serializes mutation. Launches do not take that lock. Each launch creates a uniquely named pair lease before reading payload files, transfers it to the Manager child process, and removes it after the child exits. Cleanup defers a leased pair and retries later.
+One exclusive lifecycle lock records the active operation and serializes mutation, including the entire managed-plus-package `--all` sequence. Atomic durable recovery claims ensure only one contender may remove a dead owner's stale lock. Launches do not take that lock. Each launch creates a uniquely named pair lease before reading payload files, transfers it to the Manager child process, and removes it after the child exits. Cleanup defers a leased pair and retries later.
 
 Staging and deletion use uniquely named `*.tmp-<uuid>` and `*.tombstone-<uuid>` directories with exact owner receipts. Cleanup ignores malformed, foreign, and symlink-substituted paths. Published payload deletion first validates both embedded and central receipts, then moves the payload through a receipt-scoped tombstone.
 
