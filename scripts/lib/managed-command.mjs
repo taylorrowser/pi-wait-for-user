@@ -3,6 +3,10 @@ import { resolve } from "node:path";
 
 export const shellHashRemediation = "Run `hash -r`, then confirm this shell with: command -v pi";
 
+export function enabledEnvironmentFlag(value) {
+  return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "yes";
+}
+
 export function parseManagedOptions(args, { booleanFlags = [] } = {}) {
   const values = new Map();
   while (args.length > 0) {

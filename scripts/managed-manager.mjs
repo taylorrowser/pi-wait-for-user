@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   classifyManagedUpdateArgs,
+  enabledEnvironmentFlag,
   legacyInstallationAdoptionMessages,
   managedActivationOptions,
   parseManagedOptions,
@@ -145,13 +146,16 @@ function interactiveLaunch(args) {
   ]);
   if (args.some((argument) => nonInteractiveFlags.has(argument))) return false;
   if (["install", "remove", "uninstall", "list", "config", "conformance"].includes(args[0])) return false;
-  const mode = args.indexOf("--mode");
-  return mode < 0 || !["json", "rpc"].includes(args[mode + 1]);
+  let effectiveMode;
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if (args[index] === "--mode" && ["text", "json", "rpc"].includes(args[index + 1])) effectiveMode = args[index + 1];
+  }
+  return !["json", "rpc"].includes(effectiveMode);
 }
 
 function beginStartupCheck(args) {
   const environment = process.env;
-  if (environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE || args.includes("--offline")) return;
+  if (environment.PI_SKIP_VERSION_CHECK || enabledEnvironmentFlag(environment.PI_OFFLINE) || args.includes("--offline")) return;
   const manager = process.env.PI_MANAGED_MANAGER_DIR
     ? join(process.env.PI_MANAGED_MANAGER_DIR, "package", "manager")
     : process.execPath;
@@ -182,7 +186,7 @@ function printManagedUpdate(result) {
 }
 
 async function update(args, route) {
-  if (process.env.PI_OFFLINE) fail("Managed Update is unavailable while PI_OFFLINE is set");
+  if (enabledEnvironmentFlag(process.env.PI_OFFLINE)) fail("Managed Update is unavailable while PI_OFFLINE is set");
   console.log("Managed Update phase:");
   const packageOptions = args.filter((argument) => ["--approve", "--no-approve", "-a", "-na"].includes(argument));
   const result = await runManagedUpdate(dataRoot(), {

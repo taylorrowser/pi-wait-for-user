@@ -1671,6 +1671,10 @@ test("cached startup status is throttled, isolated to interactive output, and re
     }
     writeFileSync(join(dataRoot, "state", "update-status.json"), serializeMetadata(cached));
     assert.match(cachedManagedStartupNotice(dataRoot, { interactive: true }), /compatible Downstream Release.*patch\.7/i);
+    assert.match(
+      cachedManagedStartupNotice(dataRoot, { interactive: true, environment: { PI_OFFLINE: "0" } }),
+      /compatible Downstream Release.*patch\.7/i,
+    );
     const updateHold = {
       schemaVersion: 1,
       type: "update-hold",
@@ -1997,6 +2001,9 @@ test("explicit CLI renders current, Patch Lag, ordered --all success, and nonzer
     const currentResult = runDispatcher(dataRoot, ["update"], currentEnvironment);
     assert.equal(currentResult.status, 0, currentResult.stderr);
     assert.match(currentResult.stdout, /Already current: pi-v0\.81\.1-patch\.6/);
+    const falseOffline = runDispatcher(dataRoot, ["update"], { ...currentEnvironment, PI_OFFLINE: "0" });
+    assert.equal(falseOffline.status, 0, falseOffline.stderr);
+    assert.match(falseOffline.stdout, /Already current: pi-v0\.81\.1-patch\.6/);
     const forced = runDispatcher(dataRoot, ["update", "--force"], currentEnvironment);
     assert.equal(forced.status, 0, forced.stderr);
     assert.match(forced.stdout, /Fully verified current Activation pi-v0\.81\.1-patch\.6/);
@@ -2067,6 +2074,12 @@ test("interactive startup notices do not pollute TTY metadata and package-comman
     const offline = runDispatcherInTty(dataRoot, ["--offline"]);
     assert.equal(offline.status, 0, `${offline.stdout}\n${offline.stderr}`);
     assert.doesNotMatch(offline.stdout, /compatible Downstream Release is available/);
+    const jsonLast = runDispatcherInTty(dataRoot, ["--mode", "text", "--mode", "json"]);
+    assert.equal(jsonLast.status, 0, `${jsonLast.stdout}\n${jsonLast.stderr}`);
+    assert.doesNotMatch(jsonLast.stdout, /compatible Downstream Release is available/);
+    const textLast = runDispatcherInTty(dataRoot, ["--mode", "json", "--mode", "text"]);
+    assert.equal(textLast.status, 0, `${textLast.stdout}\n${textLast.stderr}`);
+    assert.match(textLast.stdout, /compatible Downstream Release is available/);
 
     for (const args of [
       ["--help"], ["--version"], ["--list-models"], ["--export", "session.jsonl"], ["list"], ["conformance"],

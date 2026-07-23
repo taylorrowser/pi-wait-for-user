@@ -1388,7 +1388,7 @@ function livePairLeases(paths, pair) {
       live.push(path); // Ambiguous lease state must defer deletion.
       continue;
     }
-    if (processAlive(lease.pid)) live.push(path);
+    if (managedProcessStartIdentity(lease.pid) !== null) live.push(path);
     else unlinkSync(path);
   }
   return live;

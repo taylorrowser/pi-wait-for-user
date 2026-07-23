@@ -13,6 +13,7 @@ import { basename, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+import { enabledEnvironmentFlag } from "./managed-command.mjs";
 import {
   acceptManagedUpdateMetadata,
   assertLifecycleCapability,
@@ -529,7 +530,8 @@ function statusMatchesContext(status, context) {
 
 export function cachedManagedStartupNotice(dataRoot, options = {}) {
   const environment = options.environment || process.env;
-  if (!options.interactive || options.offline || environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE) return null;
+  if (!options.interactive || options.offline || environment.PI_SKIP_VERSION_CHECK
+    || enabledEnvironmentFlag(environment.PI_OFFLINE)) return null;
   const status = readManagedUpdateStatus(dataRoot);
   if (!status) return null;
   const context = readManagedStartupContext(dataRoot);
@@ -555,9 +557,40 @@ function validateStartupCheckLock(value) {
   return value;
 }
 
+function acquireStartupRecoveryOwner(dataRoot, staleToken, now) {
+  const name = `startup-check-recovery-${staleToken}.owner`;
+  const processStartIdentity = managedProcessStartIdentity(process.pid);
+  if (!processStartIdentity) fail("Cannot identify the startup-check recovery process");
+  const owner = {
+    schemaVersion: 1,
+    type: "startup-check-recovery-owner",
+    staleToken,
+    pid: process.pid,
+    processStartIdentity,
+    token: randomUUID(),
+    claimedAt: now.toISOString(),
+  };
+  const published = publishManagedStateFileExclusive(dataRoot, name, owner);
+  if (published.published) return { name, identity: published.identity };
+  const active = readManagedStateJson(dataRoot, name, "startup check recovery owner", { maximumSize: metadataLimit });
+  if (!hasExactKeys(active, ["schemaVersion", "type", "staleToken", "pid", "processStartIdentity", "token", "claimedAt"])
+    || active.schemaVersion !== 1 || active.type !== "startup-check-recovery-owner" || active.staleToken !== staleToken
+    || !Number.isSafeInteger(active.pid) || active.pid < 1
+    || typeof active.processStartIdentity !== "string" || !active.processStartIdentity
+    || typeof active.token !== "string" || !active.token || !validDate(active.claimedAt)) {
+    fail("Malformed startup check recovery owner");
+  }
+  if (managedProcessIdentityIsLive(active.pid, active.processStartIdentity)
+    && now.getTime() - Date.parse(active.claimedAt) <= 5 * 60 * 1_000) return null;
+  const path = join(managedStateDirectory(dataRoot), name);
+  const stat = lstatSync(path);
+  removeManagedStateFileIfOwned(dataRoot, name, { dev: stat.dev, ino: stat.ino });
+  return acquireStartupRecoveryOwner(dataRoot, staleToken, now);
+}
+
 function claimManagedStartupCheck(dataRoot, options = {}) {
   const environment = options.environment || process.env;
-  if (environment.PI_SKIP_VERSION_CHECK || environment.PI_OFFLINE || options.offline) return false;
+  if (environment.PI_SKIP_VERSION_CHECK || enabledEnvironmentFlag(environment.PI_OFFLINE) || options.offline) return false;
   const now = options.now || new Date();
   const selected = paths(dataRoot);
   const processStartIdentity = managedProcessStartIdentity(process.pid);
@@ -590,18 +623,25 @@ function claimManagedStartupCheck(dataRoot, options = {}) {
       const recovery = lstatSync(recoveryPath);
       if (current.dev !== recovery.dev || current.ino !== recovery.ino) fail("Startup check recovery record is foreign");
     }
-    options.checkpoint?.("startup-check-recovery-claimed");
-    const recovery = lstatSync(recoveryPath);
-    if (recovery.dev !== stat.dev || recovery.ino !== stat.ino
-      || !removeManagedStateFileIfOwned(dataRoot, "startup-check.lock", { dev: stat.dev, ino: stat.ino })) return false;
-    writeManagedStateJson(dataRoot, basename(recoveryPath), {
-      schemaVersion: 1,
-      type: "startup-check-lock-recovery",
-      staleToken: active.token,
-      claimedAt: now.toISOString(),
-    });
-    acquired = publishManagedStateFileExclusive(dataRoot, "startup-check.lock", lockRecord);
-    if (!acquired.published) return false;
+    const recoveryOwner = acquireStartupRecoveryOwner(dataRoot, active.token, now);
+    if (!recoveryOwner) return false;
+    try {
+      options.checkpoint?.("startup-check-recovery-claimed");
+      const recovery = lstatSync(recoveryPath);
+      if (!managedStateFileIsOwned(dataRoot, recoveryOwner.name, recoveryOwner.identity)
+        || recovery.dev !== stat.dev || recovery.ino !== stat.ino
+        || !removeManagedStateFileIfOwned(dataRoot, "startup-check.lock", { dev: stat.dev, ino: stat.ino })) return false;
+      writeManagedStateJson(dataRoot, basename(recoveryPath), {
+        schemaVersion: 1,
+        type: "startup-check-lock-recovery",
+        staleToken: active.token,
+        claimedAt: now.toISOString(),
+      });
+      acquired = publishManagedStateFileExclusive(dataRoot, "startup-check.lock", lockRecord);
+      if (!acquired.published) return false;
+    } finally {
+      removeManagedStateFileIfOwned(dataRoot, recoveryOwner.name, recoveryOwner.identity);
+    }
   }
   try {
     if (!managedStateFileIsOwned(dataRoot, "startup-check.lock", acquired.identity)) return false;
