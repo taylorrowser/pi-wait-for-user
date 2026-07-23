@@ -95,6 +95,7 @@ function fixture({ releaseId = "pi-v0.81.1-patch.6", managerId = "manager-v1", m
   mkdirSync(join(releasePayload, "pi-wait-for-user", "question-tool", "extensions"), { recursive: true });
   cpSync(dispatcher, join(managerPayload, "package", "scripts", "managed-dispatcher.mjs"));
   cpSync(managerCli, join(managerPayload, "package", "scripts", "managed-manager.mjs"));
+  cpSync(join(repositoryRoot, "scripts", "lib", "managed-command.mjs"), join(managerPayload, "package", "scripts", "lib", "managed-command.mjs"));
   cpSync(join(repositoryRoot, "scripts", "lib", "managed-runtime.mjs"), join(managerPayload, "package", "scripts", "lib", "managed-runtime.mjs"));
   cpSync(join(repositoryRoot, "scripts", "lib", "release-metadata.mjs"), join(managerPayload, "package", "scripts", "lib", "release-metadata.mjs"));
 
@@ -237,18 +238,19 @@ function activate(dataRoot, candidate, options = {}) {
   });
 }
 
-function runDispatcher(dataRoot, args, environment = {}) {
-  return spawnSync(process.execPath, [dispatcher, ...args], {
+function runManagedCli(executable, dataRoot, args, environment = {}) {
+  return spawnSync(process.execPath, [executable, ...args], {
     encoding: "utf8",
     env: { ...process.env, PI_MANAGED_DATA_ROOT: dataRoot, PI_MANAGED_PLATFORM: "linux-x64", ...environment },
   });
 }
 
+function runDispatcher(dataRoot, args, environment = {}) {
+  return runManagedCli(dispatcher, dataRoot, args, environment);
+}
+
 function runManager(dataRoot, args, environment = {}) {
-  return spawnSync(process.execPath, [managerCli, ...args], {
-    encoding: "utf8",
-    env: { ...process.env, PI_MANAGED_DATA_ROOT: dataRoot, PI_MANAGED_PLATFORM: "linux-x64", ...environment },
-  });
+  return runManagedCli(managerCli, dataRoot, args, environment);
 }
 
 test("one atomic Activation selects an immutable compatible pair and dispatches Pi through its Question Tool", () => {
@@ -709,12 +711,17 @@ test("installer claims pi only with explicit --manage-pi", () => {
   try {
     const sideBySideRoot = join(root, "side-by-side-data");
     const sideBySideBin = join(root, "side-by-side-bin");
+    const legacy = join(sideBySideRoot, "releases", "pi-v0.81.1-patch.6");
+    mkdirSync(dirname(legacy), { recursive: true });
+    cpSync(join(candidate.directory, "release-payload", "pi-wait-for-user"), legacy, { recursive: true });
     const sideBySide = spawnSync(process.execPath, [managedInstaller,
       ...common, "--data-root", sideBySideRoot, "--bin-dir", sideBySideBin,
     ], { encoding: "utf8", env: { ...process.env, PATH: `${sideBySideBin}:${dirname(process.execPath)}:/usr/bin:/bin` } });
     assert.equal(sideBySide.status, 0, sideBySide.stderr);
     assert.equal(existsSync(join(sideBySideBin, "pi")), false);
     assert.equal(existsSync(join(sideBySideBin, "pi-wait-for-user")), true);
+    assert.match(sideBySide.stdout, /Adopted verified legacy Downstream Release/);
+    assert.match(sideBySide.stdout, /remove the legacy directory manually/);
 
     const managedRoot = join(root, "managed-data");
     const managedBin = join(root, "managed-bin");
@@ -724,6 +731,18 @@ test("installer claims pi only with explicit --manage-pi", () => {
     assert.equal(managed.status, 0, managed.stderr);
     assert.equal(existsSync(join(managedBin, "pi")), true);
     assert.equal(existsSync(join(managedBin, "pi-wait-for-user")), true);
+
+    const collisionRoot = join(root, "collision-data");
+    const collisionBin = join(root, "collision-bin");
+    mkdirSync(collisionBin);
+    writeFileSync(join(collisionBin, "pi"), "foreign\n");
+    const collided = spawnSync(process.execPath, [managedInstaller,
+      "--manage-pi", ...common, "--data-root", collisionRoot, "--bin-dir", collisionBin,
+    ], { encoding: "utf8", env: { ...process.env, PATH: `${collisionBin}:${dirname(process.execPath)}:/usr/bin:/bin` } });
+    assert.notEqual(collided.status, 0);
+    assert.equal(readFileSync(join(collisionBin, "pi"), "utf8"), "foreign\n");
+    assert.equal(existsSync(join(collisionBin, "pi-wait-for-user")), false);
+    assert.equal(existsSync(join(collisionRoot, "state", "activation.json")), false);
   } finally {
     destroy(root);
     destroy(candidate.directory);

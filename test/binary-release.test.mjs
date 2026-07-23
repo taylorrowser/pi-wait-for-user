@@ -54,6 +54,8 @@ test("the recommended bootstrap selects a platform binary without Git, npm, or N
   assert.match(bootstrap, /pi-wait-for-user-\$\{platform\}\.tar\.gz/);
   assert.match(bootstrap, /uname -s/);
   assert.match(bootstrap, /uname -m/);
+  assert.match(bootstrap, /"\$action" = "--manage-pi"/);
+  assert.match(bootstrap, /--release-archive "\$temporary\/\$asset"/);
 });
 
 test("the bootstrap verifies its downloaded platform archive before installation", () => {
@@ -118,6 +120,8 @@ test("a binary release loads the clearly named Question Tool without a source ch
     join(fixture.installation, "question-tool"),
     "--version",
   ]);
+  assert.equal(existsSync(join(fixture.installation, "managed-bootstrap", "managed-installer.mjs")), true);
+  assert.match(readFileSync(join(fixture.installation, "install.sh"), "utf8"), /managed-installer\.mjs.*--manage-pi/);
   const questionManifest = readFileSync(join(fixture.installation, "question-tool", "package.json"), "utf8");
   assert.equal(JSON.parse(questionManifest).version, expectedQuestionVersion);
   assert.match(questionManifest, /\.\/extensions\/question-tool\.ts/);

@@ -7,6 +7,14 @@ payload_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 action=${1:-install}
 if [ "$#" -gt 0 ]; then shift; fi
 
+if [ "$action" = "--manage-pi" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    echo "pi-wait-for-user: managed installation requires Node.js 22.19 or newer" >&2
+    exit 1
+  fi
+  exec node "$payload_dir/managed-bootstrap/managed-installer.mjs" --manage-pi "$@"
+fi
+
 case "$(uname -s)" in
   Darwin) data_root="$HOME/Library/Application Support" ;;
   Linux) data_root="${XDG_DATA_HOME:-$HOME/.local/share}" ;;
@@ -19,7 +27,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --install-dir) install_dir=$2; shift 2 ;;
     --bin-dir) bin_dir=$2; shift 2 ;;
-    *) echo "Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH]" >&2; exit 1 ;;
+    *) echo "Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH] | install.sh --manage-pi <signed managed-install options>" >&2; exit 1 ;;
   esac
 done
 
@@ -108,7 +116,7 @@ case "$action" in
     echo "Removed $release_id. Pi settings and sessions were left unchanged."
     ;;
   *)
-    echo "Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH]" >&2
+    echo "Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH] | install.sh --manage-pi <signed managed-install options>" >&2
     exit 1
     ;;
 esac

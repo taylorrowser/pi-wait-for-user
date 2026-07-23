@@ -1,26 +1,25 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import {
+  legacyMigrationMessages,
+  nativeManagedPlatform,
+  parseRootKeyOption,
+  readJsonFile,
+} from "./lib/managed-command.mjs";
 import {
   defaultManagedBinDirectory,
   defaultManagedDataRoot,
   enableManagedOwnership,
   installAndActivate,
   installManagedCompatibility,
+  preflightManagedCommandOwnership,
+  readLegacyMigration,
 } from "./lib/managed-runtime.mjs";
 
 function fail(message) {
   throw new Error(message);
-}
-
-function nativePlatform() {
-  const os = process.platform === "darwin" ? "darwin" : process.platform;
-  const architecture = process.arch === "x64" ? "x64" : process.arch;
-  const platform = `${os}-${architecture}`;
-  if (!/^(?:darwin|linux)-(?:arm64|x64)$/.test(platform)) fail(`Unsupported managed platform: ${platform}`);
-  return platform;
 }
 
 function parseArguments(args) {
@@ -56,27 +55,18 @@ function required(values, flag) {
   return value;
 }
 
-function readJson(path) {
-  return JSON.parse(readFileSync(resolve(path), "utf8"));
-}
-
-function rootKey(value) {
-  const separator = value.indexOf("=");
-  if (separator < 1 || separator === value.length - 1) fail("--root-key must be KEY_ID=PUBLIC_KEY_PATH");
-  return [value.slice(0, separator), readFileSync(resolve(value.slice(separator + 1)), "utf8")];
-}
-
 try {
   const { values, managePi } = parseArguments(process.argv.slice(2));
   const dataRoot = resolve(values.get("--data-root") || defaultManagedDataRoot());
   const binDirectory = resolve(values.get("--bin-dir") || defaultManagedBinDirectory());
+  preflightManagedCommandOwnership(dataRoot, { binDirectory, managePi });
   const activation = installAndActivate({
     dataRoot,
-    platform: values.get("--platform") || nativePlatform(),
-    trustEnvelope: readJson(required(values, "--trust")),
-    channelEnvelope: readJson(required(values, "--channel")),
-    manifestEnvelope: readJson(required(values, "--manifest")),
-    rootKeys: new Map([rootKey(required(values, "--root-key"))]),
+    platform: values.get("--platform") || nativeManagedPlatform(),
+    trustEnvelope: readJsonFile(required(values, "--trust")),
+    channelEnvelope: readJsonFile(required(values, "--channel")),
+    manifestEnvelope: readJsonFile(required(values, "--manifest")),
+    rootKeys: new Map([parseRootKeyOption(required(values, "--root-key"))]),
     managerArchive: resolve(required(values, "--manager-archive")),
     releaseArchive: resolve(required(values, "--release-archive")),
     now: values.has("--now") ? new Date(values.get("--now")) : new Date(),
@@ -84,6 +74,7 @@ try {
   installManagedCompatibility(dataRoot, { binDirectory });
   if (managePi) enableManagedOwnership(dataRoot, { binDirectory });
   console.log(`${managePi ? "Managed" : "Side-by-side"} installation ready: ${activation.active.downstreamReleaseId}.`);
+  for (const message of legacyMigrationMessages(readLegacyMigration(dataRoot))) console.log(message);
 } catch (error) {
   console.error(`managed-installer: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;

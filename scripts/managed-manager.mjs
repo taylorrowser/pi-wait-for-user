@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  legacyMigrationMessages,
+  nativeManagedPlatform,
+  parseRootKeyOption,
+  readJsonFile,
+} from "./lib/managed-command.mjs";
 import {
   cleanupManagedState,
   defaultManagedBinDirectory,
@@ -25,12 +30,8 @@ function fail(message) {
   throw new Error(message);
 }
 
-function readJson(path) {
-  return JSON.parse(readFileSync(resolve(path), "utf8"));
-}
-
 function packageIdentity() {
-  const manifest = readJson(join(projectRoot, "package.json"));
+  const manifest = readJsonFile(join(projectRoot, "package.json"));
   const id = manifest.piWaitForUser?.managerReleaseId;
   if (typeof id !== "string") fail("Manager Release identity is missing from package metadata");
   return id;
@@ -39,14 +40,6 @@ function packageIdentity() {
 function dataRoot() {
   return process.env.PI_MANAGED_DATA_ROOT || defaultManagedDataRoot();
 }
-function nativePlatform() {
-  const os = process.platform === "darwin" ? "darwin" : process.platform;
-  const architecture = process.arch === "x64" ? "x64" : process.arch;
-  const platform = `${os}-${architecture}`;
-  if (!/^(?:darwin|linux)-(?:arm64|x64)$/.test(platform)) fail(`Unsupported managed platform: ${platform}`);
-  return platform;
-}
-
 function options(args, booleans = []) {
   const values = new Map();
   while (args.length > 0) {
@@ -68,12 +61,6 @@ function required(values, flag) {
   return value;
 }
 
-function parseRootKey(value) {
-  const separator = value.indexOf("=");
-  if (separator < 1 || separator === value.length - 1) fail("--root-key must be KEY_ID=PUBLIC_KEY_PATH");
-  return [value.slice(0, separator), readFileSync(resolve(value.slice(separator + 1)), "utf8")];
-}
-
 function activate(args) {
   const values = options(args);
   const allowed = new Set(["--data-root", "--platform", "--trust", "--channel", "--manifest", "--root-key", "--manager-archive", "--release-archive", "--now"]);
@@ -81,11 +68,11 @@ function activate(args) {
   const selectedDataRoot = values.get("--data-root") || dataRoot();
   const activation = installAndActivate({
     dataRoot: selectedDataRoot,
-    platform: values.get("--platform") || nativePlatform(),
-    trustEnvelope: readJson(required(values, "--trust")),
-    channelEnvelope: readJson(required(values, "--channel")),
-    manifestEnvelope: readJson(required(values, "--manifest")),
-    rootKeys: new Map([parseRootKey(required(values, "--root-key"))]),
+    platform: values.get("--platform") || nativeManagedPlatform(),
+    trustEnvelope: readJsonFile(required(values, "--trust")),
+    channelEnvelope: readJsonFile(required(values, "--channel")),
+    manifestEnvelope: readJsonFile(required(values, "--manifest")),
+    rootKeys: new Map([parseRootKeyOption(required(values, "--root-key"))]),
     managerArchive: resolve(required(values, "--manager-archive")),
     releaseArchive: resolve(required(values, "--release-archive")),
     now: values.has("--now") ? new Date(values.get("--now")) : new Date(),
@@ -147,12 +134,7 @@ try {
   } else if (args[0] === "managed" && args[1] === "activate") {
     const { activation, migration } = activate(args.slice(2));
     console.log(`Activated ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
-    if (migration) {
-      console.log(migration.disposition === "adopted-after-signed-verification"
-        ? `Adopted verified legacy Downstream Release from ${migration.legacyPath}.`
-        : `Legacy Downstream Release was not signed-payload identical and was left untouched at ${migration.legacyPath}.`);
-      console.log(migration.cleanup);
-    }
+    for (const message of legacyMigrationMessages(migration)) console.log(message);
   } else if (args[0] === "managed" && args[1] === "install-compatibility") {
     installCompatibility(args.slice(2));
   } else if (args[0] === "managed" && args[1] === "enable") {

@@ -1155,8 +1155,7 @@ export function removeInstalledPair(dataRoot, pair) {
 }
 
 const ownershipKeys = [
-  "schemaVersion", "type", "binDirectory", "dispatcher", "entrypoints", "stock", "managerReleaseId",
-  "downstreamReleaseId", "platform", "manifestSha256", "createdAt",
+  "schemaVersion", "type", "binDirectory", "dispatcher", "entrypoints", "stock", "createdFrom", "createdAt",
 ];
 const stockKeys = ["resolvedPath", "executablePath", "sha256", "size", "version"];
 
@@ -1197,10 +1196,7 @@ export function readManagedOwnership(dataRoot) {
   exactObject(ownership, "managed entrypoint receipt", ownershipKeys);
   if (ownership.schemaVersion !== 1 || ownership.type !== "managed-command-ownership") fail("Malformed managed entrypoint receipt");
   expectString(ownership.binDirectory, "managed bin directory");
-  ensureIdentifier(ownership.managerReleaseId, "ownership Manager Release ID");
-  ensureIdentifier(ownership.downstreamReleaseId, "ownership Downstream Release ID");
-  ensurePlatform(ownership.platform);
-  expectString(ownership.manifestSha256, "ownership manifest digest", sha256Pattern);
+  validatePairShape(ownership.createdFrom, "ownership creation pair");
   exactObject(ownership.dispatcher, "Managed Dispatcher identity", ["path", "sha256", "size"]);
   expectString(ownership.dispatcher.path, "Managed Dispatcher path");
   expectString(ownership.dispatcher.sha256, "Managed Dispatcher digest", sha256Pattern);
@@ -1273,13 +1269,10 @@ function compatibilityReceiptPath(paths) {
 function readCompatibilityEntrypoint(paths) {
   const receipt = readJson(compatibilityReceiptPath(paths), "managed compatibility entrypoint receipt");
   exactObject(receipt, "managed compatibility entrypoint receipt", [
-    "schemaVersion", "type", "path", "target", "managerReleaseId", "downstreamReleaseId", "platform", "manifestSha256", "createdAt",
+    "schemaVersion", "type", "path", "target", "createdFrom", "createdAt",
   ]);
   if (receipt.schemaVersion !== 1 || receipt.type !== "managed-compatibility-entrypoint") fail("Malformed managed compatibility entrypoint receipt");
-  ensureIdentifier(receipt.managerReleaseId, "compatibility ownership Manager Release ID");
-  ensureIdentifier(receipt.downstreamReleaseId, "compatibility ownership Downstream Release ID");
-  ensurePlatform(receipt.platform);
-  expectString(receipt.manifestSha256, "compatibility ownership manifest digest", sha256Pattern);
+  validatePairShape(receipt.createdFrom, "compatibility ownership creation pair");
   expectDate(receipt.createdAt, "compatibility ownership creation date");
   return validateEntrypoint({ path: receipt.path, target: receipt.target }, "managed compatibility entrypoint");
 }
@@ -1294,6 +1287,35 @@ function dispatcherIdentity(path) {
 function assertDispatcherIdentity(dispatcher) {
   const found = dispatcherIdentity(dispatcher.path);
   if (found.sha256 !== dispatcher.sha256 || found.size !== dispatcher.size) fail("Managed Dispatcher identity changed");
+}
+
+export function preflightManagedCommandOwnership(dataRoot, options = {}) {
+  const environment = options.environment || process.env;
+  const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
+  if (pathExists(binDirectory) && (lstatSync(binDirectory).isSymbolicLink() || !lstatSync(binDirectory).isDirectory())) {
+    fail(`Managed bin directory is foreign: ${binDirectory}`);
+  }
+  const paths = layout(dataRoot);
+  const compatibilityPath = join(binDirectory, "pi-wait-for-user");
+  if (pathExists(compatibilityPath)) {
+    if (!pathExists(compatibilityReceiptPath(paths))) fail(`Unowned foreign command collision: ${compatibilityPath}`);
+    const compatibility = readCompatibilityEntrypoint(paths);
+    if (resolve(compatibility.path) !== compatibilityPath || !entrypointMatches(compatibility)) {
+      fail(`Managed compatibility entrypoint ownership mismatch: ${compatibilityPath}`);
+    }
+  }
+  if (options.managePi) {
+    const piPath = join(binDirectory, "pi");
+    if (pathExists(piPath)) {
+      const ownershipPath = join(paths.state, "entrypoints.json");
+      if (!pathExists(ownershipPath)) fail(`Unowned foreign command collision: ${piPath}`);
+      const ownership = readManagedOwnership(dataRoot);
+      if (resolve(ownership.entrypoints.pi.path) !== piPath || !entrypointMatches(ownership.entrypoints.pi)) {
+        fail(`Managed pi entrypoint ownership mismatch: ${piPath}`);
+      }
+    }
+  }
+  return { binDirectory };
 }
 
 export function installManagedCompatibility(dataRoot, options = {}) {
@@ -1328,10 +1350,7 @@ export function installManagedCompatibility(dataRoot, options = {}) {
         schemaVersion: 1,
         type: "managed-compatibility-entrypoint",
         ...expected,
-        managerReleaseId: selected.pair.managerReleaseId,
-        downstreamReleaseId: selected.pair.downstreamReleaseId,
-        platform: selected.pair.platform,
-        manifestSha256: selected.pair.manifestSha256,
+        createdFrom: selected.pair,
         createdAt: new Date().toISOString(),
       });
     }
@@ -1392,10 +1411,7 @@ export function enableManagedOwnership(dataRoot, options = {}) {
         dispatcher,
         entrypoints: pendingOwnership.entrypoints,
         stock: pendingOwnership.stock,
-        managerReleaseId: selected.pair.managerReleaseId,
-        downstreamReleaseId: selected.pair.downstreamReleaseId,
-        platform: selected.pair.platform,
-        manifestSha256: selected.pair.manifestSha256,
+        createdFrom: selected.pair,
         createdAt: new Date().toISOString(),
       };
       mkdir(binDirectory);
