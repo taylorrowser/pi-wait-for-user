@@ -133,6 +133,7 @@ function rollback(args) {
   });
   if (result.kind === "rolled-back") {
     console.log(`Rolled back to ${result.activation.active.managerReleaseId} + ${result.activation.active.downstreamReleaseId}; Update Hold recorded for ${result.heldReleaseId}.`);
+    for (const issue of result.cleanupIssues) console.error(`Post-rollback cleanup is deferred: ${issue}`);
   } else if (result.kind === "already-active") {
     console.log(`Downstream Release ${result.activation.active.downstreamReleaseId} is already active.`);
   } else console.log("No previous local Activation is available; nothing changed.");

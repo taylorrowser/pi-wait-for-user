@@ -1324,6 +1324,22 @@ test("managed roots use platform-native data locations and ~/.local/bin by defau
   assert.equal(defaultManagedBinDirectory({ HOME: "/home/example" }), "/home/example/.local/bin");
 });
 
+test("Managed Installation roots cannot overlap shared Pi data", () => {
+  const home = mkdtempSync(join(tmpdir(), "managed-runtime-shared-root-"));
+  const shared = join(home, ".pi", "agent");
+  try {
+    mkdirSync(shared, { recursive: true });
+    writeFileSync(join(shared, "settings.json"), "preserve\n");
+    assert.throws(
+      () => uninstallManagedInstallation(shared, { environment: { HOME: home, PATH: "/usr/bin:/bin" } }),
+      /overlaps shared Pi data/,
+    );
+    assert.equal(readFileSync(join(shared, "settings.json"), "utf8"), "preserve\n");
+  } finally {
+    destroy(home);
+  }
+});
+
 test("Command Ownership refuses foreign command collisions without changing either target", () => {
   for (const command of ["pi", "pi-wait-for-user"]) {
     const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-collision-"));

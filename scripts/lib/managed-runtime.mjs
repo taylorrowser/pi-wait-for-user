@@ -41,6 +41,7 @@ import {
 const idPattern = /^[a-z0-9][a-z0-9.-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const semverPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const supportedPlatforms = new Set(["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]);
 const rootKeyProvenanceType = Object.freeze({ callerSelected: "caller-selected", installerPinned: "installer-pinned" });
 const managedDiagnosticLimit = 10;
@@ -284,7 +285,19 @@ export function removeManagedStateFileIfOwned(dataRoot, name, identity) {
   }
 }
 
+function assertOutsideSharedPiData(dataRoot, environment = process.env) {
+  const root = resolve(dataRoot);
+  const sharedRoots = [
+    environment.HOME && join(environment.HOME, ".pi", "agent"),
+    environment.PI_CODING_AGENT_DIR,
+  ].filter(Boolean).map((path) => resolve(path));
+  if (sharedRoots.some((shared) => root === shared || root.startsWith(`${shared}${sep}`) || shared.startsWith(`${root}${sep}`))) {
+    fail(`Managed data root overlaps shared Pi data: ${root}`);
+  }
+}
+
 function initializeLayout(dataRoot) {
+  assertOutsideSharedPiData(dataRoot);
   const paths = layout(dataRoot);
   for (const path of [paths.root, paths.state, paths.managers, paths.releases, paths.receipts, paths.artifacts, paths.leases, paths.temporary, paths.diagnostics]) {
     ensureManagedDirectory(path);
@@ -1669,14 +1682,22 @@ export function rollbackManagedInstallation(dataRoot, options = {}) {
     options.checkpoint?.("before-rollback-switch");
     atomicWrite(paths.activation, rolledBack);
     options.checkpoint?.("rollback-activation-committed");
+    const cleanupIssues = [];
     try { unlinkSync(paths.rollback); } catch (error) {
+      cleanupIssues.push(`transaction retirement: ${error instanceof Error ? error.message : String(error)}`);
       recordManagedUpdateDiagnostic(dataRoot, "rollback transaction retirement", error);
     }
     options.checkpoint?.("after-rollback-switch");
     try { pruneInstalledPairsLocked(dataRoot); } catch (error) {
+      cleanupIssues.push(`retention: ${error instanceof Error ? error.message : String(error)}`);
       recordManagedUpdateDiagnostic(dataRoot, "post-rollback retention", error);
     }
-    return { kind: "rolled-back", activation: rolledBack, heldReleaseId: current.active.downstreamReleaseId };
+    return {
+      kind: "rolled-back",
+      activation: rolledBack,
+      heldReleaseId: current.active.downstreamReleaseId,
+      cleanupIssues,
+    };
   });
 }
 
@@ -1746,7 +1767,8 @@ function pairLeaseDirectory(paths, pair) {
 function livePairLeases(paths, pair, { removeStale = true } = {}) {
   const directory = pairLeaseDirectory(paths, pair);
   if (!existsSync(directory)) return [];
-  if (lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()) return [directory];
+  if (lstatSync(directory).isSymbolicLink() || !lstatSync(directory).isDirectory()) fail("Pair lease directory is foreign");
+  validatePairLeaseDirectory(paths, pair);
   const live = [];
   for (const name of readdirSync(directory)) {
     const path = join(directory, name);
@@ -1866,7 +1888,7 @@ function safeTemporaryOwner(path) {
         ? sourcePath !== join(managedRoot, "dispatcher")
         : dirname(sourcePath) !== expectedParent)) return false;
       return owner.schemaVersion === 1 && resolve(owner.ownedPath) === resolve(path) && uuidPattern.test(owner.token)
-        && basename(path).endsWith(owner.token);
+        && basename(path) === `${owner.scope.kind}.tombstone-${owner.token}`;
     }
     exactObject(owner, "temporary receipt", ["schemaVersion", "type", "ownedPath", "token"]);
     return owner.schemaVersion === 1 && owner.type === "managed-temporary" && resolve(owner.ownedPath) === resolve(path)
@@ -1947,6 +1969,7 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
     writePendingPairs(paths, [...readPendingPairs(paths), pair]);
     return "deferred";
   }
+  if (mode === "retention") writePendingPairs(paths, [...readPendingPairs(paths), pair]);
   const releasePath = join(paths.releases, pair.downstreamReleaseId);
   const centralReleaseReceipt = ensureNoSymlinkPath(
     paths.receipts,
@@ -2240,6 +2263,7 @@ function requireOwnedCompatibility(paths, expected, { allowMissing = false } = {
 
 export function preflightManagedCommandOwnership(dataRoot, options = {}) {
   const environment = options.environment || process.env;
+  assertOutsideSharedPiData(dataRoot, environment);
   const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
   validateBinDirectory(binDirectory);
   const paths = layout(dataRoot);
@@ -2247,18 +2271,18 @@ export function preflightManagedCommandOwnership(dataRoot, options = {}) {
     path: join(binDirectory, "pi-wait-for-user"),
     target: join(paths.root, "dispatcher", "managed-dispatcher.mjs"),
   };
-  if (pathExists(expectedCompatibility.path)) requireOwnedCompatibility(paths, expectedCompatibility);
-  if (options.managePi) {
-    const piPath = join(binDirectory, "pi");
-    if (pathExists(piPath)) {
-      const ownershipPath = join(paths.state, "entrypoints.json");
-      if (!pathExists(ownershipPath)) fail(`Unowned foreign command collision: ${piPath}`);
-      const ownership = readManagedOwnership(dataRoot);
-      if (resolve(ownership.entrypoints.pi.path) !== piPath || !entrypointMatches(ownership.entrypoints.pi)) {
-        fail(`Command Ownership pi entrypoint mismatch: ${piPath}`);
-      }
+  if (pathExists(compatibilityReceiptPath(paths))) {
+    requireOwnedCompatibility(paths, expectedCompatibility, { allowMissing: true });
+  } else if (pathExists(expectedCompatibility.path)) fail(`Unowned foreign command collision: ${expectedCompatibility.path}`);
+  const piPath = join(binDirectory, "pi");
+  const ownershipPath = join(paths.state, "entrypoints.json");
+  if (pathExists(ownershipPath)) {
+    const ownership = readManagedOwnership(dataRoot);
+    if (resolve(ownership.entrypoints.pi.path) !== piPath
+      || (pathExists(piPath) && !entrypointMatches(ownership.entrypoints.pi))) {
+      fail(`Command Ownership pi entrypoint mismatch: ${piPath}`);
     }
-  }
+  } else if (options.managePi && pathExists(piPath)) fail(`Unowned foreign command collision: ${piPath}`);
   return { binDirectory };
 }
 
@@ -2514,7 +2538,7 @@ function writeUninstallPending(paths, pairs, createdAt = new Date().toISOString(
   atomicWrite(paths.uninstallPending, { schemaVersion: 1, type: "pending-uninstall", pairs, createdAt });
 }
 
-function validateUninstallLeaseDirectory(paths, pair) {
+function validatePairLeaseDirectory(paths, pair) {
   const directory = pairLeaseDirectory(paths, pair);
   for (const name of readdirSync(directory)) {
     const path = ensureNoSymlinkPath(directory, join(directory, name), "Pair lease path");
@@ -2545,7 +2569,6 @@ function validateUninstallReceiptsAndLeases(paths, pairs) {
     if (!lstatSync(directory).isDirectory()) fail(`Foreign pair lease path: ${name}`);
     const pair = pairDirectories.get(name);
     if (!pair) fail(`Foreign pair lease path: ${name}`);
-    validateUninstallLeaseDirectory(paths, pair);
     livePairLeases(paths, pair, { removeStale: false });
   }
 }
@@ -2560,25 +2583,31 @@ function validateUninstallUpdateStatus(value) {
   ensureIdentifier(value.active.releaseId, "managed update active release ID");
   ensureIdentifier(value.active.managerReleaseId, "managed update active Manager Release ID");
   ensureIdentifier(value.channel.releaseId, "managed update Channel release ID");
-  expectString(value.active.upstreamVersion, "managed update upstream version");
+  expectString(value.active.upstreamVersion, "managed update upstream version", semverPattern);
   expectString(value.active.manifestSha256, "managed update active manifest digest", sha256Pattern);
   expectString(value.channel.manifestSha256, "managed update Channel manifest digest", sha256Pattern);
   if (!Number.isSafeInteger(value.channel.sequence) || value.channel.sequence < 1
-    || (value.upstream.observedVersion !== null && typeof value.upstream.observedVersion !== "string")
-    || (value.upstream.error !== null && typeof value.upstream.error !== "string")) fail("Malformed managed update status");
+    || (value.upstream.observedVersion !== null && (typeof value.upstream.observedVersion !== "string" || !semverPattern.test(value.upstream.observedVersion)))
+    || (value.upstream.error !== null && (typeof value.upstream.error !== "string" || value.upstream.error.length > 500))) fail("Malformed managed update status");
   if (value.compatibleUpdate !== null) {
     exactObject(value.compatibleUpdate, "compatible update state", ["releaseId", "managerReleaseId", "upstreamVersion", "sequence"]);
     ensureIdentifier(value.compatibleUpdate.releaseId, "compatible update release ID");
     ensureIdentifier(value.compatibleUpdate.managerReleaseId, "compatible update Manager Release ID");
-    expectString(value.compatibleUpdate.upstreamVersion, "compatible update upstream version");
-    if (!Number.isSafeInteger(value.compatibleUpdate.sequence) || value.compatibleUpdate.sequence < 1) fail("Malformed managed update status");
+    expectString(value.compatibleUpdate.upstreamVersion, "compatible update upstream version", semverPattern);
+    if (!Number.isSafeInteger(value.compatibleUpdate.sequence) || value.compatibleUpdate.sequence < 1
+      || value.compatibleUpdate.releaseId !== value.channel.releaseId
+      || value.compatibleUpdate.sequence !== value.channel.sequence) fail("Malformed managed update status");
   }
   if (value.patchLag !== null) {
     exactObject(value.patchLag, "Patch Lag state", ["currentReleaseId", "currentUpstreamVersion", "observedUpstreamVersion"]);
     ensureIdentifier(value.patchLag.currentReleaseId, "Patch Lag release ID");
-    expectString(value.patchLag.currentUpstreamVersion, "Patch Lag current upstream version");
-    expectString(value.patchLag.observedUpstreamVersion, "Patch Lag observed upstream version");
+    expectString(value.patchLag.currentUpstreamVersion, "Patch Lag current upstream version", semverPattern);
+    expectString(value.patchLag.observedUpstreamVersion, "Patch Lag observed upstream version", semverPattern);
+    if (value.patchLag.currentReleaseId !== value.active.releaseId
+      || value.patchLag.currentUpstreamVersion !== value.active.upstreamVersion
+      || value.patchLag.observedUpstreamVersion !== value.upstream.observedVersion) fail("Malformed managed update status");
   }
+  if (value.compatibleUpdate !== null && value.patchLag !== null) fail("Malformed managed update status");
 }
 
 function validateUninstallStartupState(name, value) {
@@ -2674,7 +2703,7 @@ function validateUninstallState(dataRoot, paths, pairs) {
   }
 }
 
-function validateUninstallCaches(paths) {
+function validateUninstallCaches(paths, pairs, dispatcher) {
   for (const name of readdirSync(paths.artifacts)) {
     if (!sha256Pattern.test(name)) fail(`Foreign cached artifact: ${name}`);
     const path = ensureNoSymlinkPath(paths.artifacts, join(paths.artifacts, name), "Cached artifact path");
@@ -2687,6 +2716,15 @@ function validateUninstallCaches(paths) {
   for (const name of readdirSync(paths.temporary)) {
     const path = ensureNoSymlinkPath(paths.temporary, join(paths.temporary, name), "Temporary uninstall path");
     if (!safeTemporaryOwner(path)) fail(`Foreign temporary path: ${name}`);
+    const owner = readJson(join(path, ".owner.json"), "temporary receipt");
+    if (owner.type === "managed-tombstone") {
+      const expected = owner.scope.kind === "dispatcher"
+        ? dispatcher && metadataDigest(readJson(dispatcher.centralPath, "Managed Dispatcher receipt"))
+        : pairs.some((pair) => owner.scope.identity === metadataDigest({ kind: owner.scope.kind, pair }));
+      if (owner.scope.kind === "dispatcher" ? owner.scope.identity !== expected : !expected) {
+        fail(`Tombstone identity mismatch: ${name}`);
+      }
+    }
   }
 }
 
@@ -2716,6 +2754,7 @@ export function managedPiResolution(environment = process.env, operation = "disa
 export function uninstallManagedInstallation(dataRoot, options = {}) {
   const root = resolve(dataRoot);
   const environment = options.environment || process.env;
+  assertOutsideSharedPiData(root, environment);
   if (!pathExists(root)) return { kind: "already-absent", deferred: 0, resolution: finalPiResolution(environment) };
   if (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory()) fail(`Managed state path is foreign: ${root}`);
   if (!validateUninstallRoot(root)) return { kind: "already-absent", deferred: 0, resolution: finalPiResolution(environment) };
@@ -2736,8 +2775,8 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
     validateManagerPayloadsForRemoval(paths, { allowMissingManagerIds: new Set(pendingPairs.map((pair) => pair.managerReleaseId)) });
     validateUninstallState(dataRoot, paths, pairs);
     validateUninstallReceiptsAndLeases(paths, pairs);
-    validateUninstallCaches(paths);
     const dispatcher = validateDispatcherForRemoval(paths, { allowMissingPayload: Boolean(pendingUninstall) });
+    validateUninstallCaches(paths, pairs, dispatcher);
     const ownershipPath = join(paths.state, "entrypoints.json");
     const compatibilityPath = compatibilityReceiptPath(paths);
     const ownership = pathExists(ownershipPath) ? readManagedOwnership(dataRoot) : null;
