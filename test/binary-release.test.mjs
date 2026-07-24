@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -47,61 +46,28 @@ function createPackagedBinary(prefix) {
   return { root, output, assetName, asset, installation: join(extracted, "pi-wait-for-user") };
 }
 
-test("the recommended bootstrap selects a platform binary without Git, npm, or Node", () => {
+test("the managed bootstrap authenticates the Release Channel before selecting exact payloads", () => {
   const bootstrap = readFileSync(join(repositoryRoot, "scripts", "bootstrap.sh"), "utf8");
 
-  assert.doesNotMatch(bootstrap, /for command in node npm git/);
-  assert.match(bootstrap, /pi-wait-for-user-\$\{platform\}\.tar\.gz/);
-  assert.match(bootstrap, /uname -s/);
-  assert.match(bootstrap, /uname -m/);
+  assert.doesNotMatch(bootstrap, /for command in npm git/);
+  assert.match(bootstrap, /release-trust\.json/);
+  assert.match(bootstrap, /BEGIN PUBLIC KEY/);
+  assert.match(bootstrap, /release-channel/);
+  assert.match(bootstrap, /release-manifest/);
+  assert.match(bootstrap, /managed.*install/i);
+  assert.match(bootstrap, /\(\?:darwin\|linux\)/);
+  assert.match(bootstrap, /\(\?:arm64\|x64\)/);
 });
 
-test("the bootstrap verifies its downloaded platform archive before installation", () => {
-  const fixture = createPackagedBinary("pi-binary-bootstrap-");
-  const digest = createHash("sha256").update(readFileSync(fixture.asset)).digest("hex");
-  writeFileSync(join(fixture.output, "SHA256SUMS"), `${digest}  ${fixture.assetName}\n`);
+test("the bootstrap uses signed artifact descriptors rather than an unauthenticated checksum projection", () => {
+  const bootstrap = readFileSync(join(repositoryRoot, "scripts", "bootstrap.sh"), "utf8");
 
-  const fakeBin = join(fixture.root, "bin");
-  mkdirSync(fakeBin);
-  const curl = join(fakeBin, "curl");
-  writeFileSync(curl, "#!/bin/sh\nwhile [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then output=$2; shift 2; else url=$1; shift; fi; done\ncp \"$PI_FIXTURE_DOWNLOADS/${url##*/}\" \"$output\"\n");
-  chmodSync(curl, 0o755);
-  const installDirectory = join(fixture.root, "installed");
-  const binDirectory = join(fixture.root, "user-bin");
-  const environment = {
-    ...process.env,
-    HOME: join(fixture.root, "home"),
-    PATH: `${fakeBin}:${process.env.PATH}`,
-    PI_FIXTURE_DOWNLOADS: fixture.output,
-    PI_WAIT_FOR_USER_PLATFORM: nativePlatform,
-  };
-  const installed = spawnSync(
-    "sh",
-    [
-      join(repositoryRoot, "scripts", "bootstrap.sh"),
-      "install",
-      "--install-dir", installDirectory,
-      "--bin-dir", binDirectory,
-    ],
-    { encoding: "utf8", env: environment },
-  );
-  assert.equal(installed.status, 0, installed.stderr);
-  assert.equal(existsSync(join(installDirectory, "pi-core")), true);
-
-  writeFileSync(fixture.asset, "tampered after checksums\n");
-  const rejected = spawnSync(
-    "sh",
-    [
-      join(repositoryRoot, "scripts", "bootstrap.sh"),
-      "install",
-      "--install-dir", join(fixture.root, "rejected"),
-      "--bin-dir", join(fixture.root, "rejected-bin"),
-    ],
-    { encoding: "utf8", env: environment },
-  );
-  assert.notEqual(rejected.status, 0);
-  assert.match(rejected.stderr, /checksum mismatch/);
-  assert.equal(existsSync(join(fixture.root, "rejected")), false);
+  assert.doesNotMatch(bootstrap, /SHA256SUMS/);
+  assert.match(bootstrap, /Release Channel manifest digest mismatch/);
+  assert.match(bootstrap, /Manager Release.*managerArtifact/s);
+  assert.match(bootstrap, /Downstream Release.*releaseArtifact/s);
+  assert.match(bootstrap, /bytes\.length !== expected\.size/);
+  assert.match(bootstrap, /createHash\("sha256"\).*expected\.sha256/s);
 });
 
 test("a binary release loads the clearly named Question Tool without a source checkout", () => {

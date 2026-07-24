@@ -391,6 +391,16 @@ test("release verification rejects release documentation identity drift", () => 
   assert.match(result.stderr, /Release notes heading/);
 });
 
+test("maintainer documentation distinguishes every-platform smoke from the Linux interactive smoke", () => {
+  const readme = readFileSync(join(repositoryRoot, "README.md"), "utf8");
+
+  assert.match(
+    readme,
+    /Question Tool payload presence on every supported macOS\/Linux platform, plus interactive Question Tool loading on Linux x64/,
+  );
+  assert.doesNotMatch(readme, /interactive Question Tool loading on every supported macOS\/Linux platform/);
+});
+
 test("release verification rejects a changed patch", () => {
   const root = copyReleaseFixture();
   const patch = join(root, "patches", "active", "0001-feat-add-durable-single-tool-deferral.patch");

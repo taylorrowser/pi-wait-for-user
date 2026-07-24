@@ -114,9 +114,52 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  platform-smoke:
+    needs: release-candidate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            platform: darwin-arm64
+          - runner: macos-13
+            platform: darwin-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: ubuntu-24.04
+            platform: linux-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-${{ needs.release-candidate.outputs.release-id }}
+          path: candidate
+
+      - name: Smoke-test the exact supported platform payload
+        shell: bash
+        run: |
+          release_id='${{ needs.release-candidate.outputs.release-id }}'
+          platform='${{ matrix.platform }}'
+          root=$(mktemp -d)
+          trap 'rm -rf "$root"' EXIT
+          tar -xzf "candidate/pi-wait-for-user-$platform.tar.gz" -C "$root"
+          pi="$root/pi-wait-for-user/pi-wait-for-user"
+          expected=$(node -p 'require(`./candidate/.release-metadata/unsigned-manifest.json`).upstream.packageVersion')
+          test "$($pi --version)" = "$expected"
+          "$pi" conformance | grep 'Deferred conformance passed (8/8)'
+          "$pi" --list-models >/dev/null
+          test -f "$root/pi-wait-for-user/question-tool/extensions/question-tool.ts"
+
   production-release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: release-candidate
+    needs: [release-candidate, platform-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production-release
@@ -241,6 +284,20 @@ jobs:
             --manifest-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_ID/release-manifest.json" \
             "${promotion_state[@]}" \
             --output "dist/$RELEASE_ID"
+          node -e '
+            const manifest = require(process.argv[1]).signed;
+            for (const { platform } of manifest.platformArchives) {
+              if (/^(?:darwin|linux)-(?:arm64|x64)$/.test(platform)) console.log(platform);
+            }
+          ' "$manifest" |
+          while IFS= read -r platform; do
+            node scripts/release-metadata.mjs receipt \
+              --manifest "$manifest" \
+              "${common[@]}" \
+              --platform "$platform" \
+              --owned-path "\$MANAGED_DATA_ROOT/downstream-releases/$RELEASE_ID" \
+              --output "dist/$RELEASE_ID/installation-receipt-$platform.json"
+          done
 
       - name: Attest generated release metadata
         uses: actions/attest-build-provenance@v2

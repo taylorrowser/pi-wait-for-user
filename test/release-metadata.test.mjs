@@ -524,6 +524,21 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   assert.doesNotMatch(workflow, /ROOT_PRIVATE|RELEASE_ROOT_PUBLIC_KEY/);
   assert.match(workflow, /production-release:\n\s+if: startsWith\(github\.ref, 'refs\/tags\/'\)/);
   assert.match(workflow, /environment: production-release/);
+  assert.match(workflow, /needs: \[release-candidate, platform-smoke\]/);
+  for (const [runner, platform] of [
+    ["macos-14", "darwin-arm64"],
+    ["macos-13", "darwin-x64"],
+    ["ubuntu-24.04-arm", "linux-arm64"],
+    ["ubuntu-24.04", "linux-x64"],
+  ]) {
+    assert.match(workflow, new RegExp(`runner: ${runner}\\n\\s+platform: ${platform}`));
+  }
+  assert.match(workflow, /Smoke-test the exact supported platform payload/);
+  assert.match(workflow, /Deferred conformance passed \(8\/8\)/);
+  assert.match(workflow, /manifest\.platformArchives/);
+  assert.match(workflow, /\^\(\?:darwin\|linux\)-\(\?:arm64\|x64\)\$/);
+  assert.match(workflow, /release-metadata\.mjs receipt/);
+  assert.match(workflow, /installation-receipt-\$platform\.json/);
   assert.match(workflow, /origin\/main:releases\/\$file/);
   assert.match(workflow, /--trust "\$AUTHORITY_DIR\/release-trust\.json"/);
   assert.equal(workflow.match(/test "\$\(git rev-parse origin\/main\)" = "\$AUTHORITY_COMMIT"/g)?.length, 2);
