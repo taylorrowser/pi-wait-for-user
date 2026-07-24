@@ -30,7 +30,8 @@
     { "path": "patches/active/0011-fix-fail-closed-on-live-unavailable-resolver.patch", "sha256": "0ce85715f091a4b1682bc4c63c0f703fc3afaecf81977666968922c085185544" },
     { "path": "patches/active/0012-fix-reconstruct-example-presenter.patch", "sha256": "9de0402b24f6d3ece12a163963cce9d3c19f70837771a19891fd051f1424ede7" },
     { "path": "patches/active/0013-doc-eager-downstream-session-header.patch", "sha256": "b697ac01332d2c2c7120a9c4a4b6b332fee6f821120f8b7c716b4b12df314d36" },
-    { "path": "patches/active/0014-feat-add-core-deferred-reentry-affordance.patch", "sha256": "8f2e6ba41845bf0b07ffe67a74caac6e0790c9f56e993194dab180d74c802c26" }
+    { "path": "patches/active/0014-feat-add-core-deferred-reentry-affordance.patch", "sha256": "8f2e6ba41845bf0b07ffe67a74caac6e0790c9f56e993194dab180d74c802c26" },
+    { "path": "patches/active/0015-fix-remove-retired-nvidia-model.patch", "sha256": "0dd1fa4d619fb5b7297d19e8b0c980a7f13634a2098cb7249861a6800c61bfb7" }
   ],
   "fixtureGate": {
     "path": "releases/pi-v0.81.1-patch.7/fixture-gate.json",

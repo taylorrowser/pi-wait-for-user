@@ -12,6 +12,8 @@ Core-owned deferred-work re-entry with package-customizable presentation.
 - The extension deferral API adds an optional read-only `summary` callback; core retains mounting, command routing, recovery, and cleanup ownership
 - Question Tool `0.1.4` supplies privacy-safe question-count text and no longer manages a deferred widget lifecycle
 - Regression coverage includes presentation selection, command routing, dismissal, clearing, failures, and consecutive Deferred Tool Batches
+- Manager Release v1 includes signed metadata verification, atomic Activation, command ownership, patch-aware update discovery, rollback, retention, recovery, and receipt-scoped uninstall primitives
+- The generated NVIDIA catalog no longer retains a model withdrawn from the live NIM API, keeping strict release hydration reproducible
 - Fast, checksummed precompiled binaries remain available for macOS, Linux, and Windows on ARM64 and x64
 
 ## Install

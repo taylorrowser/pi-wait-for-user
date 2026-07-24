@@ -1,0 +1,15 @@
+diff --git a/packages/ai/src/providers/nvidia.models.ts b/packages/ai/src/providers/nvidia.models.ts
+index ec13691903bf5647fee641dcd637489cd6162017..b08b58456c1e185fecc166c39800e5b1b14d2fdb 100644
+--- a/packages/ai/src/providers/nvidia.models.ts
++++ b/packages/ai/src/providers/nvidia.models.ts
+@@ -29,10 +29,6 @@ export const NVIDIA_MODELS = values as {
+ 		id: "minimaxai/minimax-m3";
+ 		provider: "nvidia";
+ 	};
+-	"mistralai/mistral-large-3-675b-instruct-2512": Model<"openai-completions"> & {
+-		id: "mistralai/mistral-large-3-675b-instruct-2512";
+-		provider: "nvidia";
+-	};
+ 	"mistralai/mistral-small-4-119b-2603": Model<"openai-completions"> & {
+ 		id: "mistralai/mistral-small-4-119b-2603";
+ 		provider: "nvidia";
