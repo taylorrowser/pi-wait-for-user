@@ -22,7 +22,7 @@ Public policy is recorded in [`releases/signing-policy.json`](../../releases/sig
 - delegated key ID `release-2026-1`;
 - 18 calendar months of trust-metadata validity;
 - 180 days of delegated-key validity;
-- a 60-day Channel validity window;
+- a maximum 60-day Channel validity window;
 - delegated-key rotation 45 days before expiry;
 - two offline ceremony reviewers;
 - a sole-admin GitHub Environment approval with self-approval permitted; and

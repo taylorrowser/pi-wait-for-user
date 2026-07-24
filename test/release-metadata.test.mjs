@@ -528,7 +528,8 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   assert.match(workflow, /--trust "\$AUTHORITY_DIR\/release-trust\.json"/);
   assert.equal(workflow.match(/test "\$\(git rev-parse origin\/main\)" = "\$AUTHORITY_COMMIT"/g)?.length, 2);
   assert.match(workflow, /if \(requested > current\)/);
-  assert.match(workflow, /remaining < 59 \* 86400000/);
+  assert.match(workflow, /policy\.validity\.channelDays \* 86400000/);
+  assert.doesNotMatch(workflow, /59 \* 86400000/);
   assert.ok(
     workflow.indexOf("Publish immutable GitHub release") < workflow.indexOf("Stage the atomic stable-Channel promotion branch"),
   );

@@ -193,9 +193,11 @@ jobs:
               throw new Error("RELEASE_CHANNEL_SEQUENCE must not replay current Channel state");
             }
             if (requested > current) {
-              const remaining = expires - Date.now();
-              if (remaining < 59 * 86400000 || remaining > 61 * 86400000) {
-                throw new Error("A new Channel sequence must expire approximately 60 days in the future");
+              const policy = JSON.parse(fs.readFileSync(`${process.argv[1]}/signing-policy.json`, "utf8"));
+              const maximum = policy.validity.channelDays * 86400000;
+              if (!Number.isSafeInteger(policy.validity.channelDays) || policy.validity.channelDays < 1
+                || expires - Date.now() > maximum) {
+                throw new Error("A new Channel sequence exceeds the policy validity window");
               }
             }
           ' "$authority"
