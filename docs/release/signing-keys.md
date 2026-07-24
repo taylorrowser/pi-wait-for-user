@@ -9,6 +9,8 @@ The dispatcher or reviewed bootstrap pins the root public key. GitHub, TLS, the 
 
 No production private key belongs in this repository, a release archive, an Actions artifact, a log, or a fixture. Keys under `test/fixtures/release-keys/` are intentionally public test material and have no production authority.
 
+The executable division of agent, human-approval, and human-only steps is in [`production-signing-runbook.md`](production-signing-runbook.md). That runbook also covers protected-Environment configuration, clean verification, promotion PR creation, authorized agent merge, and partial-publication recovery.
+
 Clients persist two anti-replay checkpoints. Accepted trust state contains the highest root-signed trust version and the canonical complete-envelope digest; lower versions and non-identical equal-version retries fail closed. Accepted Channel state contains the highest sequence, selected manifest identity, and canonical complete-envelope digest; lower sequences and non-identical equal-sequence retries fail closed. These checkpoints are local state, never an independent release authority.
 
 ## Bootstrap boundary
@@ -37,7 +39,7 @@ release key id: release-YYYY-N
 2. Export only the root public key and record its SHA-256 fingerprint through independent channels.
 3. Generate the routine release key in the restricted signing environment.
 4. Create `release-trust` schema v1 with a strictly increasing version, an expiry, the authenticated Channel URL, and the release public key plus its expiry and revocation state.
-5. Sign the canonical `signed` object with the offline root key.
+5. Use the fixture-tested `release-metadata.mjs sign-trust` command in the offline environment to construct and sign the canonical `signed` object with the offline root key.
 6. Verify the trust document against the independently recorded root public key before publication.
 7. Provision the release private key through the human-controlled secret path described by the release runbook; never echo it.
 

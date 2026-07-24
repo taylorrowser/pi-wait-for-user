@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "githubEnvironment": "production-release",
+  "stableUrls": {
+    "trust": "https://raw.githubusercontent.com/taylorrowser/pi-wait-for-user/main/releases/release-trust.json",
+    "channel": "https://raw.githubusercontent.com/taylorrowser/pi-wait-for-user/main/releases/channel.json"
+  },
+  "initialKeyIds": {
+    "root": "root-2026-1",
+    "release": "release-2026-1"
+  },
+  "validity": {
+    "trustMonths": 18,
+    "releaseKeyDays": 180,
+    "channelDays": 60,
+    "releaseKeyRotationLeadDays": 45
+  },
+  "ceremonyReviewerCount": 2,
+  "environmentApproval": "sole-admin-self-approval",
+  "secureOperationalRecords": "encrypted maintainer vault plus offline encrypted backup"
+}

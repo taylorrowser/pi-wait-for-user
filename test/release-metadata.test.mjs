@@ -489,6 +489,140 @@ test("the metadata CLI verifies provenance, signs a manifest, and promotes one C
   }
 });
 
+test("production signing is tag-only, delegated, protected, and stages stable state after immutable publication", () => {
+  const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+  const policy = JSON.parse(readFileSync(join(root, "releases", "signing-policy.json"), "utf8"));
+  const secretNames = [...workflow.matchAll(/\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}/g)].map((match) => match[1]);
+
+  assert.deepEqual(secretNames, ["RELEASE_SIGNING_PRIVATE_KEY"]);
+  assert.doesNotMatch(workflow, /ROOT_PRIVATE|RELEASE_ROOT_PUBLIC_KEY/);
+  assert.match(workflow, /production-release:\n\s+if: startsWith\(github\.ref, 'refs\/tags\/'\)/);
+  assert.match(workflow, /environment: production-release/);
+  assert.match(workflow, /releases\/release-trust\.json/);
+  assert.ok(
+    workflow.indexOf("Publish immutable GitHub release") < workflow.indexOf("Stage the atomic stable-Channel promotion branch"),
+  );
+  for (const file of ["channel.json", "channel-state.json", "trust-state.json"]) {
+    assert.match(workflow, new RegExp(`cp .*${file.replace(".", "\\.")}.* releases/${file.replace(".", "\\.")}`));
+  }
+  assert.equal(policy.githubEnvironment, "production-release");
+  assert.equal(policy.stableUrls.trust.endsWith("/releases/release-trust.json"), true);
+  assert.equal(policy.stableUrls.channel.endsWith("/releases/channel.json"), true);
+  assert.deepEqual(policy.initialKeyIds, { root: "root-2026-1", release: "release-2026-1" });
+  assert.deepEqual(policy.validity, {
+    trustMonths: 18,
+    releaseKeyDays: 180,
+    channelDays: 60,
+    releaseKeyRotationLeadDays: 45,
+  });
+});
+
+test("the fixture ceremony signs, rotates, revokes, and independently verifies release trust", () => {
+  const directory = mkdtempSync(join(tmpdir(), "release-trust-ceremony-"));
+  try {
+    writeFileSync(join(directory, "root-public.pem"), rootPublic);
+    writeFileSync(join(directory, "release-public.pem"), releasePublic);
+    writeFileSync(join(directory, "next-release-public.pem"), readFileSync(join(keys, "unauthorized-public.pem"), "utf8"));
+    const rootArgument = `fixture-root-2026=${join(directory, "root-public.pem")}`;
+    const signInput = (name, value, output) => {
+      const input = join(directory, `${name}.json`);
+      writeFileSync(input, serializeMetadata(value));
+      const result = spawnSync(process.execPath, [metadataCli, "sign-trust",
+        "--input", input,
+        "--root-key-id", "fixture-root-2026",
+        "--root-private-key", join(keys, "root-private.pem"),
+        "--root-public-key", join(directory, "root-public.pem"),
+        "--now", now.toISOString(),
+        "--output", output,
+      ], { encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(result.stdout, /PRIVATE KEY/);
+      return JSON.parse(readFileSync(output, "utf8"));
+    };
+    const input = (version, releaseKeys) => ({
+      schemaVersion: 1,
+      type: "release-trust",
+      version,
+      expires: "2027-12-01T00:00:00.000Z",
+      channelUrl: "https://raw.githubusercontent.com/taylorrowser/pi-wait-for-user/main/releases/channel.json",
+      releaseKeys,
+    });
+    const oldKey = {
+      keyId: "fixture-release-2026",
+      algorithm: "ed25519",
+      publicKeyFile: "release-public.pem",
+      expires: "2027-01-01T00:00:00.000Z",
+      revoked: false,
+    };
+    const nextKey = {
+      keyId: "fixture-release-next",
+      algorithm: "ed25519",
+      publicKeyFile: "next-release-public.pem",
+      expires: "2027-06-01T00:00:00.000Z",
+      revoked: false,
+    };
+
+    const initial = signInput("initial-input", input(1, [oldKey]), join(directory, "initial-trust.json"));
+    const initialAuthority = verifyTrustMetadata(initial, {
+      trustedRootKeys: new Map([["fixture-root-2026", rootPublic]]),
+      now,
+    });
+    const rotated = signInput("rotation-input", input(2, [oldKey, nextKey]), join(directory, "rotated-trust.json"));
+    const rotatedAuthority = verifyTrustMetadata(rotated, {
+      trustedRootKeys: new Map([["fixture-root-2026", rootPublic]]),
+      now,
+      accepted: initialAuthority.acceptedState,
+    });
+    const revoked = signInput("revocation-input", input(3, [
+      { ...oldKey, revoked: true },
+      nextKey,
+    ]), join(directory, "revoked-trust.json"));
+    const revokedAuthority = verifyTrustMetadata(revoked, {
+      trustedRootKeys: new Map([["fixture-root-2026", rootPublic]]),
+      now,
+      accepted: rotatedAuthority.acceptedState,
+    });
+    assert.throws(
+      () => verifyReleaseManifest(manifest(), { trust: revokedAuthority, now }),
+      /release key revoked/i,
+    );
+
+    const verified = spawnSync(process.execPath, [metadataCli, "verify-trust",
+      "--trust", join(directory, "revoked-trust.json"),
+      "--root-key", rootArgument,
+      "--now", now.toISOString(),
+    ], { encoding: "utf8" });
+    assert.equal(verified.status, 0, verified.stderr);
+    assert.match(verified.stdout, /verified release trust metadata version 3/i);
+    assert.match(verified.stdout, /[a-f0-9]{64}/);
+
+    const fingerprint = spawnSync(process.execPath, [metadataCli, "fingerprint",
+      "--public-key", join(directory, "root-public.pem"),
+    ], { encoding: "utf8" });
+    assert.equal(fingerprint.status, 0, fingerprint.stderr);
+    assert.match(fingerprint.stdout, /^[a-f0-9]{64}\n$/);
+
+    writeFileSync(join(directory, "unsafe-input.json"), serializeMetadata(input(4, [{
+      ...nextKey,
+      publicKeyFile: "root-private.pem",
+    }])));
+    writeFileSync(join(directory, "root-private.pem"), rootPrivate);
+    const unsafe = spawnSync(process.execPath, [metadataCli, "sign-trust",
+      "--input", join(directory, "unsafe-input.json"),
+      "--root-key-id", "fixture-root-2026",
+      "--root-private-key", join(keys, "root-private.pem"),
+      "--root-public-key", join(directory, "root-public.pem"),
+      "--now", now.toISOString(),
+      "--output", join(directory, "unsafe-trust.json"),
+    ], { encoding: "utf8" });
+    assert.notEqual(unsafe.status, 0);
+    assert.match(unsafe.stderr, /expected an SPKI public key/i);
+    assert.equal(existsSync(join(directory, "unsafe-trust.json")), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("digest, extracted-file, projection drift, and provenance mismatches are rejected", () => {
   const directory = mkdtempSync(join(tmpdir(), "release-metadata-payload-"));
   try {

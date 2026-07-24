@@ -1,4 +1,4 @@
-import { createHash, sign, verify } from "node:crypto";
+import { createHash, createPublicKey, sign, verify } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join, posix, relative, sep } from "node:path";
 
@@ -325,6 +325,16 @@ export function signMetadata(signed, keyId, privateKey) {
 
 export function sha256File(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+export function publicKeyFingerprint(publicKey) {
+  let der;
+  try {
+    der = createPublicKey(publicKey).export({ type: "spki", format: "der" });
+  } catch {
+    fail("Malformed public key");
+  }
+  return createHash("sha256").update(der).digest("hex");
 }
 
 export function verifyTrustMetadata(envelope, { trustedRootKeys, now = new Date(), accepted } = {}) {
