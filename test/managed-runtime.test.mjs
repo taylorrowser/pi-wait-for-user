@@ -837,6 +837,7 @@ test("leased payload cleanup is deferred and receipt-scoped cleanup rejects fore
     const staleLeaseRecord = JSON.parse(readFileSync(staleLeasePath, "utf8"));
     writeFileSync(staleLeasePath, serializeMetadata({
       ...staleLeaseRecord,
+      status: "active",
       processStartIdentity: "fixture-reused-pid",
     }));
     assert.equal(removeInstalledPair(dataRoot, oldPair), "deferred");

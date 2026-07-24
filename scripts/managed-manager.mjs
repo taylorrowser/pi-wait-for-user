@@ -15,6 +15,7 @@ import {
   shellHashRemediation,
 } from "./lib/managed-command.mjs";
 import {
+  adoptPairLeaseFromEnvironment,
   cleanupManagedState,
   clearManagedUpdateHold,
   defaultManagedBinDirectory,
@@ -42,6 +43,7 @@ import {
 } from "./lib/managed-update.mjs";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+adoptPairLeaseFromEnvironment(process.env);
 
 function fail(message) {
   throw new Error(message);

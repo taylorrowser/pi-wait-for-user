@@ -1304,6 +1304,7 @@ function installAndActivateWithProvenance(options, provenanceType) {
           return current;
         }
         previous = current.active;
+        cancelPairCleanup(paths, pair);
         const hold = readManagedUpdateHold(dataRoot);
         if (hold?.releaseId === pair.downstreamReleaseId) {
           atomicWrite(paths.holdClear, {
@@ -1669,6 +1670,7 @@ export function rollbackManagedInstallation(dataRoot, options = {}) {
     options.checkpoint?.("rollback-target-verified");
     installedPairs(paths, { allowMissingPairs: readPendingPairs(paths) });
     readVerifiedPinnedPairs(paths);
+    cancelPairCleanup(paths, target);
     readUpdateHoldRecord(paths); // Refuse malformed or substituted state before changing Activation.
     const hold = {
       schemaVersion: 1,
@@ -1761,6 +1763,7 @@ export function recoverPrevious(dataRoot) {
     const current = readActivation(dataRoot);
     if (!current.previous) fail("Activation has no retained previous pair");
     verifyPair(dataRoot, current.previous);
+    cancelPairCleanup(paths, current.previous);
     const recovered = {
       schemaVersion: 1,
       type: "activation",
@@ -1810,8 +1813,8 @@ function livePairLeases(paths, pair, { removeStale = true } = {}) {
     let lease;
     try {
       lease = readJson(path, "pair lease");
-      exactObject(lease, "pair lease", ["schemaVersion", "pid", "processStartIdentity", "token", "createdAt"]);
-      if (lease.schemaVersion !== 1 || !Number.isSafeInteger(lease.pid) || lease.pid < 1
+      exactObject(lease, "pair lease", ["schemaVersion", "status", "pid", "processStartIdentity", "token", "createdAt"]);
+      if (lease.schemaVersion !== 1 || !["preparing", "active"].includes(lease.status) || !Number.isSafeInteger(lease.pid) || lease.pid < 1
         || (lease.processStartIdentity !== null && (typeof lease.processStartIdentity !== "string" || !lease.processStartIdentity))) {
         fail("Malformed pair lease");
       }
@@ -1822,7 +1825,8 @@ function livePairLeases(paths, pair, { removeStale = true } = {}) {
       continue;
     }
     const observed = managedProcessStatus(lease.pid);
-    if (observed.status === "unknown" || (observed.status === "live" && observed.identity === lease.processStartIdentity)) {
+    const preparing = lease.status === "preparing" && Date.now() - Date.parse(lease.createdAt) < 5 * 60 * 1_000;
+    if (preparing || observed.status === "unknown" || (observed.status === "live" && observed.identity === lease.processStartIdentity)) {
       live.push(path);
     } else if (removeStale) unlinkSync(path);
   }
@@ -1839,6 +1843,7 @@ export function acquirePairLease(dataRoot, pair) {
   const path = join(directory, `${token}.json`);
   const lease = {
     schemaVersion: 1,
+    status: "preparing",
     pid: process.pid,
     processStartIdentity: currentManagedProcessStartIdentity(),
     token,
@@ -1850,11 +1855,13 @@ export function acquirePairLease(dataRoot, pair) {
     fail("Selected pair cleanup is active");
   }
   return {
+    path,
+    token,
     transfer(pid) {
       if (!Number.isSafeInteger(pid) || pid < 1) fail("Invalid pair lease process");
       const processStatus = managedProcessStatus(pid);
       if (processStatus.status !== "live") fail("Cannot identify pair lease process");
-      atomicWrite(path, { ...lease, pid, processStartIdentity: processStatus.identity });
+      atomicWrite(path, { ...lease, status: "active", pid, processStartIdentity: processStatus.identity });
     },
     release() {
       try {
@@ -1865,6 +1872,36 @@ export function acquirePairLease(dataRoot, pair) {
       }
     },
   };
+}
+
+export function adoptPairLeaseFromEnvironment(environment = process.env) {
+  const leasePath = environment.PI_MANAGED_LEASE_PATH;
+  const token = environment.PI_MANAGED_LEASE_TOKEN;
+  const dataRoot = environment.PI_MANAGED_DATA_ROOT;
+  if (!leasePath && !token) return false;
+  if (!leasePath || !token || !dataRoot) fail("Malformed inherited pair lease");
+  const paths = layout(dataRoot);
+  const path = ensureNoSymlinkPath(paths.leases, leasePath, "Inherited pair lease path");
+  const lease = readJson(path, "inherited pair lease");
+  exactObject(lease, "inherited pair lease", ["schemaVersion", "status", "pid", "processStartIdentity", "token", "createdAt"]);
+  if (lease.schemaVersion !== 1 || !["preparing", "active"].includes(lease.status)
+    || lease.token !== token || basename(path) !== `${token}.json`) fail("Inherited pair lease mismatch");
+  if (lease.status === "active" && lease.pid === process.pid
+    && lease.processStartIdentity === currentManagedProcessStartIdentity()) {
+    delete environment.PI_MANAGED_LEASE_PATH;
+    delete environment.PI_MANAGED_LEASE_TOKEN;
+    return true;
+  }
+  if (lease.status !== "preparing") fail("Inherited pair lease mismatch");
+  atomicWrite(path, {
+    ...lease,
+    status: "active",
+    pid: process.pid,
+    processStartIdentity: currentManagedProcessStartIdentity(),
+  });
+  delete environment.PI_MANAGED_LEASE_PATH;
+  delete environment.PI_MANAGED_LEASE_TOKEN;
+  return true;
 }
 
 export async function dispatchActivePair(dataRoot, args, { environment = process.env } = {}) {
@@ -1886,6 +1923,8 @@ export async function dispatchActivePair(dataRoot, args, { environment = process
       PI_MANAGED_RELEASE_DIR: selected.releasePath,
       PI_MANAGED_MANAGER_RELEASE_ID: selected.pair.managerReleaseId,
       PI_MANAGED_DOWNSTREAM_RELEASE_ID: selected.pair.downstreamReleaseId,
+      PI_MANAGED_LEASE_PATH: lease.path,
+      PI_MANAGED_LEASE_TOKEN: lease.token,
     },
   });
   if (!child.pid) {
@@ -2113,14 +2152,33 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
   return "removed";
 }
 
+function cancelPairCleanup(paths, pair) {
+  const claim = pairCleanupClaimPath(paths, pair);
+  if (pathExists(claim)) {
+    acquirePairCleanupClaim(paths, pair);
+    unlinkSync(claim);
+  }
+  writePendingPairs(paths, readPendingPairs(paths).filter((pending) => !samePair(pending, pair)));
+}
+
 function pruneInstalledPairsLocked(dataRoot) {
   const paths = layout(dataRoot);
   cleanupTemporaryStateLocked(paths);
   const activation = readActivation(dataRoot);
+  const pending = readPendingPairs(paths);
   const retained = [activation.active, activation.previous, ...readVerifiedPinnedPairs(paths)].filter(Boolean);
+  for (const pair of retained) cancelPairCleanup(paths, pair);
+  const installed = installedPairs(paths, { allowMissingPairs: pending });
+  const pendingWithOwnedState = pending.filter((pair) => [
+    join(paths.releases, pair.downstreamReleaseId), receiptPath(paths, "downstream", pair.downstreamReleaseId),
+    join(paths.managers, pair.managerReleaseId), receiptPath(paths, "manager", pair.managerReleaseId),
+    pairCleanupClaimPath(paths, pair),
+  ].some((path) => pathExists(path)));
+  const removable = [...installed, ...pendingWithOwnedState]
+    .filter((pair, index, all) => all.findIndex((candidate) => samePair(candidate, pair)) === index);
   let removed = 0;
   let deferred = 0;
-  for (const pair of installedPairs(paths, { allowMissingPairs: readPendingPairs(paths) })) {
+  for (const pair of removable) {
     if (retained.some((entry) => samePair(entry, pair))) continue;
     const outcome = removeInstalledPairLocked(dataRoot, pair);
     if (outcome === "removed") removed += 1;
@@ -2621,8 +2679,9 @@ function validatePairLeaseDirectory(paths, pair) {
     const path = ensureNoSymlinkPath(directory, join(directory, name), "Pair lease path");
     if (!lstatSync(path).isFile() || !name.endsWith(".json")) fail(`Foreign pair lease path: ${name}`);
     const lease = readJson(path, "pair lease");
-    exactObject(lease, "pair lease", ["schemaVersion", "pid", "processStartIdentity", "token", "createdAt"]);
-    if (lease.schemaVersion !== 1 || !Number.isSafeInteger(lease.pid) || lease.pid < 1
+    exactObject(lease, "pair lease", ["schemaVersion", "status", "pid", "processStartIdentity", "token", "createdAt"]);
+    if (lease.schemaVersion !== 1 || !["preparing", "active"].includes(lease.status)
+      || !Number.isSafeInteger(lease.pid) || lease.pid < 1
       || !uuidPattern.test(lease.token) || name !== `${lease.token}.json`
       || (lease.processStartIdentity !== null && (typeof lease.processStartIdentity !== "string" || !lease.processStartIdentity))) {
       fail(`Foreign pair lease path: ${name}`);
