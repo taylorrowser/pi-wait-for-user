@@ -26,6 +26,12 @@ jobs:
           npm test
           node --check scripts/install.mjs
           node --check scripts/launch.mjs
+          node --check scripts/managed-dispatcher.mjs
+          node --check scripts/managed-installer.mjs
+          node --check scripts/managed-manager.mjs
+          node --check scripts/lib/managed-command.mjs
+          node --check scripts/lib/managed-runtime.mjs
+          node --check scripts/lib/managed-update.mjs
           node --check scripts/package-binaries.mjs
           node --check scripts/release-gate.mjs
           node --check scripts/release-metadata.mjs

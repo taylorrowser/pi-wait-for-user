@@ -2,30 +2,41 @@
 
 A maintained downstream Pi release that can stop an Agent Thread for durable human input, survive complete process teardown, and continue through an explicit Response, Interruption, Cancellation, resume, or abandonment path.
 
-The packaged release candidate is **`pi-v0.81.1-patch.8`**. It combines:
+The packaged release candidate is **`pi-v0.81.1-patch.9`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 - the fifteen ordered downstream patches in [`patches/active`](patches/active); and
 - the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.4`.
 
-## Fast install
+## Install on macOS or Linux
 
 ### Requirements
 
 - macOS or Linux, on ARM64 or x64
-- `curl` and `tar`
+- Node.js 22.19+ and `tar`
+- `curl` for the HTTPS convenience command
 
-The normal installer downloads a precompiled, checksummed binary for the current platform. It does **not** clone Pi, run npm, hydrate model data, compile source, require Node.js, or replace an existing `pi` command.
+Review [`scripts/bootstrap.sh`](scripts/bootstrap.sh), then choose one explicit mode.
 
-Review [`scripts/bootstrap.sh`](scripts/bootstrap.sh), then run:
+**Side-by-side (default):** installs `pi-wait-for-user` and never claims `pi`.
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.8/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.9/install.sh | sh
 ```
 
-The installer verifies `SHA256SUMS`, installs into a versioned user-data directory, runs the public 8/8 deferred conformance check, and creates `~/.local/bin/pi-wait-for-user`. If that directory is not on `PATH`, it prints the exact directory to add.
+**Managed Installation:** additionally claims `pi` through the manager-owned `$HOME/.local/bin` entrypoint.
 
-Windows x64 and ARM64 binaries are attached to the release for manual use; the one-command installer currently targets macOS and Linux.
+```bash
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.9/install.sh | sh -s -- --manage-pi
+```
+
+Use `--bin-dir <path>` to select another launcher directory. The installer never edits shell startup files. If that directory loses PATH resolution, enablement exits nonzero and prints the exact PATH and `hash -r` remediation; rerunning converges safely. An existing Stock Pi is recorded and shadowed, never moved, copied, changed, or deleted. A foreign `pi` or `pi-wait-for-user` launcher is a hard error.
+
+The bootstrap pins the production root public key, verifies root-signed trust metadata and the delegated signatures on the Release Channel and Release Manifest, then downloads and verifies the exact Manager Release and platform Downstream Release payloads before executing them. The HTTPS-fetched script is itself the initial trust event; it cannot authenticate its own bytes.
+
+Existing Legacy Downstream Installations are adopted only when every payload path, mode, size, and digest matches the signed manifest. Otherwise the manager installs fresh and prints cleanup guidance without deleting the legacy directory.
+
+Windows x64 and ARM64 archives remain manual, side-by-side downloads pending the managed Windows follow-up.
 
 ## Use
 
@@ -56,56 +67,55 @@ pi-wait-for-user conformance     # Deferred conformance passed (8/8)
 
 See the [Question Tool guide](packages/question-tool/README.md) for interaction behavior and the typed SDK/RPC outcome seam.
 
-## Checksum-first manual install
+## Independently checked first use
 
-After publication, download `SHA256SUMS` and the matching asset from the [immutable patch.8 GitHub Release](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.8):
-
-| Platform | Asset |
-| --- | --- |
-| Apple Silicon | `pi-wait-for-user-darwin-arm64.tar.gz` |
-| Intel macOS | `pi-wait-for-user-darwin-x64.tar.gz` |
-| Linux x64 | `pi-wait-for-user-linux-x64.tar.gz` |
-| Linux ARM64 | `pi-wait-for-user-linux-arm64.tar.gz` |
-
-Verify the selected asset, extract it, and run its installer:
+The checksum/attestation-first path verifies the bootstrap before executing it:
 
 ```bash
-asset=pi-wait-for-user-darwin-arm64.tar.gz
-grep "$asset$" SHA256SUMS | shasum -a 256 -c - # macOS
-# or: grep "$asset$" SHA256SUMS | sha256sum --check # Linux
-
-tar -xzf "$asset"
-sh pi-wait-for-user/install.sh install
+tag=pi-v0.81.1-patch.9
+gh release download "$tag" --pattern install.sh --pattern SHA256SUMS
+grep ' install.sh$' SHA256SUMS | shasum -a 256 -c -       # macOS
+# or: grep ' install.sh$' SHA256SUMS | sha256sum --check   # Linux
+gh attestation verify install.sh \
+  --repo taylorrowser/pi-wait-for-user \
+  --signer-workflow taylorrowser/pi-wait-for-user/.github/workflows/release.yml
 ```
 
-## Verify, uninstall, or roll back
+Inspect `install.sh`; confirm its embedded root key has the separately published SPKI fingerprint in [`releases/root-public-key.sha256`](releases/root-public-key.sha256), then run `sh install.sh` or `sh install.sh --manage-pi`. `SHA256SUMS` is a generated convenience projection; the attestation and independently checked fingerprint establish first-use evidence. Subsequent Managed Updates use the pinned root/delegated-key chain.
 
-The release bootstrap can manage the exact version without relying on whichever executable is currently on `PATH`:
+## Managed lifecycle
 
 ```bash
-# Verify
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.8/install.sh | sh -s -- verify
-
-# Uninstall this release
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.8/install.sh | sh -s -- uninstall
+pi managed status                 # identities, compatibility, Channel, hold, Patch Lag, Stock Pi
+pi update                         # synchronous signed Managed Update
+pi managed verify --all           # signatures, receipts, payloads, smoke, conformance
+pi managed verify --provenance    # plus online GitHub provenance audit
+pi managed stock -- --version     # warn, recheck, then execute recorded Stock Pi
+pi managed rollback               # previous verified local Activation; never downloads
+pi managed rollback --to <id>     # another installed verified Downstream Release
+pi managed unhold                 # clear the exact-release Update Hold
+pi managed recover --previous     # stage-0 recovery when active content is corrupt
+pi managed disable                # remove only the owned pi entrypoint
+pi managed uninstall              # remove all and only receipt-proven manager state
 ```
 
-Uninstall leaves `~/.pi/agent` and any upstream `pi` installation untouched.
+A compatible patch-only release is an update even when upstream Pi stays at the same version. A compatible upstream rebase follows the same signed Activation path. **Patch Lag** means upstream is newer but no compatible Downstream Release exists: `pi update` succeeds without changing the verified Activation and reports both identities. Failed signatures, digests, identities, platform checks, smoke, or conformance leave the current Activation selected.
 
-Releases install into separate versioned directories. To roll back after a future release, use the older immutable release's `install.sh` with `activate`. Archived [`pi-v0.81.1-patch.1`](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.1) remains unchanged and downloadable.
+Rollback warns that newer sessions may reject or reconstruct as unavailable and records an Update Hold only for the release being left. Explicit update retries that release; a later release remains visible. Normal launch never silently falls through to the previous pair or Stock Pi. Disablement returns command resolution to Stock Pi when present. Uninstall preserves Stock Pi and all shared Pi settings, credentials, packages, sessions, and Agent Threads; ownership mismatches fail without deletion.
+
+Routine release-key rotation/revocation and the public fingerprint are documented in [`docs/release/signing-keys.md`](docs/release/signing-keys.md). Suspected root compromise requires a reviewed new bootstrap; remotely signed metadata cannot repair that trust boundary. See [`docs/release/managed-runtime.md`](docs/release/managed-runtime.md) for recovery details and [`docs/release/production-signing-runbook.md`](docs/release/production-signing-runbook.md) for provenance and publication auditing.
 
 ## Source-build fallback
 
-Use this only when a prebuilt binary is unsuitable. It requires Node.js 22.19+, Git, and npm, and performs the slower exact-source clone and build:
+The source-build path is explicitly **unmanaged and side-by-side**. It requires Node.js 22.19+, Git, and npm:
 
 ```bash
-gh release download pi-v0.81.1-patch.8 \
-  --pattern 'pi-wait-for-user-pi-v0.81.1-patch.8.tgz'
-tar -xzf pi-wait-for-user-pi-v0.81.1-patch.8.tgz
+gh release download pi-v0.81.1-patch.9 --pattern 'pi-wait-for-user-pi-v0.81.1-patch.9.tgz'
+tar -xzf pi-wait-for-user-pi-v0.81.1-patch.9.tgz
 node package/scripts/install.mjs install
 ```
 
-The source installer verifies the immutable release manifest and report, clones exactly Pi `v0.81.1`, preflights every patch, builds, runs conformance, and installs a separate launcher.
+It never participates in Command Ownership or the signed publisher-built Activation flow.
 
 ## Exact release identity
 
@@ -125,16 +135,16 @@ One root-authorized, signed [Release Channel](releases/README.md) selects the su
 
 The tag workflow:
 
-1. runs the complete 12-stage release gate against a fresh exact source;
+1. runs the complete release gate, including managed state-machine and interruption scenarios, against a fresh exact source;
 2. uses Pi's upstream Bun cross-compilation path to build macOS, Linux, and Windows binaries for ARM64 and x64;
-3. packages the exact Question Tool beside each binary;
-4. smoke-tests the Linux binary, conformance command, and package payload;
-5. verifies GitHub provenance for every payload;
+3. packages the exact Manager Release, Question Tool, bootstrap, gate report, and each platform Downstream Release payload;
+4. smoke-tests version, public conformance, model loading, and interactive Question Tool loading on every supported macOS/Linux platform;
+5. verifies GitHub provenance for every payload and exact source/workflow identity;
 6. signs the complete Release Manifest and monotonic Release Channel;
-7. generates checksums and metadata projections from the signed manifest; and
+7. generates checksums, archive metadata, compatibility output, and receipts from the signed manifest; and
 8. attests and verifies every publishable artifact before publishing one immutable GitHub release.
 
-The release package also contains the local `manager-v1` Managed Installation components: the stable stage-0 dispatcher, atomic Activation engine, immutable pair receipts, lifecycle lock, process leases, recovery/disable operations, layered verification, macOS/Linux Command Ownership, patch-aware Managed Update discovery/routing, local rollback and Update Holds, pinned/live-leased retention and prune, and receipt-safe uninstall. Managed Installations use signed Channel sequence plus exact Downstream Release identity, reserve upstream's latest-version endpoint for Patch Lag, intercept every self-inclusive `pi update` form, and expose `pi managed status`. Lifecycle controls include `pi managed rollback [--to <release-id>]`, `unhold`, `pin [release-id]`, `unpin [release-id]`, `prune`, `disable`, and `uninstall`. See [`docs/release/managed-runtime.md`](docs/release/managed-runtime.md). Production Release Channel/bootstrap publication and end-to-end installer wiring remain release-integration work; the currently published fast installer remains side-by-side.
+The release package also contains the local `manager-v2` Managed Installation components: the stable stage-0 dispatcher, atomic Activation engine, immutable pair receipts, lifecycle lock, process leases, recovery/disable operations, layered verification, macOS/Linux Command Ownership, patch-aware Managed Update discovery/routing, local rollback and Update Holds, pinned/live-leased retention and prune, and receipt-safe uninstall. Managed Installations use signed Channel sequence plus exact Downstream Release identity, reserve upstream's latest-version endpoint for Patch Lag, intercept every self-inclusive `pi update` form, and expose `pi managed status`. Lifecycle controls include `pi managed rollback [--to <release-id>]`, `unhold`, `pin [release-id]`, `unpin [release-id]`, `prune`, `disable`, and `uninstall`. See [`docs/release/managed-runtime.md`](docs/release/managed-runtime.md).
 
 For local source verification:
 
