@@ -854,6 +854,42 @@ test("leased payload cleanup is deferred and receipt-scoped cleanup rejects fore
   }
 });
 
+test("retention cleanup converges after interruption between payload tombstoning and receipt removal", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-retention-interruption-"));
+  const old = fixture({ releaseId: "pi-v0.81.1-patch.4" });
+  const previous = fixture({ releaseId: "pi-v0.81.1-patch.5", managerId: "manager-v2" });
+  const active = fixture({ managerId: "manager-v3" });
+  let lease;
+  try {
+    activate(dataRoot, old);
+    const oldPair = readActivation(dataRoot).active;
+    lease = acquirePairLease(dataRoot, oldPair);
+    activate(dataRoot, previous);
+    activate(dataRoot, active);
+    lease.release();
+    lease = undefined;
+    assert.throws(() => removeInstalledPair(dataRoot, oldPair, {
+      checkpoint(name) {
+        if (name === "retention-downstream-tombstone-created") {
+          assert.throws(() => acquirePairLease(dataRoot, oldPair), /pair cleanup is active/i);
+        }
+        if (name === "retention-downstream-tombstone-renamed") throw new Error("interrupted retention");
+      },
+    }), /interrupted retention/);
+    assert.equal(existsSync(join(dataRoot, "state", "pending-cleanup.json")), true);
+    const pruned = runManager(dataRoot, ["managed", "prune"]);
+    assert.equal(pruned.status, 0, pruned.stderr);
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", oldPair.downstreamReleaseId)), false);
+    assert.equal(existsSync(join(dataRoot, "state", "pending-cleanup.json")), false);
+  } finally {
+    lease?.release();
+    destroy(dataRoot);
+    destroy(old.directory);
+    destroy(previous.directory);
+    destroy(active.directory);
+  }
+});
+
 test("leased cleanup retries converge after a tombstone was removed before its central receipts", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-cleanup-retry-"));
   const old = fixture({ releaseId: "pi-v0.81.1-patch.4" });
@@ -1335,6 +1371,12 @@ test("Managed Installation roots cannot overlap shared Pi data", () => {
       /overlaps shared Pi data/,
     );
     assert.equal(readFileSync(join(shared, "settings.json"), "utf8"), "preserve\n");
+    const alias = join(home, "shared-alias");
+    symlinkSync(shared, alias);
+    assert.throws(
+      () => uninstallManagedInstallation(join(alias, "managed"), { environment: { HOME: home, PATH: "/usr/bin:/bin" } }),
+      /overlaps shared Pi data/,
+    );
   } finally {
     destroy(home);
   }
@@ -1609,6 +1651,30 @@ test("uninstall resumes when payload tombstoning completed before its central re
     const converged = uninstallManagedInstallation(dataRoot, { environment });
     assert.equal(converged.kind, "uninstalled");
     assert.equal(existsSync(dataRoot), false);
+  } finally {
+    destroy(root);
+    destroy(candidate.directory);
+  }
+});
+
+test("uninstall refuses substituted content inside a receipt-scoped tombstone", () => {
+  const root = mkdtempSync(join(tmpdir(), "managed-lifecycle-uninstall-tombstone-substitution-"));
+  const dataRoot = join(root, "data");
+  const bin = join(root, "bin");
+  const candidate = fixture();
+  const environment = { PATH: `${bin}:/usr/bin:/bin` };
+  try {
+    activate(dataRoot, candidate);
+    assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
+    assert.throws(() => uninstallManagedInstallation(dataRoot, {
+      environment,
+      checkpoint(name) { if (name === "uninstall-downstream-tombstone-renamed") throw new Error("interrupted tombstone"); },
+    }), /interrupted tombstone/);
+    const tombstone = readdirSync(join(dataRoot, "tmp")).find((name) => name.startsWith("downstream.tombstone-"));
+    const foreign = join(dataRoot, "tmp", tombstone, "payload", "foreign");
+    writeFileSync(foreign, "foreign\n");
+    assert.throws(() => uninstallManagedInstallation(dataRoot, { environment }), /Tombstone|payload inventory mismatch/i);
+    assert.equal(readFileSync(foreign, "utf8"), "foreign\n");
   } finally {
     destroy(root);
     destroy(candidate.directory);

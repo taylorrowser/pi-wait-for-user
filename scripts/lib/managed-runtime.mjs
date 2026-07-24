@@ -285,12 +285,25 @@ export function removeManagedStateFileIfOwned(dataRoot, name, identity) {
   }
 }
 
+function physicalPath(path) {
+  const suffix = [];
+  let ancestor = resolve(path);
+  while (!pathExists(ancestor)) {
+    suffix.unshift(basename(ancestor));
+    const parent = dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  const physicalAncestor = pathExists(ancestor) ? realpathSync(ancestor) : ancestor;
+  return resolve(physicalAncestor, ...suffix);
+}
+
 function assertOutsideSharedPiData(dataRoot, environment = process.env) {
-  const root = resolve(dataRoot);
+  const root = physicalPath(dataRoot);
   const sharedRoots = [
     environment.HOME && join(environment.HOME, ".pi", "agent"),
     environment.PI_CODING_AGENT_DIR,
-  ].filter(Boolean).map((path) => resolve(path));
+  ].filter(Boolean).map((path) => physicalPath(path));
   if (sharedRoots.some((shared) => root === shared || root.startsWith(`${shared}${sep}`) || shared.startsWith(`${root}${sep}`))) {
     fail(`Managed data root overlaps shared Pi data: ${root}`);
   }
@@ -1274,7 +1287,7 @@ function installAndActivateWithProvenance(options, provenanceType) {
       publishStage(releaseStage, releaseDestination, releaseReceipt, paths, checkpoint, "downstream-published");
       releaseStage = undefined;
 
-      installedPairs(paths);
+      installedPairs(paths, { allowMissingPairs: readPendingPairs(paths) });
       readVerifiedPinnedPairs(paths);
       let previous = null;
       if (existsSync(paths.activation)) {
@@ -1654,7 +1667,7 @@ export function rollbackManagedInstallation(dataRoot, options = {}) {
     }
     verifyPair(dataRoot, target);
     options.checkpoint?.("rollback-target-verified");
-    installedPairs(paths);
+    installedPairs(paths, { allowMissingPairs: readPendingPairs(paths) });
     readVerifiedPinnedPairs(paths);
     readUpdateHoldRecord(paths); // Refuse malformed or substituted state before changing Activation.
     const hold = {
@@ -1764,6 +1777,24 @@ function pairLeaseDirectory(paths, pair) {
   return join(paths.leases, `${pair.managerReleaseId}--${pair.downstreamReleaseId}`);
 }
 
+function pairCleanupClaimPath(paths, pair) {
+  return join(paths.leases, `.cleanup-${digestBytes(serializeMetadata(pair))}.json`);
+}
+
+function acquirePairCleanupClaim(paths, pair) {
+  const path = pairCleanupClaimPath(paths, pair);
+  if (pathExists(path)) {
+    const claimed = readJson(path, "pair cleanup claim");
+    exactObject(claimed, "pair cleanup claim", ["schemaVersion", "type", "pair"]);
+    if (claimed.schemaVersion !== 1 || claimed.type !== "pair-cleanup-claim" || !samePair(claimed.pair, pair)) {
+      fail("Pair cleanup claim mismatch");
+    }
+    return path;
+  }
+  writeFileSync(path, serializeMetadata({ schemaVersion: 1, type: "pair-cleanup-claim", pair }), { flag: "wx", mode: 0o600 });
+  return path;
+}
+
 function livePairLeases(paths, pair, { removeStale = true } = {}) {
   const directory = pairLeaseDirectory(paths, pair);
   if (!existsSync(directory)) return [];
@@ -1801,6 +1832,7 @@ function livePairLeases(paths, pair, { removeStale = true } = {}) {
 export function acquirePairLease(dataRoot, pair) {
   const paths = initializeLayout(dataRoot);
   validatePairShape(pair, "leased pair");
+  if (pathExists(pairCleanupClaimPath(paths, pair))) fail("Selected pair cleanup is active");
   const directory = pairLeaseDirectory(paths, pair);
   ensureManagedDirectory(directory);
   const token = randomUUID();
@@ -1813,6 +1845,10 @@ export function acquirePairLease(dataRoot, pair) {
     createdAt: new Date().toISOString(),
   };
   writeFileSync(path, serializeMetadata(lease), { flag: "wx", mode: 0o600 });
+  if (pathExists(pairCleanupClaimPath(paths, pair))) {
+    unlinkSync(path);
+    fail("Selected pair cleanup is active");
+  }
   return {
     transfer(pid) {
       if (!Number.isSafeInteger(pid) || pid < 1) fail("Invalid pair lease process");
@@ -1898,6 +1934,39 @@ function safeTemporaryOwner(path) {
   }
 }
 
+function validateTombstoneContents(paths, path, owner, pairs, dispatcher) {
+  const names = readdirSync(path).sort();
+  if (![[".owner.json"], [".owner.json", "payload"]].some((expected) => canonicalJson(expected) === canonicalJson(names))) {
+    fail(`Tombstone contains foreign content: ${basename(path)}`);
+  }
+  const payload = join(path, "payload");
+  if (!pathExists(payload)) {
+    if (!pathExists(owner.scope.sourcePath)) fail(`Tombstone source is missing: ${basename(path)}`);
+    return;
+  }
+  if (pathExists(owner.scope.sourcePath) || lstatSync(payload).isSymbolicLink() || !lstatSync(payload).isDirectory()) {
+    fail(`Tombstone payload is foreign: ${basename(path)}`);
+  }
+  if (owner.scope.kind === "dispatcher") {
+    if (!dispatcher || owner.scope.identity !== metadataDigest(readJson(dispatcher.centralPath, "Managed Dispatcher receipt"))) {
+      fail(`Tombstone identity mismatch: ${basename(path)}`);
+    }
+    const embedded = validateDispatcherReceipt(readJson(join(payload, ".managed", "receipt.json"), "Managed Dispatcher receipt"), owner.scope.sourcePath);
+    const central = validateDispatcherReceipt(readJson(dispatcher.centralPath, "Managed Dispatcher receipt"), owner.scope.sourcePath);
+    if (canonicalJson(embedded) !== canonicalJson(central)) fail("Managed Dispatcher receipt copies mismatch");
+    validateDispatcherPayload(payload, central);
+    return;
+  }
+  const pair = pairs.find((candidate) => owner.scope.identity === metadataDigest({ kind: owner.scope.kind, pair: candidate }));
+  if (!pair) fail(`Tombstone identity mismatch: ${basename(path)}`);
+  const type = owner.scope.kind === "manager" ? "manager" : "downstream";
+  const id = type === "manager" ? pair.managerReleaseId : pair.downstreamReleaseId;
+  const central = validateReceipt(readJson(receiptPath(paths, type, id), `${type} receipt`), type, owner.scope.sourcePath, pair);
+  const embedded = validateReceipt(readJson(join(payload, ".managed", "receipt.json"), `${type} receipt`), type, owner.scope.sourcePath, pair);
+  if (canonicalJson(central) !== canonicalJson(embedded)) fail(`${type} receipt copies mismatch`);
+  comparePayload(payloadWithoutManagerFiles(payload), central.payload);
+}
+
 function readPendingPairs(paths) {
   if (!existsSync(paths.pending)) return [];
   const pending = readJson(paths.pending, "pending cleanup state");
@@ -1914,18 +1983,22 @@ function writePendingPairs(paths, pairs) {
   } else atomicWrite(paths.pending, { schemaVersion: 1, pairs: unique });
 }
 
+function cleanupTemporaryStateLocked(paths) {
+  let removed = 0;
+  for (const name of readdirSync(paths.temporary)) {
+    const path = ensureInside(paths.temporary, join(paths.temporary, name), "Temporary cleanup path");
+    if (!safeTemporaryOwner(path)) continue;
+    const owner = readJson(join(path, ".owner.json"), "temporary receipt");
+    if (owner.type === "managed-tombstone") validateTombstoneContents(paths, path, owner, readPendingPairs(paths), null);
+    removeStage(path);
+    removed += 1;
+  }
+  return removed;
+}
+
 export function cleanupManagedState(dataRoot) {
   const paths = initializeLayout(dataRoot);
-  let removed = withLifecycleLock(dataRoot, "cleanup managed temporary state", () => {
-    let temporaryRemoved = 0;
-    for (const name of readdirSync(paths.temporary)) {
-      const path = ensureInside(paths.temporary, join(paths.temporary, name), "Temporary cleanup path");
-      if (!safeTemporaryOwner(path)) continue;
-      removeStage(path);
-      temporaryRemoved += 1;
-    }
-    return temporaryRemoved;
-  });
+  let removed = withLifecycleLock(dataRoot, "cleanup managed temporary state", () => cleanupTemporaryStateLocked(paths));
   for (const pair of readPendingPairs(paths)) {
     try {
       if (removeInstalledPair(dataRoot, pair) === "removed") removed += 1;
@@ -1965,8 +2038,10 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
   const activation = mode === "uninstall" ? null : readActivation(dataRoot);
   if (mode === "retention" && samePair(pair, activation.active)) fail("Cannot remove the active pair");
   if (mode === "retention" && activation.previous && samePair(pair, activation.previous)) fail("Cannot remove the retained previous pair");
+  const cleanupClaim = acquirePairCleanupClaim(paths, pair);
   if (livePairLeases(paths, pair).length > 0) {
     writePendingPairs(paths, [...readPendingPairs(paths), pair]);
+    unlinkSync(cleanupClaim);
     return "deferred";
   }
   if (mode === "retention") writePendingPairs(paths, [...readPendingPairs(paths), pair]);
@@ -1984,7 +2059,7 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
       "downstream",
       metadataDigest({ kind: "downstream", pair }),
       checkpoint,
-      "uninstall-downstream",
+      `${mode}-downstream`,
     );
     checkpoint?.("uninstall-downstream-payload-removed");
     unlinkSync(centralReleaseReceipt);
@@ -2018,7 +2093,7 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
         "manager",
         metadataDigest({ kind: "manager", pair }),
         checkpoint,
-        "uninstall-manager",
+        `${mode}-manager`,
       );
       checkpoint?.("uninstall-manager-payload-removed");
       unlinkSync(centralManagerReceipt);
@@ -2034,16 +2109,18 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
     && lstatSync(leaseDirectory).isDirectory() && readdirSync(leaseDirectory).length === 0) {
     rmSync(leaseDirectory, { recursive: true });
   }
+  unlinkSync(cleanupClaim);
   return "removed";
 }
 
 function pruneInstalledPairsLocked(dataRoot) {
   const paths = layout(dataRoot);
+  cleanupTemporaryStateLocked(paths);
   const activation = readActivation(dataRoot);
   const retained = [activation.active, activation.previous, ...readVerifiedPinnedPairs(paths)].filter(Boolean);
   let removed = 0;
   let deferred = 0;
-  for (const pair of installedPairs(paths)) {
+  for (const pair of installedPairs(paths, { allowMissingPairs: readPendingPairs(paths) })) {
     if (retained.some((entry) => samePair(entry, pair))) continue;
     const outcome = removeInstalledPairLocked(dataRoot, pair);
     if (outcome === "removed") removed += 1;
@@ -2056,8 +2133,8 @@ export function pruneManagedInstallation(dataRoot) {
   return withLifecycleLock(dataRoot, "prune retained releases", () => pruneInstalledPairsLocked(dataRoot));
 }
 
-export function removeInstalledPair(dataRoot, pair) {
-  return withLifecycleLock(dataRoot, `remove ${pair.downstreamReleaseId}`, () => removeInstalledPairLocked(dataRoot, pair));
+export function removeInstalledPair(dataRoot, pair, options = {}) {
+  return withLifecycleLock(dataRoot, `remove ${pair.downstreamReleaseId}`, () => removeInstalledPairLocked(dataRoot, pair, options));
 }
 
 const ownershipKeys = [
@@ -2566,6 +2643,15 @@ function validateUninstallReceiptsAndLeases(paths, pairs) {
   const pairDirectories = new Map(pairs.map((pair) => [basename(pairLeaseDirectory(paths, pair)), pair]));
   for (const name of readdirSync(paths.leases)) {
     const directory = ensureNoSymlinkPath(paths.leases, join(paths.leases, name), "Pair lease directory");
+    if (name.startsWith(".cleanup-")) {
+      const claim = readJson(directory, "pair cleanup claim");
+      exactObject(claim, "pair cleanup claim", ["schemaVersion", "type", "pair"]);
+      if (claim.schemaVersion !== 1 || claim.type !== "pair-cleanup-claim"
+        || !pairs.some((pair) => samePair(pair, claim.pair)) || directory !== pairCleanupClaimPath(paths, claim.pair)) {
+        fail(`Foreign pair cleanup claim: ${name}`);
+      }
+      continue;
+    }
     if (!lstatSync(directory).isDirectory()) fail(`Foreign pair lease path: ${name}`);
     const pair = pairDirectories.get(name);
     if (!pair) fail(`Foreign pair lease path: ${name}`);
@@ -2724,6 +2810,7 @@ function validateUninstallCaches(paths, pairs, dispatcher) {
       if (owner.scope.kind === "dispatcher" ? owner.scope.identity !== expected : !expected) {
         fail(`Tombstone identity mismatch: ${name}`);
       }
+      validateTombstoneContents(paths, path, owner, pairs, dispatcher);
     }
   }
 }
@@ -2769,6 +2856,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
       join(paths.managers, pair.managerReleaseId),
       receiptPath(paths, "manager", pair.managerReleaseId),
       pairLeaseDirectory(paths, pair),
+      pairCleanupClaimPath(paths, pair),
     ].some((path) => pathExists(path)));
     const pairs = [...installed, ...pendingWithOwnedState]
       .filter((pair, index, all) => all.findIndex((candidate) => samePair(candidate, pair)) === index);
