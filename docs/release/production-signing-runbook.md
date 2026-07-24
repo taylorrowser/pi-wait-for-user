@@ -47,6 +47,43 @@ These names are contractual:
 
 A promotion PR changes all generated stable state in one commit. Merging that commit atomically updates the raw `main` view after immutable release assets are already available.
 
+## Resume from public state
+
+**Agent**
+
+A fresh agent starts with public state discovery; it never asks for a secret to determine progress:
+
+```bash
+gh issue view 58 --comments
+gh issue view 62 --comments
+gh pr list --state all --search 'head:implement/issue-58-production-signing'
+gh pr list --state all --json number,state,headRefName,url --jq '.[] | select(.headRefName | startswith("release-promotion/"))'
+gh run list --workflow release.yml --limit 20
+gh release list --limit 20
+git ls-remote --heads origin 'release-promotion/*'
+gh api repos/{owner}/{repo}/environments
+gh secret list --env production-release
+gh variable list --env production-release
+```
+
+Use the results to resume at exactly one boundary:
+
+| Public state | Resume action |
+| --- | --- |
+| Preparation PR open | Continue public review/repair; do not start production signing. |
+| Preparation merged, public ceremony files absent | Wait for the human-only ceremony. |
+| Public ceremony files on the preparation branch | Run Phase 4 public verification and review. |
+| #62 open or no exact candidate approval | Stop before tagging and continue Phase 5. |
+| Release run awaiting Environment approval | Show the tag/commit/policy to the human and wait. |
+| Immutable release absent after a failed run | Follow the frozen-variable retry procedure. |
+| Immutable release present, promotion branch absent | Recover the branch from immutable public release assets. |
+| Promotion branch present, PR absent | Verify the branch and create the PR. |
+| Promotion PR open | Resume independent verification, review, and CI. |
+| Promotion PR green but merge unauthorized | Present evidence and wait for explicit authorization. |
+| Promotion PR merged | Verify stable raw bytes, then update #58 and #47. |
+
+Never infer completion merely from a successful workflow run. Verify the immutable release, promotion branch/PR, actual merge commit, and stable raw bytes independently.
+
 ## Phase 1: public preparation
 
 **Agent**
