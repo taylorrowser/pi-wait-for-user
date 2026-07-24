@@ -78,7 +78,7 @@
     },
     {
       "path": "patches/active/0016-fix-remove-retired-openai-models.patch",
-      "sha256": "ff662499b0ebe8d2bf51e62817e0c1dfe62be3572d89bf4534f4101415d2b13c"
+      "sha256": "aa0596a76ca1e1767f6d7326619f6503b68f9a319a78d26500737264dfeb5ed0"
     },
     {
       "path": "patches/active/0017-build-only-supported-release-platforms.patch",

@@ -140,7 +140,7 @@ test("the release gate lists every required fixture category", () => {
   }
 });
 
-test("the public release artifact inventory omits Intel macOS", () => {
+test("a passing release stages complete artifacts while omitting Intel macOS", () => {
   const root = copyBundleFixture();
   const output = join(root, "assets");
   const binaries = join(root, "binaries");
