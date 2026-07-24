@@ -10,7 +10,7 @@ End-to-end Managed Installation release for macOS Apple Silicon and Linux ARM64/
 - Plain bootstrap remains side-by-side; `--manage-pi` explicitly enables Command Ownership while preserving Stock Pi and shared Pi settings, credentials, packages, sessions, and Agent Threads.
 - The release workflow smoke-tests macOS Apple Silicon plus Linux ARM64/x64 payloads and requires the complete lifecycle/state-machine suite, metadata projections, provenance, and public conformance before publication.
 - Intel macOS is rejected as unsupported, is not built, and has no archive, descriptor, receipt, checksum, or provenance subject in this release.
-- Strict model hydration no longer requires eight OpenAI API models shut down on 2026-07-23 or their derived Azure catalog entries; all other committed model identities remain release-gated against the live catalogs.
+- Strict model hydration no longer requires eight OpenAI API models shut down on 2026-07-23, their derived Azure catalog entries, or three identities withdrawn from the live Vercel AI Gateway catalog on 2026-07-24 (`anthropic/claude-opus-4.7-fast`, `openai/gpt-5-chat`, and `openai/gpt-5.2-chat`); every remaining committed identity stays release-gated against the live catalogs.
 - Managed status, Managed Update, Patch Lag, rollback, recovery, disablement, Stock Pi execution, verification, retention, and uninstall are documented and release-gated.
 
 ## Install

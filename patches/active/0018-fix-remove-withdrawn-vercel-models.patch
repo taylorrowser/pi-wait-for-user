@@ -1,0 +1,95 @@
+diff --git a/packages/ai/src/providers/vercel-ai-gateway.models.ts b/packages/ai/src/providers/vercel-ai-gateway.models.ts
+index 1441b98acb8467624bd6347575889e29aea72305..f72b5855ee21c059ea61bb44782d7f177c6fbb67 100644
+--- a/packages/ai/src/providers/vercel-ai-gateway.models.ts
++++ b/packages/ai/src/providers/vercel-ai-gateway.models.ts
+@@ -149,10 +149,6 @@ export const VERCEL_AI_GATEWAY_MODELS = values as {
+ 		id: "anthropic/claude-opus-4.7";
+ 		provider: "vercel-ai-gateway";
+ 	};
+-	"anthropic/claude-opus-4.7-fast": Model<"anthropic-messages"> & {
+-		id: "anthropic/claude-opus-4.7-fast";
+-		provider: "vercel-ai-gateway";
+-	};
+ 	"anthropic/claude-opus-4.8": Model<"anthropic-messages"> & {
+ 		id: "anthropic/claude-opus-4.8";
+ 		provider: "vercel-ai-gateway";
+@@ -501,10 +497,6 @@ export const VERCEL_AI_GATEWAY_MODELS = values as {
+ 		id: "openai/gpt-5";
+ 		provider: "vercel-ai-gateway";
+ 	};
+-	"openai/gpt-5-chat": Model<"anthropic-messages"> & {
+-		id: "openai/gpt-5-chat";
+-		provider: "vercel-ai-gateway";
+-	};
+ 	"openai/gpt-5-codex": Model<"anthropic-messages"> & {
+ 		id: "openai/gpt-5-codex";
+ 		provider: "vercel-ai-gateway";
+@@ -545,10 +537,6 @@ export const VERCEL_AI_GATEWAY_MODELS = values as {
+ 		id: "openai/gpt-5.2";
+ 		provider: "vercel-ai-gateway";
+ 	};
+-	"openai/gpt-5.2-chat": Model<"anthropic-messages"> & {
+-		id: "openai/gpt-5.2-chat";
+-		provider: "vercel-ai-gateway";
+-	};
+ 	"openai/gpt-5.2-codex": Model<"anthropic-messages"> & {
+ 		id: "openai/gpt-5.2-codex";
+ 		provider: "vercel-ai-gateway";
+diff --git a/packages/ai/test/model-data-validation.test.ts b/packages/ai/test/model-data-validation.test.ts
+index 0d4b0adad548f261d629458560eb064a49dd0f6c..94c31bba44217076e06d989c9608bfc31d8bf921 100644
+--- a/packages/ai/test/model-data-validation.test.ts
++++ b/packages/ai/test/model-data-validation.test.ts
+@@ -73,15 +73,19 @@ function writeFixtureData(
+ 	writeFileSync(join(dataDir, MODEL_DATA_MANIFEST_FILE), `${JSON.stringify(manifest)}\n`);
+ }
+ 
++function generatedCatalogFor(structure: ModelDataStructure): Record<string, Record<string, { api: string }>> {
++	return Object.fromEntries(
++		Object.entries(structure).map(([providerId, models]) => [
++			providerId,
++			Object.fromEntries(Object.entries(models).map(([modelId, api]) => [modelId, { api }])),
++		]),
++	);
++}
++
+ describe("generated model data validation", () => {
+ 	it("strict hydration excludes shut-down OpenAI models and still rejects other catalog drift", () => {
+ 		const structure = readModelDataStructure(packageRoot);
+-		const generated = Object.fromEntries(
+-			Object.entries(structure).map(([providerId, models]) => [
+-				providerId,
+-				Object.fromEntries(Object.entries(models).map(([modelId, api]) => [modelId, { api }])),
+-			]),
+-		);
++		const generated = generatedCatalogFor(structure);
+ 		const retiredOpenAiModelIds = [
+ 			"gpt-5-codex",
+ 			"gpt-5.1-chat-latest",
+@@ -104,6 +108,27 @@ describe("generated model data validation", () => {
+ 		expect(() => hydrateModelDataStructure(structure, generated)).toThrow("missing openai/gpt-5.5");
+ 	});
+ 
++	it("strict hydration excludes withdrawn Gateway identities and rejects other drift", () => {
++		const structure = readModelDataStructure(packageRoot);
++		const generated = generatedCatalogFor(structure);
++		const withdrawnGatewayModelIds = [
++			"anthropic/claude-opus-4.7-fast",
++			"openai/gpt-5-chat",
++			"openai/gpt-5.2-chat",
++		];
++
++		for (const modelId of withdrawnGatewayModelIds) {
++			expect(structure["vercel-ai-gateway"]).not.toHaveProperty(modelId);
++			delete generated["vercel-ai-gateway"][modelId];
++		}
++		expect(() => hydrateModelDataStructure(structure, generated)).not.toThrow();
++
++		delete generated["vercel-ai-gateway"]["anthropic/claude-opus-4.7"];
++		expect(() => hydrateModelDataStructure(structure, generated)).toThrow(
++			"missing vercel-ai-gateway/anthropic/claude-opus-4.7",
++		);
++	});
++
+ 	it("validates complete data against generated structural catalogs", () => {
+ 		const { dataDir, structure } = createFixture();
+ 		expect(() => validateModelDataDirectory(structure, dataDir)).not.toThrow();

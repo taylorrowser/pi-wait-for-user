@@ -83,6 +83,10 @@
     {
       "path": "patches/active/0017-build-only-supported-release-platforms.patch",
       "sha256": "55ec2cff8f59e64427f6b40615fcf818f17aefbfadf7cdf4861e7e306482af30"
+    },
+    {
+      "path": "patches/active/0018-fix-remove-withdrawn-vercel-models.patch",
+      "sha256": "5ecbc20d7ebf5f494ff95689cb7fdb593f7beb303077b31011e6a52f942d26df"
     }
   ],
   "fixtureGate": {

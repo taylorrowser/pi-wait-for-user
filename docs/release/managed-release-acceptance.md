@@ -1,6 +1,6 @@
 # Managed Installation release acceptance
 
-This is the release-level traceability record for GitHub issues #63 and #80 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
+This is the release-level traceability record for GitHub issues #63, #80, and #82 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
 
 ## Release and bootstrap
 
@@ -11,6 +11,14 @@ This is the release-level traceability record for GitHub issues #63 and #80 and 
 | Independently checked first use | `README.md` “Independently checked first use”; workflow attestation of `install.sh`; root SPKI fixture/production fingerprint verification in `test/release-metadata.test.mjs` |
 | macOS Apple Silicon and Linux ARM64/x64 smoke and public conformance | `.github/workflows/release.yml` `platform-smoke` matrix; release-candidate Linux interactive Question Tool smoke |
 | Release CI fails on state-machine, drift, provenance, platform smoke, or conformance failure | `scripts/release-gate.mjs` repository tests and public-conformance stages; metadata mutation tests; required `platform-smoke` matrix; `production-release` depends on both |
+
+## Production receipt preflight and hydration prerequisite (#82)
+
+| #82 requirement | Automated evidence |
+| --- | --- |
+| Workspace-relative and absolute generated Release Manifest paths load through one production/preflight receipt boundary | `test/release-receipts.test.mjs` executes `release-metadata.mjs receipts` with both path forms and verifies the exact supported receipt inventory |
+| Unprotected no-secret preflight runs before protected production signing, emits machine-readable evidence and a workflow summary, and fails closed for missing/malformed inputs | `test/release-metadata.test.mjs` verifies workflow ordering, shared executable invocation, report upload, summary emission, fixture authority, and failure probes; `.github/workflows/release.yml` keeps `production-release` dependent on the completed candidate/preflight jobs |
+| Strict hydration reconciles every remaining committed identity after the live Vercel AI Gateway withdrawals | Active patch `0018-fix-remove-withdrawn-vercel-models.patch` adds a regression at `hydrateModelDataStructure` for the exact withdrawn identities and proves an unrelated missing Gateway identity still fails |
 
 ## Installation, update, and compatibility
 

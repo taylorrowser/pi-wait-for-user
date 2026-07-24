@@ -5,7 +5,7 @@ A maintained downstream Pi release that can stop an Agent Thread for durable hum
 The packaged release candidate is **`pi-v0.81.1-patch.11`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
-- the seventeen ordered downstream patches in [`patches/active`](patches/active); and
+- the eighteen ordered downstream patches in [`patches/active`](patches/active); and
 - the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.4`.
 
 ## Install on macOS or Linux
