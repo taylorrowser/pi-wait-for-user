@@ -546,8 +546,9 @@ test("production signing is tag-only, delegated, protected, and stages stable st
     channelDays: 60,
     releaseKeyRotationLeadDays: 45,
   });
-  assert.equal(policy.ceremonyReviewerCount, 1);
+  assert.equal(policy.ceremonyOperatorCount, 1);
   assert.equal(policy.ceremonyEnvironment, "FileVault-protected maintainer workstation");
+  assert.equal(policy.secureOperationalRecords, "FileVault-protected maintainer storage plus encrypted backup");
 });
 
 test("the fixture ceremony signs, rotates, revokes, and independently verifies release trust", () => {

@@ -43,7 +43,7 @@ release key id: release-YYYY-N
 6. Verify the trust document against the independently recorded root public key before publication.
 7. Provision the release private key through the human-controlled secret path described by the release runbook; never echo it.
 
-Keep root and release-key audit records: key IDs, public-key fingerprints, operators, reviewers, creation time, authorization window, and destruction/revocation time.
+Keep root and release-key audit records: key IDs, public-key fingerprints, operator, any witnesses, creation time, authorization window, and destruction/revocation time.
 
 ## Routine release-key rotation
 

@@ -15,7 +15,7 @@
     "channelDays": 60,
     "releaseKeyRotationLeadDays": 45
   },
-  "ceremonyReviewerCount": 1,
+  "ceremonyOperatorCount": 1,
   "ceremonyEnvironment": "FileVault-protected maintainer workstation",
   "environmentApproval": "sole-admin-self-approval",
   "secureOperationalRecords": "FileVault-protected maintainer storage plus encrypted backup"
