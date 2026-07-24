@@ -11,8 +11,8 @@ atomic whole-batch, idempotent recovery, unavailable recovery/abandonment,
 ordinary/queued user-input Interruption, branch/compaction preservation,
 non-TUI projection, extension/TUI presentation, extension conformance, the live
 unavailable-resolver fix, the restart-safe reference-presenter fix, explicit
-eager session-header compatibility documentation, and the core-owned deferred
-re-entry affordance for issues #13 through #22, #43 through #45, and #49. It adds the
+eager session-header compatibility documentation, the core-owned deferred
+re-entry affordance, and the retired NVIDIA model-catalog correction for issues #13 through #22, #43 through #45, #49, and #58. It adds the
 versioned tool capability, fail-closed downstream session identity, typed
 live-path resolver failures, persisted deferred-batch marker, neutral
 markerless/deferred/partial/continuation AgentSession snapshot, package-owned
