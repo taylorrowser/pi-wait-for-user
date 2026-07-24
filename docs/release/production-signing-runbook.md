@@ -102,7 +102,8 @@ Never infer completion merely from a successful workflow run. Verify the immutab
    ```
 
 6. Confirm the production workflow has only public root material and the delegated private-key secret. It must not reference a root private key.
-7. Prepare and review all public code, documentation, and workflow changes before asking for production ceremony output.
+7. Open the public-preparation PR, run Standards and Spec reviews from its fixed `origin/main` merge base, and wait for green CI.
+8. Merge the reviewed preparation PR only with user authorization. The ceremony uses this merged tooling from an exact `main` commit; its public outputs return through a separate public-trust PR.
 
 ## Phase 2: configure the protected GitHub Environment
 
@@ -228,7 +229,7 @@ The public trust envelope already contains the delegated public key. Do not tran
    ```
 
 5. Inspect only public fields and confirm version `1`, the selected key IDs, validity windows, `revoked: false`, and the exact stable Channel URL.
-6. Open the public-preparation PR, run Standards and Spec reviews from its fixed `origin/main` merge base, wait for green CI, and merge only if the user authorizes it.
+6. Open a public-trust PR containing only the reviewed public ceremony outputs, run Standards and Spec reviews from its fixed `origin/main` merge base, wait for green CI, and merge only if the user authorizes it.
 
 ## Phase 5: select the immutable first Downstream Release
 
