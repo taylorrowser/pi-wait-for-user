@@ -4,6 +4,8 @@ import test from "node:test";
 import { showQuestionForm } from "../src/question-form.ts";
 
 const key = {
+	backspace: "\x7f",
+	delete: "\u001b[3~",
 	down: "\u001b[B",
 	enter: "\r",
 	escape: "\u001b",
@@ -98,6 +100,50 @@ test("Up Arrow leaves custom editing and returns to the preceding option", async
 			selectedIndex: 1,
 		},
 	]);
+	await form.pending;
+});
+
+test("Backspace enters retained custom editing before a later Backspace deletes", async () => {
+	const form = openForm(oneQuestion);
+
+	form.component.handleInput(key.down);
+	form.component.handleInput("abc");
+	form.component.handleInput(key.escape);
+	form.component.handleInput(key.backspace);
+
+	const editing = form.component.render(80).join("\n");
+	assert.match(editing, /abc/);
+	assert.match(editing, /Type to edit/);
+
+	form.component.handleInput(key.backspace);
+	form.component.handleInput(key.escape);
+	form.component.handleInput(key.enter);
+
+	assert.deepEqual(form.result, [
+		{
+			questionId: "environment",
+			answer: "ab",
+			kind: "custom",
+		},
+	]);
+	await form.pending;
+});
+
+test("Delete enters retained custom editing without changing the draft", async () => {
+	const form = openForm(oneQuestion);
+
+	form.component.handleInput(key.down);
+	form.component.handleInput("abc");
+	form.component.handleInput(key.escape);
+	form.component.handleInput(key.delete);
+
+	const editing = form.component.render(80).join("\n");
+	assert.match(editing, /abc/);
+	assert.match(editing, /Type to edit/);
+
+	form.component.handleInput(key.escape);
+	form.component.handleInput(key.enter);
+	assert.equal(form.result[0].answer, "abc");
 	await form.pending;
 });
 

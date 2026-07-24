@@ -56,8 +56,12 @@ export function allResponses(
 }
 
 function isPrintableInput(data: string): boolean {
-	if (data.startsWith("\u001b")) return false;
-	return [...data].some((character) => character >= " ");
+	return (
+		data.length > 0 &&
+		[...data].every(
+			(character) => character >= " " && character !== "\x7f",
+		)
+	);
 }
 
 export async function showQuestionForm(
@@ -250,6 +254,11 @@ export async function showQuestionForm(
 					advance();
 				} else if (matchesKey(data, Key.escape)) {
 					done(null);
+				} else if (
+					choiceIndex === customIndex &&
+					(matchesKey(data, Key.backspace) || matchesKey(data, Key.delete))
+				) {
+					enterCustomEditing();
 				} else if (choiceIndex === customIndex && isPrintableInput(data)) {
 					enterCustomEditing(data);
 				}
