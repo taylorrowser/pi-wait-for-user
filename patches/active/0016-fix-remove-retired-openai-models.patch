@@ -1,0 +1,225 @@
+diff --git a/packages/ai/src/providers/azure-openai-responses.models.ts b/packages/ai/src/providers/azure-openai-responses.models.ts
+index 3ea4b07a2e00b5ea5c558056401ff5392f4fcbf2..82da340aff3644102adc6a8709bbf08b643a54cd 100644
+--- a/packages/ai/src/providers/azure-openai-responses.models.ts
++++ b/packages/ai/src/providers/azure-openai-responses.models.ts
+@@ -53,10 +53,6 @@ export const AZURE_OPENAI_RESPONSES_MODELS = values as {
+ 		id: "gpt-5-chat-latest";
+ 		provider: "azure-openai-responses";
+ 	};
+-	"gpt-5-codex": Model<"azure-openai-responses"> & {
+-		id: "gpt-5-codex";
+-		provider: "azure-openai-responses";
+-	};
+ 	"gpt-5-mini": Model<"azure-openai-responses"> & {
+ 		id: "gpt-5-mini";
+ 		provider: "azure-openai-responses";
+@@ -73,22 +69,6 @@ export const AZURE_OPENAI_RESPONSES_MODELS = values as {
+ 		id: "gpt-5.1";
+ 		provider: "azure-openai-responses";
+ 	};
+-	"gpt-5.1-chat-latest": Model<"azure-openai-responses"> & {
+-		id: "gpt-5.1-chat-latest";
+-		provider: "azure-openai-responses";
+-	};
+-	"gpt-5.1-codex": Model<"azure-openai-responses"> & {
+-		id: "gpt-5.1-codex";
+-		provider: "azure-openai-responses";
+-	};
+-	"gpt-5.1-codex-max": Model<"azure-openai-responses"> & {
+-		id: "gpt-5.1-codex-max";
+-		provider: "azure-openai-responses";
+-	};
+-	"gpt-5.1-codex-mini": Model<"azure-openai-responses"> & {
+-		id: "gpt-5.1-codex-mini";
+-		provider: "azure-openai-responses";
+-	};
+ 	"gpt-5.2": Model<"azure-openai-responses"> & {
+ 		id: "gpt-5.2";
+ 		provider: "azure-openai-responses";
+@@ -97,10 +77,6 @@ export const AZURE_OPENAI_RESPONSES_MODELS = values as {
+ 		id: "gpt-5.2-chat-latest";
+ 		provider: "azure-openai-responses";
+ 	};
+-	"gpt-5.2-codex": Model<"azure-openai-responses"> & {
+-		id: "gpt-5.2-codex";
+-		provider: "azure-openai-responses";
+-	};
+ 	"gpt-5.2-pro": Model<"azure-openai-responses"> & {
+ 		id: "gpt-5.2-pro";
+ 		provider: "azure-openai-responses";
+@@ -169,10 +145,6 @@ export const AZURE_OPENAI_RESPONSES_MODELS = values as {
+ 		id: "o3";
+ 		provider: "azure-openai-responses";
+ 	};
+-	"o3-deep-research": Model<"azure-openai-responses"> & {
+-		id: "o3-deep-research";
+-		provider: "azure-openai-responses";
+-	};
+ 	"o3-mini": Model<"azure-openai-responses"> & {
+ 		id: "o3-mini";
+ 		provider: "azure-openai-responses";
+@@ -185,8 +157,4 @@ export const AZURE_OPENAI_RESPONSES_MODELS = values as {
+ 		id: "o4-mini";
+ 		provider: "azure-openai-responses";
+ 	};
+-	"o4-mini-deep-research": Model<"azure-openai-responses"> & {
+-		id: "o4-mini-deep-research";
+-		provider: "azure-openai-responses";
+-	};
+ };
+diff --git a/packages/ai/src/providers/openai.models.ts b/packages/ai/src/providers/openai.models.ts
+index 86a3e69c0f5206189b377fadff4813cf4cb01692..1ccbc113226d6dcce45d181515ee786d2183df6b 100644
+--- a/packages/ai/src/providers/openai.models.ts
++++ b/packages/ai/src/providers/openai.models.ts
+@@ -53,10 +53,6 @@ export const OPENAI_MODELS = values as {
+ 		id: "gpt-5-chat-latest";
+ 		provider: "openai";
+ 	};
+-	"gpt-5-codex": Model<"openai-responses"> & {
+-		id: "gpt-5-codex";
+-		provider: "openai";
+-	};
+ 	"gpt-5-mini": Model<"openai-responses"> & {
+ 		id: "gpt-5-mini";
+ 		provider: "openai";
+@@ -73,22 +69,6 @@ export const OPENAI_MODELS = values as {
+ 		id: "gpt-5.1";
+ 		provider: "openai";
+ 	};
+-	"gpt-5.1-chat-latest": Model<"openai-responses"> & {
+-		id: "gpt-5.1-chat-latest";
+-		provider: "openai";
+-	};
+-	"gpt-5.1-codex": Model<"openai-responses"> & {
+-		id: "gpt-5.1-codex";
+-		provider: "openai";
+-	};
+-	"gpt-5.1-codex-max": Model<"openai-responses"> & {
+-		id: "gpt-5.1-codex-max";
+-		provider: "openai";
+-	};
+-	"gpt-5.1-codex-mini": Model<"openai-responses"> & {
+-		id: "gpt-5.1-codex-mini";
+-		provider: "openai";
+-	};
+ 	"gpt-5.2": Model<"openai-responses"> & {
+ 		id: "gpt-5.2";
+ 		provider: "openai";
+@@ -97,10 +77,6 @@ export const OPENAI_MODELS = values as {
+ 		id: "gpt-5.2-chat-latest";
+ 		provider: "openai";
+ 	};
+-	"gpt-5.2-codex": Model<"openai-responses"> & {
+-		id: "gpt-5.2-codex";
+-		provider: "openai";
+-	};
+ 	"gpt-5.2-pro": Model<"openai-responses"> & {
+ 		id: "gpt-5.2-pro";
+ 		provider: "openai";
+@@ -169,10 +145,6 @@ export const OPENAI_MODELS = values as {
+ 		id: "o3";
+ 		provider: "openai";
+ 	};
+-	"o3-deep-research": Model<"openai-responses"> & {
+-		id: "o3-deep-research";
+-		provider: "openai";
+-	};
+ 	"o3-mini": Model<"openai-responses"> & {
+ 		id: "o3-mini";
+ 		provider: "openai";
+@@ -185,8 +157,4 @@ export const OPENAI_MODELS = values as {
+ 		id: "o4-mini";
+ 		provider: "openai";
+ 	};
+-	"o4-mini-deep-research": Model<"openai-responses"> & {
+-		id: "o4-mini-deep-research";
+-		provider: "openai";
+-	};
+ };
+diff --git a/packages/ai/test/model-data-validation.test.ts b/packages/ai/test/model-data-validation.test.ts
+index 1e7798d3f989a385128f1a907dce4b7f513a7824..530316670f85ee76a757afa98198ffd19c9b7416 100644
+--- a/packages/ai/test/model-data-validation.test.ts
++++ b/packages/ai/test/model-data-validation.test.ts
+@@ -1,6 +1,7 @@
+ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+ import { tmpdir } from "node:os";
+-import { join } from "node:path";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
+ import { afterEach, describe, expect, it } from "vitest";
+ import {
+ 	createModelDataManifest,
+@@ -11,6 +12,7 @@ import {
+ 	validateModelDataDirectory,
+ } from "../scripts/model-data.ts";
+ 
++const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+ const temporaryRoots: string[] = [];
+ 
+ afterEach(() => {
+@@ -71,6 +73,26 @@ function writeFixtureData(
+ }
+ 
+ describe("generated model data validation", () => {
++	it("does not require OpenAI models shut down upstream for strict hydration", () => {
++		const structure = readModelDataStructure(packageRoot);
++		const retiredOpenAiModelIds = [
++			"gpt-5-codex",
++			"gpt-5.1-chat-latest",
++			"gpt-5.1-codex",
++			"gpt-5.1-codex-max",
++			"gpt-5.1-codex-mini",
++			"gpt-5.2-codex",
++			"o3-deep-research",
++			"o4-mini-deep-research",
++		];
++
++		for (const provider of ["openai", "azure-openai-responses"]) {
++			for (const modelId of retiredOpenAiModelIds) {
++				expect(structure[provider]).not.toHaveProperty(modelId);
++			}
++		}
++	});
++
+ 	it("validates complete data against generated structural catalogs", () => {
+ 		const { dataDir, structure } = createFixture();
+ 		expect(() => validateModelDataDirectory(structure, dataDir)).not.toThrow();
+diff --git a/packages/ai/test/openai-responses-reasoning-replay-e2e.test.ts b/packages/ai/test/openai-responses-reasoning-replay-e2e.test.ts
+index 85753c039fada1d03eb10b541df4b9f8163d6bd7..68b2326c0faa36a4270bbe9cf797a76e68580458 100644
+--- a/packages/ai/test/openai-responses-reasoning-replay-e2e.test.ts
++++ b/packages/ai/test/openai-responses-reasoning-replay-e2e.test.ts
+@@ -90,7 +90,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
+ 			// 6. With fix: tool calls/results converted to text, conversation continues
+ 
+ 			const modelA = getModel("openai", "gpt-5-mini");
+-			const modelB = getModel("openai", "gpt-5.2-codex");
++			const modelB = getModel("openai", "gpt-5.5");
+ 
+ 			const apiKey = getEnvApiKey("openai");
+ 			if (!apiKey) {
+@@ -189,7 +189,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
+ 			// 5. Should work because foreign IDs have no pairing expectation
+ 
+ 			const anthropicModel = getModel("anthropic", "claude-sonnet-4-5");
+-			const codexModel = getModel("openai", "gpt-5.2-codex");
++			const codexModel = getModel("openai", "gpt-5.5");
+ 
+ 			const anthropicApiKey = getEnvApiKey("anthropic");
+ 			const openaiApiKey = getEnvApiKey("openai");
+diff --git a/packages/ai/test/xhigh.test.ts b/packages/ai/test/xhigh.test.ts
+index f1722b9a714cfbe69b8bcd2c06082eb571176950..c2db04cba7c764ae37cc8564a9a40a80604669d1 100644
+--- a/packages/ai/test/xhigh.test.ts
++++ b/packages/ai/test/xhigh.test.ts
+@@ -15,10 +15,9 @@ function makeContext(): Context {
+ }
+ 
+ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
+-	describe("codex-max (supports xhigh)", () => {
+-		// Note: codex models only support the responses API, not chat completions
++	describe("gpt 5.5 (supports xhigh)", () => {
+ 		it("should work with openai-responses", async () => {
+-			const model = getModel("openai", "gpt-5.1-codex-max");
++			const model = getModel("openai", "gpt-5.5");
+ 			const s = stream(model, makeContext(), { reasoningEffort: "xhigh" });
+ 			let hasThinking = false;
+ 

@@ -140,14 +140,13 @@ test("the release gate lists every required fixture category", () => {
   }
 });
 
-test("a passing release stages complete artifacts and a manifest for signing", () => {
+test("the public release artifact inventory omits Intel macOS", () => {
   const root = copyBundleFixture();
   const output = join(root, "assets");
   const binaries = join(root, "binaries");
   mkdirSync(binaries);
   for (const name of [
     "pi-wait-for-user-darwin-arm64.tar.gz",
-    "pi-wait-for-user-darwin-x64.tar.gz",
     "pi-wait-for-user-linux-arm64.tar.gz",
     "pi-wait-for-user-linux-x64.tar.gz",
     "pi-wait-for-user-windows-arm64.zip",
@@ -242,9 +241,17 @@ test("a passing release stages complete artifacts and a manifest for signing", (
   assert.ok(files.includes("install.sh"));
   assert.ok(files.includes("pi-wait-for-user-darwin-arm64.tar.gz"));
   assert.ok(files.includes("pi-wait-for-user-linux-x64.tar.gz"));
+  assert.equal(files.some((name) => name.includes("darwin-x64")), false);
   const unsigned = JSON.parse(readFileSync(join(output, ".release-metadata", "unsigned-manifest.json"), "utf8"));
   assert.equal(unsigned.releaseId, releaseCandidateId);
-  assert.equal(unsigned.platformArchives.length, 6);
+  assert.deepEqual(unsigned.platformArchives.map(({ platform }) => platform), [
+    "darwin-arm64",
+    "linux-arm64",
+    "linux-x64",
+    "windows-arm64",
+    "windows-x64",
+  ]);
+  assert.equal(unsigned.provenance.artifacts.some(({ name }) => name.includes("darwin-x64")), false);
   assert.deepEqual(unsigned.manager.artifacts.map((entry) => entry.name), [`pi-wait-for-user-${releaseCandidateId}.tgz`]);
   assert.equal(unsigned.compatibility.questionTool.package.name, `taylorrowser-pi-question-tool-${releaseCandidateInput.questionTool.version}.tgz`);
   assert.equal(unsigned.bootstrap.installer.name, "install.sh");
@@ -253,6 +260,13 @@ test("a passing release stages complete artifacts and a manifest for signing", (
   assert.equal(existsSync(join(output, "SHA256SUMS")), true);
   assert.equal(existsSync(join(output, "artifact-manifest.json")), true);
   assert.equal(existsSync(join(output, "active.json")), true);
+  assert.doesNotMatch(readFileSync(join(output, "SHA256SUMS"), "utf8"), /darwin-x64/);
+  assert.equal(
+    JSON.parse(readFileSync(join(output, "artifact-manifest.json"), "utf8")).assets
+      .some(({ name }) => name.includes("darwin-x64")),
+    false,
+  );
+  assert.equal(files.some((name) => name === "archive-metadata-darwin-x64.json"), false);
 
   const verified = spawnSync(process.execPath, [releaseMetadataCli, "verify",
     "--manifest", manifestPath,
@@ -391,14 +405,14 @@ test("release verification rejects release documentation identity drift", () => 
   assert.match(result.stderr, /Release notes heading/);
 });
 
-test("maintainer documentation distinguishes every-platform smoke from the Linux interactive smoke", () => {
+test("maintainer documentation distinguishes supported-platform smoke from the Linux interactive smoke", () => {
   const readme = readFileSync(join(repositoryRoot, "README.md"), "utf8");
 
   assert.match(
     readme,
-    /Question Tool payload presence on every supported macOS\/Linux platform, plus interactive Question Tool loading on Linux x64/,
+    /Question Tool payload presence on macOS Apple Silicon and Linux ARM64\/x64, plus interactive Question Tool loading on Linux x64/,
   );
-  assert.doesNotMatch(readme, /interactive Question Tool loading on every supported macOS\/Linux platform/);
+  assert.doesNotMatch(readme, /interactive Question Tool loading on (?:every supported macOS\/Linux platform|macOS Apple Silicon)/);
 });
 
 test("release verification rejects a changed patch", () => {

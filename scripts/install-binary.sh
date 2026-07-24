@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-release_id="pi-v0.81.1-patch.9"
+release_id="pi-v0.81.1-patch.10"
 pi_version="0.81.1"
 payload_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 usage="Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH]"
@@ -28,7 +28,6 @@ launcher="$bin_dir/pi-wait-for-user"
 launcher_receipt="$install_dir/.launcher-receipt"
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) platform=darwin-arm64 ;;
-  Darwin-x86_64) platform=darwin-x64 ;;
   Linux-aarch64|Linux-arm64) platform=linux-arm64 ;;
   Linux-x86_64) platform=linux-x64 ;;
   *) echo "pi-wait-for-user: unsupported platform: $(uname -s) $(uname -m)" >&2; exit 1 ;;

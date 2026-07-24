@@ -525,18 +525,18 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   assert.match(workflow, /production-release:\n\s+if: startsWith\(github\.ref, 'refs\/tags\/'\)/);
   assert.match(workflow, /environment: production-release/);
   assert.match(workflow, /needs: \[release-candidate, platform-smoke\]/);
-  for (const [runner, platform] of [
+  const smokePlatforms = [...workflow.matchAll(/- runner: ([^\n]+)\n\s+platform: ([^\n]+)/g)]
+    .map(([, runner, platform]) => [runner, platform]);
+  assert.deepEqual(smokePlatforms, [
     ["macos-14", "darwin-arm64"],
-    ["macos-13", "darwin-x64"],
     ["ubuntu-24.04-arm", "linux-arm64"],
     ["ubuntu-24.04", "linux-x64"],
-  ]) {
-    assert.match(workflow, new RegExp(`runner: ${runner}\\n\\s+platform: ${platform}`));
-  }
+  ]);
   assert.match(workflow, /Smoke-test the exact supported platform payload/);
   assert.match(workflow, /Deferred conformance passed \(8\/8\)/);
   assert.match(workflow, /manifest\.platformArchives/);
-  assert.match(workflow, /\^\(\?:darwin\|linux\)-\(\?:arm64\|x64\)\$/);
+  assert.match(workflow, /\^\(\?:darwin-arm64\|linux-\(\?:arm64\|x64\)\)\$/);
+  assert.doesNotMatch(workflow, /darwin-x64/);
   assert.match(workflow, /release-metadata\.mjs receipt/);
   assert.match(workflow, /installation-receipt-\$platform\.json/);
   assert.match(workflow, /origin\/main:releases\/\$file/);

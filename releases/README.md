@@ -4,7 +4,7 @@ The signed **Release Channel** is the sole mutable promotion authority. It has a
 
 During compatibility migration, `release-metadata.mjs promote` may generate an `active.json` projection. That file carries `generatedFrom: "release-channel"`, the Channel sequence, and manifest digest. Consumers must verify the Channel and manifest before using the projection.
 
-The checked-in `releases/<release-id>/manifest.json` is a **release candidate input**, not an active Channel selection or the published Release Manifest. The package version identifies that candidate (`pi-v${package.version}`), and verification requires every package, shell, installer, and documentation identity to agree. A published `release-manifest.json` is produced only after artifacts and GitHub provenance have been verified.
+The checked-in `releases/<release-id>/manifest.json` is a **release candidate input**, not an active Channel selection or the published Release Manifest. The current public artifact inventory contains macOS Apple Silicon, Linux ARM64/x64, and manual Windows ARM64/x64 archives; Intel macOS has no archive or generated projection. Managed Installation smoke and receipt outputs cover only `darwin-arm64`, `linux-arm64`, and `linux-x64`. The package version identifies that candidate (`pi-v${package.version}`), and verification requires every package, shell, installer, and documentation identity to agree. A published `release-manifest.json` is produced only after artifacts and GitHub provenance have been verified.
 
 ## Metadata schemas
 
@@ -43,4 +43,4 @@ Accepted Channel state stores the highest sequence, selected release ID and mani
 
 ## Archive policy
 
-Promotion never edits or deletes a previous release directory, tag, signed manifest, report, checksum projection, provenance attestation, or payload. Archived releases remain downloadable and reproducible for their pinned source but receive no fixes, rebases, or feature updates.
+Promotion never edits or deletes a previous release directory, tag, signed manifest, report, checksum projection, provenance attestation, or payload. A public tag is immutable even when its workflow fails before creating a GitHub Release; remediation always chooses a new release identity. Archived releases remain downloadable and reproducible for their pinned source but receive no fixes, rebases, or feature updates.

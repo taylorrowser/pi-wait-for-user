@@ -122,8 +122,6 @@ jobs:
         include:
           - runner: macos-14
             platform: darwin-arm64
-          - runner: macos-13
-            platform: darwin-x64
           - runner: ubuntu-24.04-arm
             platform: linux-arm64
           - runner: ubuntu-24.04
@@ -287,7 +285,7 @@ jobs:
           node -e '
             const manifest = require(process.argv[1]).signed;
             for (const { platform } of manifest.platformArchives) {
-              if (/^(?:darwin|linux)-(?:arm64|x64)$/.test(platform)) console.log(platform);
+              if (/^(?:darwin-arm64|linux-(?:arm64|x64))$/.test(platform)) console.log(platform);
             }
           ' "$manifest" |
           while IFS= read -r platform; do

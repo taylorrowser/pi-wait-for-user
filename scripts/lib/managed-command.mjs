@@ -26,7 +26,7 @@ export function nativeManagedPlatform() {
   const os = process.platform === "darwin" ? "darwin" : process.platform;
   const arch = process.arch === "x64" ? "x64" : process.arch;
   const identity = `${os}-${arch}`;
-  if (!/^(?:darwin|linux)-(?:arm64|x64)$/.test(identity)) throw new Error(`Unsupported managed platform: ${identity}`);
+  if (!/^(?:darwin-arm64|linux-(?:arm64|x64))$/.test(identity)) throw new Error(`Unsupported managed platform: ${identity}`);
   return identity;
 }
 

@@ -240,7 +240,7 @@ This phase is blocked until #62 is merged.
 1. Fetch current `origin/main` and confirm #62 is closed and its PR merge commit is on `main`.
 2. Rebase the #58 public work onto current `origin/main`.
 3. Propose one unpublished release ID and one exact 40-character source commit on `main`.
-4. Confirm no tag or GitHub Release already uses that ID.
+4. Confirm no tag or GitHub Release already uses that ID. A public tag remains immutable even when its workflow produced no GitHub Release; choose a new release identity rather than deleting, moving, or reusing it.
 5. Run the complete release gate from a clean checkout of that exact commit.
 6. Present the release ID, source commit, upstream identity, Manager Release identity, and Channel sequence to the user.
 

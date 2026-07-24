@@ -11,7 +11,6 @@ import { createPayloadInventory, sha256File } from "./lib/release-metadata.mjs";
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const supportedPlatforms = [
   "darwin-arm64",
-  "darwin-x64",
   "linux-x64",
   "linux-arm64",
   "windows-x64",
@@ -52,7 +51,6 @@ function usage() {
 function unixPlatformCheck(platform) {
   const allowed = {
     "darwin-arm64": "Darwin-arm64",
-    "darwin-x64": "Darwin-x86_64",
     "linux-arm64": "Linux-aarch64|Linux-arm64",
     "linux-x64": "Linux-x86_64",
   }[platform];
