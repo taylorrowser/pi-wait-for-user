@@ -37,4 +37,4 @@ This release guarantees reconstruction after completed session-journal appends a
 
 ## Archive
 
-[`pi-v0.81.1-patch.9`](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.9) is archived unchanged and its public tag is never moved or reused. Archived releases receive no retroactive changes.
+The failed `pi-v0.81.1-patch.9` publication candidate has an immutable public tag but no GitHub Release. That tag is never moved or reused; this release uses the new `pi-v0.81.1-patch.10` identity.
