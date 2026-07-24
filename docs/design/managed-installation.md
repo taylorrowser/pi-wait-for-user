@@ -366,7 +366,7 @@ Commands converge safely:
 
 ## Platform and migration plan
 
-The metadata, Activation, receipt, lease, and lifecycle state machines are cross-platform. Initial managed implementation targets macOS/Linux ARM64 and x64, matching the supported one-command bootstrap. Existing Windows ARM64/x64 archives remain manual and side-by-side. A blocked follow-up ticket implements equivalent Windows entrypoint, atomic replacement, locking, leases, and uninstall semantics.
+The metadata, Activation, receipt, lease, and lifecycle state machines are cross-platform. Initial managed implementation targets macOS Apple Silicon plus Linux ARM64/x64, matching the supported one-command bootstrap. Intel macOS is unsupported and rejected before bootstrap metadata or payload download. Existing Windows ARM64/x64 archives remain manual and side-by-side. A blocked follow-up ticket implements equivalent Windows entrypoint, atomic replacement, locking, leases, and uninstall semantics.
 
 The first managed implementation accepts only publisher-built artifacts declared by the signed Release Manifest. The existing source-build path remains an unmanaged side-by-side fallback. Supporting locally built managed payloads requires a separate signed-input/local-build receipt design.
 

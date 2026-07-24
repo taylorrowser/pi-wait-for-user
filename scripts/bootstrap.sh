@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-release_id="pi-v0.81.1-patch.9"
+release_id="pi-v0.81.1-patch.10"
 
 for command in node tar; do
   if ! command -v "$command" >/dev/null 2>&1; then
@@ -33,7 +33,7 @@ MCowBQYDK2VwAyEAEJzllQrM61gGDYr5Q7zfhe+5A/ttP9YpYLsIBsy5bzI=
 `]]);
 const metadataLimit = 8 * 1024 * 1024;
 const sha256Pattern = /^[a-f0-9]{64}$/;
-const platformPattern = /^(?:darwin|linux)-(?:arm64|x64)$/;
+const platformPattern = /^(?:darwin-arm64|linux-(?:arm64|x64))$/;
 
 function fail(message) { throw new Error(message); }
 function plain(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
@@ -171,6 +171,7 @@ function parseOptions(args) {
   return options;
 }
 
+const platform = nativePlatform();
 const temporary = mkdtempSync(join(tmpdir(), "pi-wait-for-user-bootstrap-"));
 try {
   const now = Date.now();
@@ -208,7 +209,6 @@ try {
   if (!Array.isArray(manifest.manager.compatibleReleaseManifestVersions) || !manifest.manager.compatibleReleaseManifestVersions.includes(1)) fail("Incompatible Manager Release");
   if (!Array.isArray(manifest.manager.artifacts) || manifest.manager.artifacts.length !== 1) fail("Release Manifest must select one exact Manager Release artifact");
   const managerArtifact = artifact(manifest.manager.artifacts[0], "Manager Release artifact");
-  const platform = nativePlatform();
   if (!Array.isArray(manifest.platformArchives)) fail("Malformed platform archives");
   const selected = manifest.platformArchives.find((entry) => entry?.platform === platform);
   if (!selected || !Array.isArray(selected.payload) || selected.payload.length === 0) fail(`No compatible Downstream Release payload for ${platform}`);

@@ -2,17 +2,17 @@
 
 A maintained downstream Pi release that can stop an Agent Thread for durable human input, survive complete process teardown, and continue through an explicit Response, Interruption, Cancellation, resume, or abandonment path.
 
-The packaged release candidate is **`pi-v0.81.1-patch.9`**. It combines:
+The packaged release candidate is **`pi-v0.81.1-patch.10`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
-- the fifteen ordered downstream patches in [`patches/active`](patches/active); and
+- the seventeen ordered downstream patches in [`patches/active`](patches/active); and
 - the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.4`.
 
 ## Install on macOS or Linux
 
 ### Requirements
 
-- macOS or Linux, on ARM64 or x64
+- macOS on Apple Silicon, or Linux on ARM64 or x64 (Intel macOS is unsupported)
 - Node.js 22.19+ and `tar`
 - `curl` for the HTTPS convenience command
 
@@ -21,18 +21,18 @@ Review [`scripts/bootstrap.sh`](scripts/bootstrap.sh), then choose one explicit 
 **Side-by-side (default):** installs `pi-wait-for-user` and never claims `pi`.
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.9/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.10/install.sh | sh
 ```
 
 **Managed Installation:** additionally claims `pi` through the manager-owned `$HOME/.local/bin` entrypoint.
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.9/install.sh | sh -s -- --manage-pi
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.10/install.sh | sh -s -- --manage-pi
 ```
 
 Use `--bin-dir <path>` to select another launcher directory. The installer never edits shell startup files. If that directory loses PATH resolution, enablement exits nonzero and prints the exact PATH and `hash -r` remediation; rerunning converges safely. An existing Stock Pi is recorded and shadowed, never moved, copied, changed, or deleted. A foreign `pi` or `pi-wait-for-user` launcher is a hard error.
 
-The bootstrap pins the production root public key, verifies root-signed trust metadata and the delegated signatures on the Release Channel and Release Manifest, then downloads and verifies the exact Manager Release and platform Downstream Release payloads before executing them. The HTTPS-fetched script is itself the initial trust event; it cannot authenticate its own bytes.
+The bootstrap rejects unsupported platforms—including Intel macOS—before any metadata or payload download. On a supported platform, it pins the production root public key, verifies root-signed trust metadata and the delegated signatures on the Release Channel and Release Manifest, then downloads and verifies the exact Manager Release and platform Downstream Release payloads before executing them. The HTTPS-fetched script is itself the initial trust event; it cannot authenticate its own bytes.
 
 Existing Legacy Downstream Installations are adopted only when every payload path, mode, size, and digest matches the signed manifest. Otherwise the manager installs fresh and prints cleanup guidance without deleting the legacy directory.
 
@@ -72,7 +72,7 @@ See the [Question Tool guide](packages/question-tool/README.md) for interaction 
 The checksum/attestation-first path verifies the bootstrap before executing it:
 
 ```bash
-tag=pi-v0.81.1-patch.9
+tag=pi-v0.81.1-patch.10
 source=$(gh api "repos/taylorrowser/pi-wait-for-user/commits/$tag" --jq .sha)
 gh release download "$tag" --pattern install.sh --pattern SHA256SUMS
 grep ' install.sh$' SHA256SUMS | shasum -a 256 -c -       # macOS
@@ -112,8 +112,8 @@ Routine release-key rotation/revocation and the public fingerprint are documente
 The source-build path is explicitly **unmanaged and side-by-side**. It requires Node.js 22.19+, Git, and npm:
 
 ```bash
-gh release download pi-v0.81.1-patch.9 --pattern 'pi-wait-for-user-pi-v0.81.1-patch.9.tgz'
-tar -xzf pi-wait-for-user-pi-v0.81.1-patch.9.tgz
+gh release download pi-v0.81.1-patch.10 --pattern 'pi-wait-for-user-pi-v0.81.1-patch.10.tgz'
+tar -xzf pi-wait-for-user-pi-v0.81.1-patch.10.tgz
 node package/scripts/install.mjs install
 ```
 
@@ -138,9 +138,9 @@ One root-authorized, signed [Release Channel](releases/README.md) selects the su
 The tag workflow:
 
 1. runs the complete release gate, including managed state-machine and interruption scenarios, against a fresh exact source;
-2. uses Pi's upstream Bun cross-compilation path to build macOS, Linux, and Windows binaries for ARM64 and x64;
+2. uses Pi's upstream Bun cross-compilation path to build macOS Apple Silicon, Linux ARM64/x64, and Windows ARM64/x64 binaries;
 3. packages the exact Manager Release, Question Tool, bootstrap, gate report, and each platform Downstream Release payload;
-4. smoke-tests version, public conformance, model loading, and Question Tool payload presence on every supported macOS/Linux platform, plus interactive Question Tool loading on Linux x64;
+4. smoke-tests version, public conformance, model loading, and Question Tool payload presence on macOS Apple Silicon and Linux ARM64/x64, plus interactive Question Tool loading on Linux x64;
 5. verifies GitHub provenance for every payload and exact source/workflow identity;
 6. signs the complete Release Manifest and monotonic Release Channel;
 7. generates checksums, archive metadata, compatibility output, and receipts from the signed manifest; and
@@ -163,4 +163,4 @@ Exactly one release is selected by the signed Channel. A newer release gets a ne
 
 Older releases are **archived**, not supported. They remain reproducible and downloadable for their pinned Pi source but receive no rebases, feature updates, or retroactive fixes.
 
-No Depot configuration is currently required. GitHub-hosted runners and Bun's cross-compilation support build all target binaries in one release job.
+No Depot configuration is currently required. GitHub-hosted runners and Bun's cross-compilation support build all supported target binaries in one release job.

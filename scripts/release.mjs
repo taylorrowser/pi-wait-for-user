@@ -19,7 +19,7 @@ import { loadReleaseCandidateInput } from "./lib/release-input.mjs";
 import { createArchiveMetadata } from "./lib/release-metadata.mjs";
 
 const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const binaryPlatforms = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
+const binaryPlatforms = ["darwin-arm64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
 const binaryAssetNames = binaryPlatforms.map((platform) =>
   `pi-wait-for-user-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`,
 );

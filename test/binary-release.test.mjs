@@ -55,8 +55,42 @@ test("the managed bootstrap authenticates the Release Channel before selecting e
   assert.match(bootstrap, /release-channel/);
   assert.match(bootstrap, /release-manifest/);
   assert.match(bootstrap, /managed.*install/i);
-  assert.match(bootstrap, /\(\?:darwin\|linux\)/);
-  assert.match(bootstrap, /\(\?:arm64\|x64\)/);
+  assert.match(bootstrap, /\(\?:darwin-arm64\|linux-/);
+  assert.doesNotMatch(bootstrap, /darwin-x64/);
+});
+
+test("the managed HTTPS bootstrap rejects Intel macOS before any download", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intel-bootstrap-"));
+  temporaryRoots.push(root);
+  const fakeBin = join(root, "bin");
+  const fetchLog = join(root, "fetch-attempted");
+  const modulePath = join(root, "bootstrap.mjs");
+  const fakeNode = join(fakeBin, "node");
+  mkdirSync(fakeBin);
+  writeFileSync(fakeNode, `#!/bin/sh
+if [ "\${1:-}" = "-p" ]; then
+  echo 22.19
+  exit 0
+fi
+{
+  printf '%s\\n' \
+    'Object.defineProperty(process, "platform", { value: "darwin" });' \
+    'Object.defineProperty(process, "arch", { value: "x64" });' \
+    'globalThis.fetch = async () => { (await import("node:fs")).writeFileSync(${JSON.stringify(fetchLog)}, "attempted"); throw new Error("network attempted"); };'
+  cat
+} > ${JSON.stringify(modulePath)}
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(modulePath)}
+`);
+  chmodSync(fakeNode, 0o755);
+
+  const result = spawnSync("sh", [join(repositoryRoot, "scripts", "bootstrap.sh")], {
+    encoding: "utf8",
+    env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+  });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Managed installation does not support darwin-x64/);
+  assert.equal(existsSync(fetchLog), false);
 });
 
 test("the bootstrap uses signed artifact descriptors rather than an unauthenticated checksum projection", () => {
@@ -68,6 +102,21 @@ test("the bootstrap uses signed artifact descriptors rather than an unauthentica
   assert.match(bootstrap, /Downstream Release.*releaseArtifact/s);
   assert.match(bootstrap, /bytes\.length !== expected\.size/);
   assert.match(bootstrap, /createHash\("sha256"\).*expected\.sha256/s);
+});
+
+test("the binary packager rejects the retired Intel macOS target", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-intel-package-"));
+  temporaryRoots.push(root);
+  const result = spawnSync(process.execPath, [
+    join(repositoryRoot, "scripts", "package-binaries.mjs"),
+    "--input", join(root, "input"),
+    "--output", join(root, "output"),
+    "--platform", "darwin-x64",
+  ], { cwd: repositoryRoot, encoding: "utf8" });
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Usage: package-binaries/);
+  assert.equal(existsSync(join(root, "output")), false);
 });
 
 test("a binary release loads the clearly named Question Tool without a source checkout", () => {

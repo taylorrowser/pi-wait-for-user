@@ -1,0 +1,68 @@
+diff --git a/scripts/build-binaries.sh b/scripts/build-binaries.sh
+index c261aaf209a799e2f5c48427409e537d4b04f203..14ed74ede6b095f0fce1c8a8bac52a5c327dfff4 100755
+--- a/scripts/build-binaries.sh
++++ b/scripts/build-binaries.sh
+@@ -10,13 +10,12 @@
+ #   --skip-install      Skip npm ci
+ #   --skip-deps         Skip installing cross-platform dependencies
+ #   --skip-build        Skip npm run build
+-#   --platform <name>   Build only for specified platform (darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64)
++#   --platform <name>   Build only for specified platform (darwin-arm64, linux-x64, linux-arm64, windows-x64, windows-arm64)
+ #   --out <dir>         Output directory (default: packages/coding-agent/binaries)
+ #
+ # Output:
+ #   packages/coding-agent/binaries/
+ #     pi-darwin-arm64.tar.gz
+-#     pi-darwin-x64.tar.gz
+ #     pi-linux-x64.tar.gz
+ #     pi-linux-arm64.tar.gz
+ #     pi-windows-x64.zip
+@@ -64,11 +63,11 @@ done
+ # Validate platform if specified
+ if [[ -n "$PLATFORM" ]]; then
+     case "$PLATFORM" in
+-        darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64|windows-arm64)
++        darwin-arm64|linux-x64|linux-arm64|windows-x64|windows-arm64)
+             ;;
+         *)
+             echo "Invalid platform: $PLATFORM"
+-            echo "Valid platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64"
++            echo "Valid platforms: darwin-arm64, linux-x64, linux-arm64, windows-x64, windows-arm64"
+             exit 1
+             ;;
+     esac
+@@ -98,7 +97,6 @@ if [[ "$SKIP_DEPS" == "false" ]]; then
+     npm install --include=optional --no-save --package-lock=false --force --ignore-scripts \
+         @mariozechner/clipboard@"$CLIPBOARD_VERSION" \
+         @mariozechner/clipboard-darwin-arm64@"$CLIPBOARD_VERSION" \
+-        @mariozechner/clipboard-darwin-x64@"$CLIPBOARD_VERSION" \
+         @mariozechner/clipboard-linux-x64-gnu@"$CLIPBOARD_VERSION" \
+         @mariozechner/clipboard-linux-arm64-gnu@"$CLIPBOARD_VERSION" \
+         @mariozechner/clipboard-win32-x64-msvc@"$CLIPBOARD_VERSION" \
+@@ -119,13 +117,13 @@ cd packages/coding-agent
+ 
+ # Clean previous builds
+ rm -rf "$OUTPUT_DIR"
+-mkdir -p "$OUTPUT_DIR"/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64,windows-arm64}
++mkdir -p "$OUTPUT_DIR"/{darwin-arm64,linux-x64,linux-arm64,windows-x64,windows-arm64}
+ 
+ # Determine which platforms to build
+ if [[ -n "$PLATFORM" ]]; then
+     PLATFORMS=("$PLATFORM")
+ else
+-    PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 windows-arm64)
++    PLATFORMS=(darwin-arm64 linux-x64 linux-arm64 windows-x64 windows-arm64)
+ fi
+ 
+ for platform in "${PLATFORMS[@]}"; do
+@@ -161,10 +159,6 @@ for platform in "${PLATFORMS[@]}"; do
+             clipboard_native_package="clipboard-darwin-arm64"
+             clipboard_native_file="clipboard.darwin-arm64.node"
+             ;;
+-        darwin-x64)
+-            clipboard_native_package="clipboard-darwin-x64"
+-            clipboard_native_file="clipboard.darwin-x64.node"
+-            ;;
+         linux-x64)
+             clipboard_native_package="clipboard-linux-x64-gnu"
+             clipboard_native_file="clipboard.linux-x64-gnu.node"

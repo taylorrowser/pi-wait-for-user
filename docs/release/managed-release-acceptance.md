@@ -1,15 +1,15 @@
 # Managed Installation release acceptance
 
-This is the release-level traceability record for GitHub issue #63 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
+This is the release-level traceability record for GitHub issues #63 and #80 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
 
 ## Release and bootstrap
 
 | Design / #63 requirement | Automated evidence |
 | --- | --- |
-| Signed trust, Channel, Release Manifest, exact Manager Release, Question Tool, platform Downstream Release payloads, generated projections, receipts, and provenance | `test/release-metadata.test.mjs` — “authorized root and release signatures verify complete metadata”, “manifest projections are generated from one verified identity”, “production signing is tag-only…”, and provenance/drift rejection; `test/release.test.mjs` — “a passing release stages complete artifacts…”; `.github/workflows/release.yml` generates `installation-receipt-<platform>.json` for all four managed platforms before attesting and publishing every top-level asset |
+| Signed trust, Channel, Release Manifest, exact Manager Release, Question Tool, platform Downstream Release payloads, generated projections, receipts, and provenance | `test/release-metadata.test.mjs` — “authorized root and release signatures verify complete metadata”, “manifest projections are generated from one verified identity”, “production signing is tag-only…”, and provenance/drift rejection; `test/release.test.mjs` — “a passing release stages complete artifacts while omitting Intel macOS”; `.github/workflows/release.yml` generates `installation-receipt-<platform>.json` for `darwin-arm64`, `linux-arm64`, and `linux-x64` before attesting and publishing every top-level asset |
 | Clean HTTPS side-by-side or explicit Command Ownership bootstrap | `test/binary-release.test.mjs` — managed bootstrap authority and signed-descriptor tests; `test/managed-runtime.test.mjs` — “installer claims pi only with explicit --manage-pi” and “plain side-by-side setup…” |
 | Independently checked first use | `README.md` “Independently checked first use”; workflow attestation of `install.sh`; root SPKI fixture/production fingerprint verification in `test/release-metadata.test.mjs` |
-| macOS/Linux ARM64/x64 smoke and public conformance | `.github/workflows/release.yml` `platform-smoke` matrix; release-candidate Linux interactive Question Tool smoke |
+| macOS Apple Silicon and Linux ARM64/x64 smoke and public conformance | `.github/workflows/release.yml` `platform-smoke` matrix; release-candidate Linux interactive Question Tool smoke |
 | Release CI fails on state-machine, drift, provenance, platform smoke, or conformance failure | `scripts/release-gate.mjs` repository tests and public-conformance stages; metadata mutation tests; required `platform-smoke` matrix; `production-release` depends on both |
 
 ## Installation, update, and compatibility
@@ -35,6 +35,14 @@ This is the release-level traceability record for GitHub issue #63 and the accep
 | Active/previous/pinned/live-leased retention | retention, lease deferral, cleanup race, tombstone, and convergent retry tests |
 | Corrupt-active fail-closed recovery | malformed/tampered launch test and stage-0 previous recovery test |
 | Receipt-safe uninstall and preservation | uninstall, every interruption boundary, forged/symlink state refusal, leased deferral, absent no-op, and shared-data preservation hash tests |
+
+## Intel macOS removal (#80)
+
+| #80 requirement | Automated evidence |
+| --- | --- |
+| Intel macOS is not built and the public release inventory omits its archives, descriptors, checksums, and provenance subjects | `test/release-metadata.test.mjs` verifies the workflow's post-build Intel-archive absence guard; `test/release.test.mjs` — “a passing release stages complete artifacts while omitting Intel macOS”; `test/binary-release.test.mjs` — “the binary packager rejects the retired Intel macOS target” |
+| Managed HTTPS bootstrap rejects Intel macOS before selection or download | `test/binary-release.test.mjs` — “the managed HTTPS bootstrap rejects Intel macOS before any download” |
+| Production smoke and receipt outputs contain only supported managed targets | `test/release-metadata.test.mjs` — exact `darwin-arm64`, `linux-arm64`, and `linux-x64` workflow matrix plus receipt filter |
 
 ## Documentation and scope
 
