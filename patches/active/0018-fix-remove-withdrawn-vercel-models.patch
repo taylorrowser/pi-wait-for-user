@@ -36,7 +36,7 @@ index 1441b98acb8467624bd6347575889e29aea72305..f72b5855ee21c059ea61bb44782d7f17
  		id: "openai/gpt-5.2-codex";
  		provider: "vercel-ai-gateway";
 diff --git a/packages/ai/test/model-data-validation.test.ts b/packages/ai/test/model-data-validation.test.ts
-index 0d4b0adad548f261d629458560eb064a49dd0f6c..94c31bba44217076e06d989c9608bfc31d8bf921 100644
+index 0d4b0adad548f261d629458560eb064a49dd0f6c..b848bde24e9d09b6ff7e9b4601a5bc0dfee069f7 100644
 --- a/packages/ai/test/model-data-validation.test.ts
 +++ b/packages/ai/test/model-data-validation.test.ts
 @@ -73,15 +73,19 @@ function writeFixtureData(
@@ -65,18 +65,14 @@ index 0d4b0adad548f261d629458560eb064a49dd0f6c..94c31bba44217076e06d989c9608bfc3
  		const retiredOpenAiModelIds = [
  			"gpt-5-codex",
  			"gpt-5.1-chat-latest",
-@@ -104,6 +108,27 @@ describe("generated model data validation", () => {
+@@ -104,6 +108,23 @@ describe("generated model data validation", () => {
  		expect(() => hydrateModelDataStructure(structure, generated)).toThrow("missing openai/gpt-5.5");
  	});
  
 +	it("strict hydration excludes withdrawn Gateway identities and rejects other drift", () => {
 +		const structure = readModelDataStructure(packageRoot);
 +		const generated = generatedCatalogFor(structure);
-+		const withdrawnGatewayModelIds = [
-+			"anthropic/claude-opus-4.7-fast",
-+			"openai/gpt-5-chat",
-+			"openai/gpt-5.2-chat",
-+		];
++		const withdrawnGatewayModelIds = ["anthropic/claude-opus-4.7-fast", "openai/gpt-5-chat", "openai/gpt-5.2-chat"];
 +
 +		for (const modelId of withdrawnGatewayModelIds) {
 +			expect(structure["vercel-ai-gateway"]).not.toHaveProperty(modelId);
