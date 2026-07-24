@@ -227,9 +227,7 @@ function createVerifiedReceipt(options) {
   allowed(options, [
     "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--platform", "--owned-path", "--output",
   ]);
-  const manifest = readJson(resolve(required(options, "--manifest")));
-  const { trust, now } = authority(options);
-  const signedManifest = verifyReleaseManifest(manifest, { trust, now });
+  const { signedManifest } = loadVerifiedReceiptManifest(options);
   const receipt = createReceipt(
     signedManifest,
     required(options, "--platform"),
@@ -259,10 +257,14 @@ function readReceiptManifest(path) {
   }
 }
 
-function projectVerifiedReceipts(options) {
+function loadVerifiedReceiptManifest(options) {
   const manifest = readReceiptManifest(required(options, "--manifest"));
   const { trust, now } = authority(options);
-  const signedManifest = verifyReleaseManifest(manifest, { trust, now });
+  return { manifest, signedManifest: verifyReleaseManifest(manifest, { trust, now }) };
+}
+
+function projectVerifiedReceipts(options) {
+  const { manifest, signedManifest } = loadVerifiedReceiptManifest(options);
   const declaredManagedPlatforms = signedManifest.platformArchives
     .map(({ platform }) => platform)
     .filter((platform) => platform.startsWith("darwin-") || platform.startsWith("linux-"))
