@@ -536,7 +536,8 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   assert.match(workflow, /Deferred conformance passed \(8\/8\)/);
   assert.match(workflow, /manifest\.platformArchives/);
   assert.match(workflow, /\^\(\?:darwin-arm64\|linux-\(\?:arm64\|x64\)\)\$/);
-  assert.doesNotMatch(workflow, /darwin-x64/);
+  assert.match(workflow, /test ! -e \.work\/upstream-binaries\/pi-darwin-x64\.tar\.gz/);
+  assert.doesNotMatch(workflow.replace("pi-darwin-x64.tar.gz", ""), /darwin-x64/);
   assert.match(workflow, /release-metadata\.mjs receipt/);
   assert.match(workflow, /installation-receipt-\$platform\.json/);
   assert.match(workflow, /origin\/main:releases\/\$file/);

@@ -40,7 +40,7 @@ This is the release-level traceability record for GitHub issues #63 and #80 and 
 
 | #80 requirement | Automated evidence |
 | --- | --- |
-| Public release inventory omits Intel macOS archives, descriptors, checksums, and provenance subjects | `test/release.test.mjs` — “the public release artifact inventory omits Intel macOS”; `test/binary-release.test.mjs` — “the binary packager rejects the retired Intel macOS target” |
+| Intel macOS is not built and the public release inventory omits its archives, descriptors, checksums, and provenance subjects | `test/release-metadata.test.mjs` verifies the workflow's post-build Intel-archive absence guard; `test/release.test.mjs` — “the public release artifact inventory omits Intel macOS”; `test/binary-release.test.mjs` — “the binary packager rejects the retired Intel macOS target” |
 | Managed HTTPS bootstrap rejects Intel macOS before selection or download | `test/binary-release.test.mjs` — “the managed HTTPS bootstrap rejects Intel macOS before any download” |
 | Production smoke and receipt outputs contain only supported managed targets | `test/release-metadata.test.mjs` — exact `darwin-arm64`, `linux-arm64`, and `linux-x64` workflow matrix plus receipt filter |
 

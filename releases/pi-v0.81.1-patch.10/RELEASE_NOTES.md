@@ -7,7 +7,7 @@ End-to-end Managed Installation release for macOS Apple Silicon and Linux ARM64/
 - The reviewed HTTPS bootstrap pins the production root public key, verifies root-signed trust metadata and the delegated signatures on the Release Channel and Release Manifest, then downloads only the exact signed Manager Release and platform Downstream Release artifacts.
 - Plain bootstrap remains side-by-side; `--manage-pi` explicitly enables Command Ownership while preserving Stock Pi and shared Pi settings, credentials, packages, sessions, and Agent Threads.
 - The release workflow smoke-tests macOS Apple Silicon plus Linux ARM64/x64 payloads and requires the complete lifecycle/state-machine suite, metadata projections, provenance, and public conformance before publication.
-- Intel macOS is rejected as unsupported and has no archive, descriptor, receipt, checksum, or provenance subject in this release.
+- Intel macOS is rejected as unsupported, is not built, and has no archive, descriptor, receipt, checksum, or provenance subject in this release.
 - Strict model hydration no longer requires eight OpenAI API models shut down on 2026-07-23 or their derived Azure catalog entries; all other committed model identities remain release-gated against the live catalogs.
 - Managed status, Managed Update, Patch Lag, rollback, recovery, disablement, Stock Pi execution, verification, retention, and uninstall are documented and release-gated.
 

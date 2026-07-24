@@ -62,6 +62,7 @@ jobs:
             --skip-install \
             --skip-build \
             --out "$GITHUB_WORKSPACE/.work/upstream-binaries"
+          test ! -e .work/upstream-binaries/pi-darwin-x64.tar.gz
           node scripts/package-binaries.mjs \
             --input .work/upstream-binaries \
             --output .work/release-binaries
