@@ -2,7 +2,6 @@
 set -eu
 
 release_id="pi-v0.81.1-patch.9"
-trust_url="https://raw.githubusercontent.com/taylorrowser/pi-wait-for-user/main/releases/release-trust.json"
 
 for command in node tar; do
   if ! command -v "$command" >/dev/null 2>&1; then

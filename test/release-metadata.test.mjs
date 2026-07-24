@@ -535,7 +535,8 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   }
   assert.match(workflow, /Smoke-test the exact supported platform payload/);
   assert.match(workflow, /Deferred conformance passed \(8\/8\)/);
-  assert.match(workflow, /for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64/);
+  assert.match(workflow, /manifest\.platformArchives/);
+  assert.match(workflow, /\^\(\?:darwin\|linux\)-\(\?:arm64\|x64\)\$/);
   assert.match(workflow, /release-metadata\.mjs receipt/);
   assert.match(workflow, /installation-receipt-\$platform\.json/);
   assert.match(workflow, /origin\/main:releases\/\$file/);
