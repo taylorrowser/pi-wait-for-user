@@ -15,7 +15,9 @@ import {
   shellHashRemediation,
 } from "./lib/managed-command.mjs";
 import {
+  adoptPairLeaseFromEnvironment,
   cleanupManagedState,
+  clearManagedUpdateHold,
   defaultManagedBinDirectory,
   defaultManagedDataRoot,
   disableManagedCommandOwnership,
@@ -23,8 +25,14 @@ import {
   executeStockPi,
   installAndActivate,
   installManagedCompatibility,
+  managedPiResolution,
+  pinManagedRelease,
+  pruneManagedInstallation,
   readLegacyInstallationAdoption,
   recoverPrevious,
+  rollbackManagedInstallation,
+  unpinManagedRelease,
+  uninstallManagedInstallation,
   verifyManagedInstallation,
 } from "./lib/managed-runtime.mjs";
 import {
@@ -35,6 +43,7 @@ import {
 } from "./lib/managed-update.mjs";
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+adoptPairLeaseFromEnvironment(process.env);
 
 function fail(message) {
   throw new Error(message);
@@ -96,6 +105,40 @@ function enableOwnership(args) {
   });
   console.log(`Command Ownership ${result}.`);
   console.log(shellHashRemediation);
+}
+
+function retentionReleaseId(args, command) {
+  if (args.length > 1 || args[0]?.startsWith("--")) fail(`Usage: pi managed ${command} [release-id]`);
+  return args[0];
+}
+
+function pin(args) {
+  const result = pinManagedRelease(dataRoot(), retentionReleaseId(args, "pin"));
+  const id = result.pair.downstreamReleaseId;
+  console.log(result.kind === "pinned" ? `Pinned Downstream Release ${id}.` : `Downstream Release ${id} is already pinned.`);
+}
+
+function unpin(args) {
+  const result = unpinManagedRelease(dataRoot(), retentionReleaseId(args, "unpin"));
+  console.log(result.kind === "unpinned"
+    ? `Unpinned Downstream Release ${result.releaseId}.`
+    : `Downstream Release ${result.releaseId} is already unpinned.`);
+}
+
+function rollback(args) {
+  const values = parseManagedOptions(args);
+  rejectUnknownOptions(values, ["--to"]);
+  console.error("Warning: newer sessions may reject or reconstruct as unavailable across this compatibility boundary.");
+  const result = rollbackManagedInstallation(dataRoot(), {
+    releaseId: values.get("--to"),
+    checkpoint: interruptionCheckpoint(),
+  });
+  if (result.kind === "rolled-back") {
+    console.log(`Rolled back to ${result.activation.active.managerReleaseId} + ${result.activation.active.downstreamReleaseId}; Update Hold recorded for ${result.heldReleaseId}.`);
+    for (const issue of result.cleanupIssues) console.error(`Post-rollback cleanup is deferred: ${issue}`);
+  } else if (result.kind === "already-active") {
+    console.log(`Downstream Release ${result.activation.active.downstreamReleaseId} is already active.`);
+  } else console.log("No previous local Activation is available; nothing changed.");
 }
 
 function verifyInstallation(args) {
@@ -174,6 +217,7 @@ function beginStartupCheck(args) {
 function printManagedUpdate(result) {
   if (result.kind === "activated") {
     console.log(`Activated Downstream Release ${result.active.releaseId} (upstream Pi ${result.active.upstreamVersion}); Channel sequence ${result.channel.sequence}.`);
+    if (result.cleanupPending) console.error(`Post-activation cleanup is deferred: ${result.cleanupError}`);
   } else if (result.kind === "patch-lag") {
     console.log(`Patch Lag: ${result.patchLag.currentReleaseId} is based on upstream Pi ${result.patchLag.currentUpstreamVersion}; observed upstream Pi ${result.patchLag.observedUpstreamVersion} is newer. The verified Activation remains active.`);
   } else if (result.kind === "incompatible") {
@@ -213,6 +257,7 @@ try {
   } else if (args[0] === "managed" && args[1] === "activate") {
     const { activation, adoption } = activate(args.slice(2));
     console.log(`Activated ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
+    for (const issue of activation.cleanupIssues || []) console.error(`Post-activation cleanup is deferred: ${issue}`);
     for (const message of legacyInstallationAdoptionMessages(adoption)) console.log(message);
   } else if (args[0] === "managed" && args[1] === "install-compatibility") {
     installCompatibility(args.slice(2));
@@ -220,6 +265,17 @@ try {
     enableOwnership(args.slice(2));
   } else if (args[0] === "managed" && args[1] === "verify") {
     verifyInstallation(args.slice(2));
+  } else if (args[0] === "managed" && args[1] === "rollback") {
+    rollback(args.slice(2));
+  } else if (args[0] === "managed" && args[1] === "pin") {
+    pin(args.slice(2));
+  } else if (args[0] === "managed" && args[1] === "unpin") {
+    unpin(args.slice(2));
+  } else if (args.length === 2 && args[0] === "managed" && args[1] === "prune") {
+    const result = pruneManagedInstallation(dataRoot());
+    console.log(`Pruned ${result.removed} pair(s); deferred ${result.deferred} leased pair(s).`);
+  } else if (args.length === 2 && args[0] === "managed" && args[1] === "unhold") {
+    console.log(`Update Hold ${clearManagedUpdateHold(dataRoot())}.`);
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "status") {
     console.log(formatManagedStatus(dataRoot()));
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "_startup-check") {
@@ -229,8 +285,17 @@ try {
     console.log(`Recovered ${activation.active.managerReleaseId} + ${activation.active.downstreamReleaseId}.`);
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "disable") {
     console.log(`Command Ownership ${disableManagedCommandOwnership(dataRoot())}.`);
+    console.log(managedPiResolution(process.env).message);
   } else if (args.length === 2 && args[0] === "managed" && args[1] === "cleanup") {
     console.log(`Removed ${cleanupManagedState(dataRoot())} verified temporary path(s).`);
+  } else if (args.length === 2 && args[0] === "managed" && args[1] === "uninstall") {
+    const result = uninstallManagedInstallation(dataRoot(), {
+      environment: process.env,
+      checkpoint: interruptionCheckpoint(),
+    });
+    console.log(result.kind === "already-absent"
+      ? `Managed Installation already absent. ${result.resolution.message}`
+      : `Managed Installation uninstalled${result.deferred ? `; ${result.deferred} leased pair(s) deferred` : ""}. ${result.resolution.message}`);
   } else if (args[0] === "managed" && args[1] === "stock" && args[2] === "--") {
     process.exitCode = executeStockPi(dataRoot(), args.slice(3));
   } else if (args[0] === "managed") {

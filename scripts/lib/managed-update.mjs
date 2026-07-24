@@ -17,6 +17,7 @@ import { enabledEnvironmentFlag } from "./managed-command.mjs";
 import {
   acceptManagedUpdateMetadata,
   assertLifecycleCapability,
+  clearManagedUpdateHoldForRelease,
   inspectStockPiIdentity,
   installAndActivateFromManagedConfig,
   managedCandidateIdentityConflict,
@@ -28,6 +29,7 @@ import {
   readActivation,
   readManagedStartupContext,
   readManagedStateJson,
+  readManagedUpdateHold,
   readManagedUpdateContext,
   recordManagedUpdateDiagnostic,
   removeManagedStateFileIfOwned,
@@ -349,7 +351,12 @@ async function checkManagedUpdateLocked(dataRoot, options = {}) {
   if (identityConflict) status.patchLag = null;
   status.checkedAt = now.toISOString();
   if (options.cache !== false) writeManagedStateJson(dataRoot, "update-status.json", status);
-  if (!candidateChanged) await withManagedUpdateStage("Update Hold cleanup", async () => clearExactUpdateHold(dataRoot, manifest.releaseId));
+  if (!candidateChanged) await withManagedUpdateStage("Update Hold cleanup", async () => clearExactUpdateHold(
+    dataRoot,
+    manifest.releaseId,
+    options.lifecycleCapability,
+    options.checkpoint,
+  ));
   const common = {
     active: status.active,
     channel: status.channel,
@@ -382,9 +389,8 @@ function failureStage(error, fallback) {
   return errorMessage(error).match(/^Managed Update failed during ([^:]+):/)?.[1] || fallback;
 }
 
-function clearExactUpdateHold(dataRoot, releaseId) {
-  const hold = readUpdateHold(dataRoot);
-  if (hold?.releaseId === releaseId) unlinkSync(paths(dataRoot).hold);
+function clearExactUpdateHold(dataRoot, releaseId, lifecycleCapability, checkpoint) {
+  return clearManagedUpdateHoldForRelease(dataRoot, releaseId, { lifecycleCapability, checkpoint });
 }
 
 function activatedStatus(checked, candidate, now) {
@@ -461,9 +467,22 @@ async function performManagedUpdateLocked(dataRoot, options = {}) {
         lifecycleCapability: options.lifecycleCapability,
       }));
       stage = "post-activation cleanup";
-      clearExactUpdateHold(dataRoot, checked.candidate.releaseId);
-      writeManagedStateJson(dataRoot, "update-status.json", activatedStatus(checked, checked.candidate, options.now || new Date()));
-      return { kind: "activated", active: checked.candidate, channel: checked.channel, activation };
+      const cleanupErrors = [...(activation.cleanupIssues || [])];
+      try {
+        clearExactUpdateHold(dataRoot, checked.candidate.releaseId, options.lifecycleCapability, options.checkpoint);
+        writeManagedStateJson(dataRoot, "update-status.json", activatedStatus(checked, checked.candidate, options.now || new Date()));
+      } catch (error) {
+        cleanupErrors.push(errorMessage(error));
+        recordManagedUpdateDiagnostic(dataRoot, stage, error);
+      }
+      return {
+        kind: "activated",
+        active: checked.candidate,
+        channel: checked.channel,
+        activation,
+        cleanupPending: cleanupErrors.length > 0,
+        cleanupError: cleanupErrors.join("; ") || undefined,
+      };
     });
   } catch (error) {
     if (stage !== "verification and activation") {
@@ -519,13 +538,7 @@ export async function runManagedUpdate(dataRoot, options = {}) {
 }
 
 function readUpdateHold(dataRoot) {
-  const holdPath = paths(dataRoot).hold;
-  if (!existsSync(holdPath)) return null;
-  const hold = readManagedStateJson(dataRoot, "update-hold.json", "Update Hold", { maximumSize: metadataLimit });
-  if (!hasExactKeys(hold, ["schemaVersion", "type", "releaseId", "createdAt"])
-    || hold.schemaVersion !== 1 || hold.type !== "update-hold" || !idPattern.test(hold.releaseId)
-    || !validDate(hold.createdAt)) fail("Malformed Update Hold");
-  return hold;
+  return readManagedUpdateHold(dataRoot);
 }
 
 function statusMatchesContext(status, context) {
