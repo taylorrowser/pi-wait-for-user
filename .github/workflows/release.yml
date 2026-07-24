@@ -180,12 +180,25 @@ jobs:
           echo "AUTHORITY_DIR=$authority" >> "$GITHUB_ENV"
           echo "RELEASE_ROOT_KEY_ID=$root_key_id" >> "$GITHUB_ENV"
           node -e '
+            const fs = require("fs");
             const value = process.env.RELEASE_CHANNEL_EXPIRES;
             const expires = Date.parse(value);
             if (!Number.isFinite(expires) || new Date(expires).toISOString() !== value || expires <= Date.now()) {
               throw new Error("RELEASE_CHANNEL_EXPIRES must be an unexpired canonical ISO timestamp");
             }
-          '
+            const statePath = `${process.argv[1]}/channel-state.json`;
+            const current = fs.existsSync(statePath) ? JSON.parse(fs.readFileSync(statePath, "utf8")).sequence : 0;
+            const requested = Number(process.env.RELEASE_CHANNEL_SEQUENCE);
+            if (!Number.isSafeInteger(requested) || requested < 1 || requested < current) {
+              throw new Error("RELEASE_CHANNEL_SEQUENCE must not replay current Channel state");
+            }
+            if (requested > current) {
+              const remaining = expires - Date.now();
+              if (remaining < 59 * 86400000 || remaining > 61 * 86400000) {
+                throw new Error("A new Channel sequence must expire approximately 60 days in the future");
+              }
+            }
+          ' "$authority"
 
       - name: Sign the complete Release Manifest and Channel
         env:
@@ -283,6 +296,10 @@ jobs:
             exit 1
           fi
           git fetch origin main
+          test "$(git rev-parse origin/main)" = "$AUTHORITY_COMMIT" || {
+            echo "main changed after immutable publication; refusing to stage stale promotion state" >&2
+            exit 1
+          }
           git switch --create "$branch" origin/main
           cp "dist/$RELEASE_ID/channel.json" releases/channel.json
           cp "dist/$RELEASE_ID/channel-state.json" releases/channel-state.json

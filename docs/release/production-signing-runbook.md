@@ -410,7 +410,7 @@ Keep the exact Environment variables frozen. Diagnose using redacted/public evid
 Do not rerun signing. In a clean checkout:
 
 1. download the immutable release's `channel.json`, `channel-state.json`, and `trust-state.json`;
-2. independently verify them against the release manifest, public root, trust, and prior `main` checkpoints;
+2. independently verify them against the Release Manifest, public root, trust, and prior `main` checkpoints;
 3. create `release-promotion/<release-id>-sequence-<sequence>` from current `origin/main`;
 4. copy only those three exact public files into `releases/`;
 5. commit and push the branch; and
