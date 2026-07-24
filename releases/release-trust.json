@@ -1,0 +1,25 @@
+{
+  "signed": {
+    "schemaVersion": 1,
+    "type": "release-trust",
+    "version": 1,
+    "expires": "2028-01-24T12:34:37.919Z",
+    "channelUrl": "https://raw.githubusercontent.com/taylorrowser/pi-wait-for-user/main/releases/channel.json",
+    "releaseKeys": [
+      {
+        "keyId": "release-2026-1",
+        "algorithm": "ed25519",
+        "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAhlRqVa9eXwQbD24Rz95CWqxcz4hAjnDXprM+qk5KoxE=\n-----END PUBLIC KEY-----\n",
+        "expires": "2027-01-20T12:34:37.919Z",
+        "revoked": false
+      }
+    ]
+  },
+  "signatures": [
+    {
+      "keyId": "root-2026-1",
+      "algorithm": "ed25519",
+      "signature": "N5Zq6PwZYkv1rkhKGJWe7aDSlVm23yOn0TiqzEj7OkhN/3sxEfWGO3magWc7JdNxpXfufcl1VYqwJ0cWSBQeCA=="
+    }
+  ]
+}

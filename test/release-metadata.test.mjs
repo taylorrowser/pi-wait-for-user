@@ -14,6 +14,7 @@ import {
   createCompatibilityActiveRelease,
   createPayloadInventory,
   createReceipt,
+  publicKeyFingerprint,
   serializeMetadata,
   signMetadata,
   verifyChannel,
@@ -549,6 +550,31 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   assert.equal(policy.ceremonyOperatorCount, 1);
   assert.equal(policy.ceremonyEnvironment, "FileVault-protected maintainer workstation");
   assert.equal(policy.secureOperationalRecords, "FileVault-protected maintainer storage plus encrypted backup");
+});
+
+test("checked-in production trust matches the reviewed public signing policy", () => {
+  const policy = JSON.parse(readFileSync(join(root, "releases", "signing-policy.json"), "utf8"));
+  const rootPublicKey = readFileSync(join(root, "releases", "root-public-key.pem"), "utf8");
+  const fingerprint = readFileSync(join(root, "releases", "root-public-key.sha256"), "utf8").trim();
+  const envelope = JSON.parse(readFileSync(join(root, "releases", "release-trust.json"), "utf8"));
+  const verificationTime = new Date("2026-07-24T13:00:00.000Z");
+
+  assert.doesNotMatch(rootPublicKey, /PRIVATE KEY/);
+  assert.doesNotMatch(JSON.stringify(envelope), /PRIVATE KEY/);
+  assert.equal(publicKeyFingerprint(rootPublicKey), fingerprint);
+  const authority = verifyTrustMetadata(envelope, {
+    trustedRootKeys: new Map([[policy.initialKeyIds.root, rootPublicKey]]),
+    now: verificationTime,
+  });
+  assert.equal(authority.metadata.version, 1);
+  assert.equal(authority.metadata.channelUrl, policy.stableUrls.channel);
+  assert.equal(authority.metadata.releaseKeys.length, 1);
+  assert.equal(authority.metadata.releaseKeys[0].keyId, policy.initialKeyIds.release);
+  assert.equal(authority.metadata.releaseKeys[0].algorithm, "ed25519");
+  assert.equal(authority.metadata.releaseKeys[0].revoked, false);
+  assert.ok(Date.parse(authority.metadata.releaseKeys[0].expires) - verificationTime.getTime() <= policy.validity.releaseKeyDays * 86400000);
+  assert.ok(Date.parse(authority.metadata.releaseKeys[0].expires) > verificationTime.getTime());
+  assert.ok(Date.parse(authority.metadata.expires) > Date.parse(authority.metadata.releaseKeys[0].expires));
 });
 
 test("the fixture ceremony signs, rotates, revokes, and independently verifies release trust", () => {
