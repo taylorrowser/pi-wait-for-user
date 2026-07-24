@@ -73,12 +73,14 @@ The checksum/attestation-first path verifies the bootstrap before executing it:
 
 ```bash
 tag=pi-v0.81.1-patch.9
+source=$(gh api "repos/taylorrowser/pi-wait-for-user/commits/$tag" --jq .sha)
 gh release download "$tag" --pattern install.sh --pattern SHA256SUMS
 grep ' install.sh$' SHA256SUMS | shasum -a 256 -c -       # macOS
 # or: grep ' install.sh$' SHA256SUMS | sha256sum --check   # Linux
 gh attestation verify install.sh \
   --repo taylorrowser/pi-wait-for-user \
-  --signer-workflow taylorrowser/pi-wait-for-user/.github/workflows/release.yml
+  --signer-workflow taylorrowser/pi-wait-for-user/.github/workflows/release.yml \
+  --source-digest "$source"
 ```
 
 Inspect `install.sh`; confirm its embedded root key has the separately published SPKI fingerprint in [`releases/root-public-key.sha256`](releases/root-public-key.sha256), then run `sh install.sh` or `sh install.sh --manage-pi`. `SHA256SUMS` is a generated convenience projection; the attestation and independently checked fingerprint establish first-use evidence. Subsequent Managed Updates use the pinned root/delegated-key chain.
