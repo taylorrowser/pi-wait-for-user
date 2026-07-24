@@ -140,7 +140,7 @@ The tag workflow:
 1. runs the complete release gate, including managed state-machine and interruption scenarios, against a fresh exact source;
 2. uses Pi's upstream Bun cross-compilation path to build macOS, Linux, and Windows binaries for ARM64 and x64;
 3. packages the exact Manager Release, Question Tool, bootstrap, gate report, and each platform Downstream Release payload;
-4. smoke-tests version, public conformance, model loading, and interactive Question Tool loading on every supported macOS/Linux platform;
+4. smoke-tests version, public conformance, model loading, and Question Tool payload presence on every supported macOS/Linux platform, plus interactive Question Tool loading on Linux x64;
 5. verifies GitHub provenance for every payload and exact source/workflow identity;
 6. signs the complete Release Manifest and monotonic Release Channel;
 7. generates checksums, archive metadata, compatibility output, and receipts from the signed manifest; and
