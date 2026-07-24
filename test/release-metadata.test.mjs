@@ -534,21 +534,37 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   ]);
   assert.match(workflow, /Smoke-test the exact supported platform payload/);
   assert.match(workflow, /Deferred conformance passed \(8\/8\)/);
-  assert.match(workflow, /manifest\.platformArchives/);
-  assert.match(workflow, /\^\(\?:darwin-arm64\|linux-\(\?:arm64\|x64\)\)\$/);
   assert.match(workflow, /test ! -e \.work\/upstream-binaries\/pi-darwin-x64\.tar\.gz/);
   assert.doesNotMatch(workflow.replace("pi-darwin-x64.tar.gz", ""), /darwin-x64/);
-  assert.match(workflow, /release-metadata\.mjs receipt/);
-  assert.match(workflow, /installation-receipt-\$platform\.json/);
+  assert.equal(workflow.match(/node scripts\/release-metadata\.mjs receipts \\/g)?.length, 2);
+  assert.doesNotMatch(workflow, /require\(process\.argv\[1\]\)\.signed/);
+  assert.match(workflow, /Run the no-secret production receipt preflight/);
+  assert.match(workflow, /fixture_authority=test\/fixtures\/release-keys/);
+  assert.match(workflow, /--trust "\$fixture_authority\/release-trust\.json"/);
+  assert.match(workflow, /--private-key "\$fixture_authority\/release-private\.pem"/);
+  assert.match(workflow, /--preflight-report "dist\/\$RELEASE_ID\/\.release-metadata\/production-receipt-preflight\.json"/);
+  assert.match(workflow, /--summary "\$GITHUB_STEP_SUMMARY"/);
+  assert.match(workflow, /include-hidden-files: true/);
+  assert.ok(
+    workflow.indexOf("Run the no-secret production receipt preflight") < workflow.indexOf("Upload unsigned release candidate"),
+  );
   assert.match(workflow, /origin\/main:releases\/\$file/);
   assert.match(workflow, /--trust "\$AUTHORITY_DIR\/release-trust\.json"/);
   assert.equal(workflow.match(/test "\$\(git rev-parse origin\/main\)" = "\$AUTHORITY_COMMIT"/g)?.length, 2);
   assert.match(workflow, /if \(requested > current\)/);
   assert.match(workflow, /policy\.validity\.channelDays \* 86400000/);
   assert.doesNotMatch(workflow, /59 \* 86400000/);
-  assert.ok(
-    workflow.indexOf("Publish immutable GitHub release") < workflow.indexOf("Stage the atomic stable-Channel promotion branch"),
-  );
+  const productionStages = [
+    "Sign the complete Release Manifest and Channel",
+    "Attest generated release metadata",
+    "Verify every publishable artifact's provenance",
+    "Upload signed release assets",
+    "Publish immutable GitHub release",
+    "Stage the atomic stable-Channel promotion branch",
+  ];
+  for (let index = 1; index < productionStages.length; index += 1) {
+    assert.ok(workflow.indexOf(productionStages[index - 1]) < workflow.indexOf(productionStages[index]));
+  }
   for (const file of ["channel.json", "channel-state.json", "trust-state.json"]) {
     assert.match(workflow, new RegExp(`cp .*${file.replace(".", "\\.")}.* releases/${file.replace(".", "\\.")}`));
   }

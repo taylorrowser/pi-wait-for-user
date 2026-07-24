@@ -87,6 +87,34 @@ jobs:
       - name: Build immutable payload assets
         run: node scripts/release.mjs bundle "dist/$RELEASE_ID" .work/release-binaries
 
+      - name: Run the no-secret production receipt preflight
+        shell: bash
+        run: |
+          preflight=.work/production-receipt-preflight
+          rm -rf "$preflight"
+          mkdir -p "$preflight"
+          fixture_authority=test/fixtures/release-keys
+          fixture_common=(
+            --trust "$fixture_authority/release-trust.json"
+            --root-key "fixture-root-2026=$fixture_authority/root-public.pem"
+            --now 2026-07-24T12:00:00.000Z
+          )
+          node scripts/release-metadata.mjs sign-manifest \
+            --input "dist/$RELEASE_ID/.release-metadata/unsigned-manifest.json" \
+            --provenance "dist/$RELEASE_ID/.release-metadata/provenance-request.json" \
+            "${fixture_common[@]}" \
+            --key-id fixture-release-2026 \
+            --private-key "$fixture_authority/release-private.pem" \
+            --release-root "$GITHUB_WORKSPACE" \
+            --output "$preflight/release-manifest.json"
+          node scripts/release-metadata.mjs receipts \
+            --manifest ".work/production-receipt-preflight/release-manifest.json" \
+            "${fixture_common[@]}" \
+            --owned-path "\$MANAGED_DATA_ROOT/downstream-releases/$RELEASE_ID" \
+            --output "$preflight/receipts" \
+            --preflight-report "dist/$RELEASE_ID/.release-metadata/production-receipt-preflight.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
       - name: Attest payload provenance
         uses: actions/attest-build-provenance@v2
         with:
@@ -283,20 +311,11 @@ jobs:
             --manifest-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_ID/release-manifest.json" \
             "${promotion_state[@]}" \
             --output "dist/$RELEASE_ID"
-          node -e '
-            const manifest = require(process.argv[1]).signed;
-            for (const { platform } of manifest.platformArchives) {
-              if (/^(?:darwin-arm64|linux-(?:arm64|x64))$/.test(platform)) console.log(platform);
-            }
-          ' "$manifest" |
-          while IFS= read -r platform; do
-            node scripts/release-metadata.mjs receipt \
-              --manifest "$manifest" \
-              "${common[@]}" \
-              --platform "$platform" \
-              --owned-path "\$MANAGED_DATA_ROOT/downstream-releases/$RELEASE_ID" \
-              --output "dist/$RELEASE_ID/installation-receipt-$platform.json"
-          done
+          node scripts/release-metadata.mjs receipts \
+            --manifest "$manifest" \
+            "${common[@]}" \
+            --owned-path "\$MANAGED_DATA_ROOT/downstream-releases/$RELEASE_ID" \
+            --output "dist/$RELEASE_ID"
 
       - name: Attest generated release metadata
         uses: actions/attest-build-provenance@v2

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-release_id="pi-v0.81.1-patch.10"
+release_id="pi-v0.81.1-patch.11"
 pi_version="0.81.1"
 payload_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 usage="Usage: install.sh [install|verify|activate|uninstall] [--install-dir PATH] [--bin-dir PATH]"

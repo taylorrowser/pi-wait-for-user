@@ -2,7 +2,7 @@
 
 A maintained downstream Pi release that can stop an Agent Thread for durable human input, survive complete process teardown, and continue through an explicit Response, Interruption, Cancellation, resume, or abandonment path.
 
-The packaged release candidate is **`pi-v0.81.1-patch.10`**. It combines:
+The packaged release candidate is **`pi-v0.81.1-patch.11`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 - the seventeen ordered downstream patches in [`patches/active`](patches/active); and
@@ -21,13 +21,13 @@ Review [`scripts/bootstrap.sh`](scripts/bootstrap.sh), then choose one explicit 
 **Side-by-side (default):** installs `pi-wait-for-user` and never claims `pi`.
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.10/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.11/install.sh | sh
 ```
 
 **Managed Installation:** additionally claims `pi` through the manager-owned `$HOME/.local/bin` entrypoint.
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.10/install.sh | sh -s -- --manage-pi
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.11/install.sh | sh -s -- --manage-pi
 ```
 
 Use `--bin-dir <path>` to select another launcher directory. The installer never edits shell startup files. If that directory loses PATH resolution, enablement exits nonzero and prints the exact PATH and `hash -r` remediation; rerunning converges safely. An existing Stock Pi is recorded and shadowed, never moved, copied, changed, or deleted. A foreign `pi` or `pi-wait-for-user` launcher is a hard error.
@@ -72,7 +72,7 @@ See the [Question Tool guide](packages/question-tool/README.md) for interaction 
 The checksum/attestation-first path verifies the bootstrap before executing it:
 
 ```bash
-tag=pi-v0.81.1-patch.10
+tag=pi-v0.81.1-patch.11
 source=$(gh api "repos/taylorrowser/pi-wait-for-user/commits/$tag" --jq .sha)
 gh release download "$tag" --pattern install.sh --pattern SHA256SUMS
 grep ' install.sh$' SHA256SUMS | shasum -a 256 -c -       # macOS
@@ -112,8 +112,8 @@ Routine release-key rotation/revocation and the public fingerprint are documente
 The source-build path is explicitly **unmanaged and side-by-side**. It requires Node.js 22.19+, Git, and npm:
 
 ```bash
-gh release download pi-v0.81.1-patch.10 --pattern 'pi-wait-for-user-pi-v0.81.1-patch.10.tgz'
-tar -xzf pi-wait-for-user-pi-v0.81.1-patch.10.tgz
+gh release download pi-v0.81.1-patch.11 --pattern 'pi-wait-for-user-pi-v0.81.1-patch.11.tgz'
+tar -xzf pi-wait-for-user-pi-v0.81.1-patch.11.tgz
 node package/scripts/install.mjs install
 ```
 
@@ -140,11 +140,12 @@ The tag workflow:
 1. runs the complete release gate, including managed state-machine and interruption scenarios, against a fresh exact source;
 2. uses Pi's upstream Bun cross-compilation path to build macOS Apple Silicon, Linux ARM64/x64, and Windows ARM64/x64 binaries;
 3. packages the exact Manager Release, Question Tool, bootstrap, gate report, and each platform Downstream Release payload;
-4. smoke-tests version, public conformance, model loading, and Question Tool payload presence on macOS Apple Silicon and Linux ARM64/x64, plus interactive Question Tool loading on Linux x64;
-5. verifies GitHub provenance for every payload and exact source/workflow identity;
-6. signs the complete Release Manifest and monotonic Release Channel;
-7. generates checksums, archive metadata, compatibility output, and receipts from the signed manifest; and
-8. attests and verifies every publishable artifact before publishing one immutable GitHub release.
+4. signs the generated manifest with public fixture authority, then runs the production receipt boundary against workspace-relative, absolute, missing, and malformed manifest paths and preserves its machine-readable preflight report;
+5. smoke-tests version, public conformance, model loading, and Question Tool payload presence on macOS Apple Silicon and Linux ARM64/x64, plus interactive Question Tool loading on Linux x64;
+6. verifies GitHub provenance for every payload and exact source/workflow identity;
+7. signs the complete Release Manifest and monotonic Release Channel;
+8. generates checksums, archive metadata, compatibility output, and the exact macOS Apple Silicon/Linux receipt inventory through the preflighted boundary; and
+9. attests and verifies every publishable artifact before publishing one immutable GitHub release.
 
 The release package also contains the local `manager-v2` Managed Installation components: the stable stage-0 dispatcher, atomic Activation engine, immutable pair receipts, lifecycle lock, process leases, recovery/disable operations, layered verification, macOS/Linux Command Ownership, patch-aware Managed Update discovery/routing, local rollback and Update Holds, pinned/live-leased retention and prune, and receipt-safe uninstall. Managed Installations use signed Channel sequence plus exact Downstream Release identity, reserve upstream's latest-version endpoint for Patch Lag, intercept every self-inclusive `pi update` form, and expose `pi managed status`. Lifecycle controls include `pi managed rollback [--to <release-id>]`, `unhold`, `pin [release-id]`, `unpin [release-id]`, `prune`, `disable`, and `uninstall`. See [`docs/release/managed-runtime.md`](docs/release/managed-runtime.md).
 

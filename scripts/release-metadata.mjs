@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash, createPublicKey } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   createArchiveMetadata,
@@ -240,6 +240,136 @@ function createVerifiedReceipt(options) {
   console.log(`Generated verified receipt for ${signedManifest.releaseId}: ${output}`);
 }
 
+const managedReceiptPlatforms = ["darwin-arm64", "linux-arm64", "linux-x64"];
+const receiptName = (platform) => `installation-receipt-${platform}.json`;
+const expectedReceiptOutputs = managedReceiptPlatforms.map(receiptName);
+
+function readReceiptManifest(path) {
+  let contents;
+  try {
+    contents = readFileSync(resolve(path), "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") fail("Missing Release Manifest");
+    throw error;
+  }
+  try {
+    return JSON.parse(contents);
+  } catch {
+    fail("Malformed Release Manifest JSON");
+  }
+}
+
+function projectVerifiedReceipts(options) {
+  const manifest = readReceiptManifest(required(options, "--manifest"));
+  const { trust, now } = authority(options);
+  const signedManifest = verifyReleaseManifest(manifest, { trust, now });
+  const declaredManagedPlatforms = signedManifest.platformArchives
+    .map(({ platform }) => platform)
+    .filter((platform) => platform.startsWith("darwin-") || platform.startsWith("linux-"))
+    .sort();
+  if (JSON.stringify(declaredManagedPlatforms) !== JSON.stringify(managedReceiptPlatforms)) {
+    fail(`Managed receipt platform inventory must be exactly: ${managedReceiptPlatforms.join(", ")}`);
+  }
+
+  const output = resolve(required(options, "--output"));
+  mkdirSync(output, { recursive: true });
+  const existingOutputs = readdirSync(output).filter((name) => name.startsWith("installation-receipt-")).sort();
+  if (existingOutputs.length > 0) fail("Receipt output inventory must be empty before projection");
+  for (const platform of managedReceiptPlatforms) {
+    writeJson(join(output, receiptName(platform)), createReceipt(
+      signedManifest,
+      platform,
+      required(options, "--owned-path"),
+    ));
+  }
+  const actualOutputs = readdirSync(output).filter((name) => name.startsWith("installation-receipt-")).sort();
+  if (JSON.stringify(actualOutputs) !== JSON.stringify(expectedReceiptOutputs)) fail("Receipt output inventory mismatch");
+  return { manifest, signedManifest };
+}
+
+function expectFailedClosed(callback, expected) {
+  try {
+    callback();
+  } catch (error) {
+    if (error instanceof Error && expected.test(error.message)) return;
+    throw error;
+  }
+  fail("Receipt preflight probe did not fail closed");
+}
+
+function createVerifiedReceipts(options) {
+  allowed(options, [
+    "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--owned-path", "--output",
+    "--preflight-report", "--summary",
+  ]);
+  if (options.has("--summary") && !options.has("--preflight-report")) fail("--summary requires --preflight-report");
+  const manifestArgument = required(options, "--manifest");
+  const projected = projectVerifiedReceipts(options);
+  if (options.has("--preflight-report")) {
+    if (isAbsolute(manifestArgument)) fail("Receipt preflight requires a workspace-relative Release Manifest path");
+    const rootKeyId = required(options, "--root-key").split("=", 1)[0];
+    const releaseKeyIds = projected.manifest.signatures.map(({ keyId }) => keyId).sort();
+    if (!rootKeyId.startsWith("fixture-") || releaseKeyIds.length === 0
+      || releaseKeyIds.some((keyId) => !keyId.startsWith("fixture-"))) {
+      fail("Receipt preflight requires explicitly identified public fixture authority");
+    }
+    const reportPath = resolve(required(options, "--preflight-report"));
+    mkdirSync(dirname(reportPath), { recursive: true });
+    const temporary = mkdtempSync(join(dirname(reportPath), ".receipt-preflight-"));
+    try {
+      const probe = (manifest, output) => {
+        const probeOptions = new Map(options);
+        probeOptions.delete("--preflight-report");
+        probeOptions.delete("--summary");
+        probeOptions.set("--manifest", manifest);
+        probeOptions.set("--output", output);
+        return projectVerifiedReceipts(probeOptions);
+      };
+      probe(resolve(manifestArgument), join(temporary, "absolute-output"));
+      expectFailedClosed(
+        () => probe(join(temporary, "missing-release-manifest.json"), join(temporary, "missing-output")),
+        /^Missing Release Manifest$/,
+      );
+      const malformedPath = join(temporary, "malformed-release-manifest.json");
+      writeFileSync(malformedPath, "{}\n", { flag: "wx" });
+      expectFailedClosed(
+        () => probe(malformedPath, join(temporary, "malformed-output")),
+        /^Malformed release-manifest metadata/,
+      );
+      writeJson(reportPath, {
+        schemaVersion: 1,
+        type: "production-receipt-preflight",
+        result: "passed",
+        releaseId: projected.signedManifest.releaseId,
+        authority: {
+          rootKeyId,
+          releaseKeyIds,
+        },
+        expectedPlatforms: managedReceiptPlatforms,
+        expectedOutputs: expectedReceiptOutputs,
+        manifestLoading: { workspaceRelative: "passed", absolute: "passed" },
+        failClosedProbes: { missingManifest: "passed", malformedManifest: "passed" },
+      });
+      if (options.has("--summary")) {
+        const summaryPath = resolve(required(options, "--summary"));
+        mkdirSync(dirname(summaryPath), { recursive: true });
+        writeFileSync(summaryPath, [
+          "## Production receipt preflight: passed",
+          "",
+          `- Generated exact managed receipt inventory: ${managedReceiptPlatforms.join(", ")}.`,
+          "- Loaded the generated Release Manifest through workspace-relative and absolute paths.",
+          "- The missing and malformed Release Manifest probes failed closed.",
+          "- Authority: public fixture root and delegated release key material only.",
+          "",
+        ].join("\n"), { flag: "a" });
+      }
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }
+  console.log(`Generated verified receipts for ${projected.signedManifest.releaseId}: ${managedReceiptPlatforms.join(", ")}`);
+}
+
 function verifyMetadata(options) {
   allowed(options, [
     "--manifest", "--channel", "--trust", "--root-key", "--accepted-trust-state", "--now", "--accepted-state", "--active",
@@ -281,6 +411,7 @@ function usage() {
     "  release-metadata.mjs sign-manifest --input FILE --provenance FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --output FILE [--release-root DIR] [--accepted-trust-state FILE] [--now DATE]",
     "  release-metadata.mjs promote --manifest FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --sequence N --expires DATE --manifest-url URL --output DIR (--accepted-state FILE | --bootstrap true) [--accepted-trust-state FILE] [--now DATE]",
     "  release-metadata.mjs receipt --manifest FILE --trust FILE --root-key ID=FILE --platform PLATFORM --owned-path PATH --output FILE [--accepted-trust-state FILE] [--now DATE]",
+    "  release-metadata.mjs receipts --manifest FILE --trust FILE --root-key ID=FILE --owned-path PATH --output DIR [--preflight-report FILE --summary FILE] [--accepted-trust-state FILE] [--now DATE]",
     "  release-metadata.mjs verify --manifest FILE --channel FILE --trust FILE --root-key ID=FILE [--accepted-trust-state FILE] [--accepted-state FILE] [--active FILE --artifact-manifest FILE --checksums FILE --archive-metadata-dir DIR --release-root DIR] [--now DATE]",
   ].join("\n");
 }
@@ -294,6 +425,7 @@ try {
   else if (command === "sign-manifest") signManifest(options);
   else if (command === "promote") promote(options);
   else if (command === "receipt") createVerifiedReceipt(options);
+  else if (command === "receipts") createVerifiedReceipts(options);
   else if (command === "verify") verifyMetadata(options);
   else fail(usage());
 } catch (error) {

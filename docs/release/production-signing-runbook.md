@@ -256,8 +256,8 @@ Create and push the exact release tag if the user has authorized tag publication
 
 The workflow has two jobs:
 
-1. `release-candidate` has no signing secret. It builds, gates, attests, verifies, and uploads an unsigned candidate.
-2. `production-release` runs only for a release tag, waits at the `production-release` Environment, receives the delegated secret after approval, fetches trust and replay checkpoints from current `origin/main`, signs metadata, publishes the immutable GitHub Release, and finally pushes a promotion branch.
+1. `release-candidate` has no production signing secret. After building the unsigned manifest, it signs only with the explicitly public fixture authority and calls the same executable receipt-projection boundary as production. The mandatory preflight verifies workspace-relative and absolute manifest loading, exact `darwin-arm64`/`linux-arm64`/`linux-x64` receipt outputs, and fail-closed missing/malformed probes; it preserves a machine-readable report with candidate evidence and writes a concise workflow summary before the candidate can satisfy the protected job dependency.
+2. `production-release` runs only for a release tag, waits at the `production-release` Environment, receives the delegated secret after approval, fetches trust and replay checkpoints from current `origin/main`, signs metadata, calls that preflighted receipt-projection boundary, publishes the immutable GitHub Release, and finally pushes a promotion branch.
 
 The production job records the exact `main` authority commit and checks it again immediately before immutable publication. A tag may identify an older source commit on `main`, but it cannot restore trust or Channel state from that older commit. If current authority changes after validation, publication fails before creating the GitHub Release and must be retried against the new public authority.
 
