@@ -1,6 +1,6 @@
-# Pi Wait for User · `pi-v0.81.1-patch.7`
+# Pi Wait for User · `pi-v0.81.1-patch.8`
 
-Core-owned deferred-work re-entry with package-customizable presentation.
+First production-signed managed-installation candidate with strict release-catalog hydration.
 
 ## What changed
 
@@ -12,12 +12,14 @@ Core-owned deferred-work re-entry with package-customizable presentation.
 - The extension deferral API adds an optional read-only `summary` callback; core retains mounting, command routing, recovery, and cleanup ownership
 - Question Tool `0.1.4` supplies privacy-safe question-count text and no longer manages a deferred widget lifecycle
 - Regression coverage includes presentation selection, command routing, dismissal, clearing, failures, and consecutive Deferred Tool Batches
+- The `manager-v1` Manager Release includes signed metadata verification, atomic Activation, Command Ownership, Managed Update discovery, rollback, retention, recovery, and receipt-scoped uninstall primitives
+- The generated NVIDIA catalog no longer retains a model withdrawn from the live NIM API, keeping strict release hydration reproducible
 - Fast, checksummed precompiled binaries remain available for macOS, Linux, and Windows on ARM64 and x64
 
 ## Install
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.7/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.8/install.sh | sh
 ```
 
 The installer selects and verifies the current platform asset, installs a separate `pi-wait-for-user` command, and leaves Stock Pi plus `~/.pi/agent` data unchanged.
@@ -32,4 +34,4 @@ This release guarantees reconstruction after completed session-journal appends a
 
 ## Archive
 
-[`pi-v0.81.1-patch.6`](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.6) is archived unchanged and remains downloadable. Archived releases receive no retroactive changes.
+[`pi-v0.81.1-patch.3`](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.3) is archived unchanged and remains downloadable. Archived releases receive no retroactive changes.
