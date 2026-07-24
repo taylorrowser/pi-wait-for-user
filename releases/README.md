@@ -31,7 +31,9 @@ The local consumer of these identities is documented in [`docs/release/managed-r
 9. Run `release-metadata.mjs promote` with a higher Channel sequence. It verifies trust, signatures, manifest digest, and both replay checkpoints, then generates `trust-state.json`, `channel-state.json`, the Channel, `artifact-manifest.json`, `SHA256SUMS`, archive metadata, and temporary `active.json` compatibility projection. Generate installation receipts from the verified manifest with `release-metadata.mjs receipt`.
 10. Attest and verify every publishable artifact before creating the immutable GitHub release. Publish the stable Channel only after its selected manifest and payloads are available.
 
-Production private keys are provisioned by the human-controlled key ceremony, never committed. See [`docs/release/signing-keys.md`](../docs/release/signing-keys.md).
+Production private keys are provisioned by the human-controlled key ceremony, never committed. See [`docs/release/signing-keys.md`](../docs/release/signing-keys.md) for trust policy and [`docs/release/production-signing-runbook.md`](../docs/release/production-signing-runbook.md) for the resumable agent/human operating procedure.
+
+Stable production metadata uses `releases/release-trust.json` and `releases/channel.json`. Promotion atomically updates the Channel plus `trust-state.json` and `channel-state.json` in a reviewed repository commit only after immutable release assets exist. Public policy, key IDs, validity windows, Environment name, and stable URLs are recorded in `releases/signing-policy.json`.
 
 ## Replay and retries
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -10,6 +10,7 @@ import {
   createChecksums,
   createCompatibilityActiveRelease,
   createReceipt,
+  publicKeyFingerprint,
   serializeMetadata,
   signMetadata,
   verifyChannel,
@@ -53,18 +54,29 @@ function allowed(options, flags) {
   for (const flag of options.keys()) if (!flags.includes(flag)) fail(`Unknown option: ${flag}`);
 }
 
-function authority(options) {
-  const trustPath = resolve(required(options, "--trust"));
+function rootKey(options) {
   const root = required(options, "--root-key");
   const separator = root.indexOf("=");
   if (separator < 1 || separator === root.length - 1) fail("--root-key must be KEY_ID=PUBLIC_KEY_PATH");
-  const keyId = root.slice(0, separator);
-  const publicKey = readFileSync(resolve(root.slice(separator + 1)), "utf8");
+  return {
+    keyId: root.slice(0, separator),
+    publicKey: readFileSync(resolve(root.slice(separator + 1)), "utf8"),
+  };
+}
+
+function verificationTime(options) {
   const now = options.has("--now") ? new Date(options.get("--now")) : new Date();
   if (!Number.isFinite(now.getTime())) fail("--now must be an ISO date-time");
+  return now;
+}
+
+function authority(options) {
+  const trustPath = resolve(required(options, "--trust"));
+  const root = rootKey(options);
+  const now = verificationTime(options);
   return {
     trust: verifyTrustMetadata(readJson(trustPath), {
-      trustedRootKeys: new Map([[keyId, publicKey]]),
+      trustedRootKeys: new Map([[root.keyId, root.publicKey]]),
       now,
       accepted: options.has("--accepted-trust-state")
         ? readJson(resolve(options.get("--accepted-trust-state")))
@@ -72,6 +84,80 @@ function authority(options) {
     }),
     now,
   };
+}
+
+function exactObject(value, fields, label) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) fail(`Malformed ${label}`);
+  const actual = Object.keys(value).sort();
+  const expected = [...fields].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) fail(`Malformed ${label}`);
+  return value;
+}
+
+function readPublicKey(path) {
+  const value = readFileSync(path, "utf8");
+  if (!value.includes("-----BEGIN PUBLIC KEY-----") || value.includes("PRIVATE KEY")) {
+    fail(`Expected an SPKI public key: ${path}`);
+  }
+  try {
+    const key = createPublicKey(value);
+    if (key.asymmetricKeyType !== "ed25519") fail(`Public key must be Ed25519: ${path}`);
+    return key.export({ type: "spki", format: "pem" }).toString();
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Public key must be Ed25519")) throw error;
+    fail(`Malformed public key: ${path}`);
+  }
+}
+
+function signTrust(options) {
+  allowed(options, ["--input", "--root-key-id", "--root-private-key", "--root-public-key", "--now", "--output"]);
+  const inputPath = resolve(required(options, "--input"));
+  const input = exactObject(readJson(inputPath), [
+    "schemaVersion", "type", "version", "expires", "channelUrl", "releaseKeys",
+  ], "release trust signing input");
+  if (!Array.isArray(input.releaseKeys) || input.releaseKeys.length === 0) fail("Malformed release trust signing input");
+  const releaseKeys = input.releaseKeys.map((entry, index) => {
+    exactObject(entry, ["keyId", "algorithm", "publicKeyFile", "expires", "revoked"], `releaseKeys[${index}]`);
+    if (typeof entry.publicKeyFile !== "string" || entry.publicKeyFile.length === 0) fail(`Malformed releaseKeys[${index}]`);
+    return {
+      keyId: entry.keyId,
+      algorithm: entry.algorithm,
+      publicKey: readPublicKey(resolve(dirname(inputPath), entry.publicKeyFile)),
+      expires: entry.expires,
+      revoked: entry.revoked,
+    };
+  });
+  const rootPublicKey = readPublicKey(resolve(required(options, "--root-public-key")));
+  const rootKeyId = required(options, "--root-key-id");
+  const envelope = signMetadata({
+    schemaVersion: input.schemaVersion,
+    type: input.type,
+    version: input.version,
+    expires: input.expires,
+    channelUrl: input.channelUrl,
+    releaseKeys,
+  }, rootKeyId, readFileSync(resolve(required(options, "--root-private-key")), "utf8"));
+  const verified = verifyTrustMetadata(envelope, {
+    trustedRootKeys: new Map([[rootKeyId, rootPublicKey]]),
+    now: verificationTime(options),
+  });
+  const output = resolve(required(options, "--output"));
+  writeJson(output, envelope);
+  console.log(`Created and verified release trust metadata version ${verified.metadata.version}: ${output}`);
+  console.log(`Root public key SHA-256 fingerprint (SPKI DER): ${publicKeyFingerprint(rootPublicKey)}`);
+}
+
+function verifyTrust(options) {
+  allowed(options, ["--trust", "--root-key", "--accepted-trust-state", "--now"]);
+  const root = rootKey(options);
+  const { trust } = authority(options);
+  console.log(`Verified release trust metadata version ${trust.metadata.version}.`);
+  console.log(`Root public key SHA-256 fingerprint (SPKI DER): ${publicKeyFingerprint(root.publicKey)}`);
+}
+
+function fingerprint(options) {
+  allowed(options, ["--public-key"]);
+  console.log(publicKeyFingerprint(readPublicKey(resolve(required(options, "--public-key")))));
 }
 
 function signManifest(options) {
@@ -189,6 +275,9 @@ function verifyMetadata(options) {
 function usage() {
   return [
     "Usage:",
+    "  release-metadata.mjs sign-trust --input FILE --root-key-id ID --root-private-key FILE --root-public-key FILE --output FILE [--now DATE]",
+    "  release-metadata.mjs verify-trust --trust FILE --root-key ID=FILE [--accepted-trust-state FILE] [--now DATE]",
+    "  release-metadata.mjs fingerprint --public-key FILE",
     "  release-metadata.mjs sign-manifest --input FILE --provenance FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --output FILE [--release-root DIR] [--accepted-trust-state FILE] [--now DATE]",
     "  release-metadata.mjs promote --manifest FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --sequence N --expires DATE --manifest-url URL --output DIR (--accepted-state FILE | --bootstrap true) [--accepted-trust-state FILE] [--now DATE]",
     "  release-metadata.mjs receipt --manifest FILE --trust FILE --root-key ID=FILE --platform PLATFORM --owned-path PATH --output FILE [--accepted-trust-state FILE] [--now DATE]",
@@ -199,7 +288,10 @@ function usage() {
 try {
   const [command, ...args] = process.argv.slice(2);
   const options = parseOptions(args);
-  if (command === "sign-manifest") signManifest(options);
+  if (command === "sign-trust") signTrust(options);
+  else if (command === "verify-trust") verifyTrust(options);
+  else if (command === "fingerprint") fingerprint(options);
+  else if (command === "sign-manifest") signManifest(options);
   else if (command === "promote") promote(options);
   else if (command === "receipt") createVerifiedReceipt(options);
   else if (command === "verify") verifyMetadata(options);

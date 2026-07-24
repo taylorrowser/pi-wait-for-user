@@ -1,4 +1,4 @@
-import { createHash, sign, verify } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join, posix, relative, sep } from "node:path";
 
@@ -272,7 +272,9 @@ function verifyAtLeastOneSignature(envelope, keys, unauthorizedMessage) {
     recognized = true;
     let valid = false;
     try {
-      valid = verify(null, signaturePayload(envelope.signed), key, Buffer.from(signature.signature, "base64"));
+      const publicKey = createPublicKey(key);
+      valid = publicKey.asymmetricKeyType === "ed25519"
+        && verify(null, signaturePayload(envelope.signed), publicKey, Buffer.from(signature.signature, "base64"));
     } catch {
       valid = false;
     }
@@ -319,12 +321,29 @@ export function serializeMetadata(metadata) {
 
 export function signMetadata(signed, keyId, privateKey) {
   expectString(keyId, "signing key ID", keyIdPattern);
-  const signature = sign(null, signaturePayload(signed), privateKey).toString("base64");
+  let key;
+  try {
+    key = createPrivateKey(privateKey);
+  } catch {
+    fail("Malformed Ed25519 private key");
+  }
+  if (key.asymmetricKeyType !== "ed25519") fail("Signing key must be Ed25519");
+  const signature = sign(null, signaturePayload(signed), key).toString("base64");
   return { signed, signatures: [{ keyId, algorithm: "ed25519", signature }] };
 }
 
 export function sha256File(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+export function publicKeyFingerprint(publicKey) {
+  let der;
+  try {
+    der = createPublicKey(publicKey).export({ type: "spki", format: "der" });
+  } catch {
+    fail("Malformed public key");
+  }
+  return createHash("sha256").update(der).digest("hex");
 }
 
 export function verifyTrustMetadata(envelope, { trustedRootKeys, now = new Date(), accepted } = {}) {
