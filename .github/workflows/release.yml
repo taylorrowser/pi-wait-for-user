@@ -284,6 +284,14 @@ jobs:
             --manifest-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_ID/release-manifest.json" \
             "${promotion_state[@]}" \
             --output "dist/$RELEASE_ID"
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            node scripts/release-metadata.mjs receipt \
+              --manifest "$manifest" \
+              "${common[@]}" \
+              --platform "$platform" \
+              --owned-path "\$MANAGED_DATA_ROOT/downstream-releases/$RELEASE_ID" \
+              --output "dist/$RELEASE_ID/installation-receipt-$platform.json"
+          done
 
       - name: Attest generated release metadata
         uses: actions/attest-build-provenance@v2
