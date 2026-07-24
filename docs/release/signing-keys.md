@@ -2,7 +2,7 @@
 
 The Managed Installation has two signing roles:
 
-- an offline **root key** signs versioned `release-trust` metadata;
+- a human-custodied **root key** signs versioned `release-trust` metadata;
 - short-lived online **release keys** delegated by that metadata sign each Release Channel and Release Manifest.
 
 The dispatcher or reviewed bootstrap pins the root public key. GitHub, TLS, the repository branch, and the upstream Pi feed are transport or informational inputs; none are release authorities.
@@ -28,22 +28,22 @@ After bootstrap, managed updates use the pinned root and delegated release signa
 
 ## Initial key ceremony
 
-Run the production ceremony on an offline, encrypted device with two reviewers. Use an Ed25519 implementation from the approved operations environment. The following names are placeholders, not commands to paste into CI:
+The current sole-maintainer policy permits the production ceremony on the FileVault-protected maintainer workstation with one human operator. This is weaker than witnessed offline custody and is accepted explicitly in ADR 0003. The private directory must remain outside the repository and agent-controlled paths; no agent may execute private-key commands or inspect their files. Use an Ed25519 implementation from the approved operations environment. The following names are placeholders, not commands to paste into CI:
 
 ```text
 root key id:    root-YYYY-N
 release key id: release-YYYY-N
 ```
 
-1. Generate the root key offline and make encrypted, access-controlled backups according to the project's recovery policy.
+1. Generate the root key in a human-operated private directory and make encrypted, access-controlled backups according to the project's recovery policy.
 2. Export only the root public key and record its SHA-256 fingerprint through independent channels.
 3. Generate the routine release key in the restricted signing environment.
 4. Create `release-trust` schema v1 with a strictly increasing version, an expiry, the authenticated Channel URL, and the release public key plus its expiry and revocation state.
-5. Use the fixture-tested `release-metadata.mjs sign-trust` command in the offline environment to construct and sign the canonical `signed` object with the offline root key.
+5. Use the fixture-tested `release-metadata.mjs sign-trust` command from the human's local terminal to construct and sign the canonical `signed` object with the root key.
 6. Verify the trust document against the independently recorded root public key before publication.
 7. Provision the release private key through the human-controlled secret path described by the release runbook; never echo it.
 
-Keep root and release-key audit records: key IDs, public-key fingerprints, operators, reviewers, creation time, authorization window, and destruction/revocation time.
+Keep root and release-key audit records: key IDs, public-key fingerprints, operator, any witnesses, creation time, authorization window, and destruction/revocation time.
 
 ## Routine release-key rotation
 
@@ -63,7 +63,7 @@ Clients reject an unknown, expired, or revoked signing key. They also reject exp
 For loss of access, suspected exposure, or operator departure:
 
 1. stop release promotion;
-2. use the offline root to publish a higher trust version with the key's `revoked` flag set;
+2. use the human-custodied root to publish a higher trust version with the key's `revoked` flag set;
 3. delegate a new release key if publication must continue;
 4. re-sign the next Channel and every new Release Manifest with the new key;
 5. preserve the old public metadata for audit, but destroy recoverable copies of the old private key; and
@@ -75,11 +75,11 @@ Never lower a Channel sequence to undo a release. Promote a new manifest at a hi
 
 Root rotation requires a dispatcher/bootstrap version that understands both roots.
 
-1. Generate the new root offline and distribute its public fingerprint independently.
+1. Generate the new root in the custody environment selected by the then-current reviewed policy and distribute its public fingerprint independently.
 2. Produce equivalent transition metadata signed by both the old and new roots.
 3. Release a compatible dispatcher that pins both roots and requires the documented transition.
 4. Allow an adoption period, then publish trust metadata rooted only in the new key through a dispatcher release that already pins it.
-5. Retire and destroy the old root according to the offline custody policy.
+5. Retire and destroy the old root according to the reviewed custody policy.
 
 A client too old to understand the transition fails closed and directs the user to a reviewed bootstrap; it must not guess at an unknown schema.
 
@@ -87,7 +87,7 @@ A client too old to understand the transition fails closed and directs the user 
 
 ### Release key suspected compromised
 
-Follow routine revocation. Because the offline root remains trusted, a higher root-signed trust version can revoke the release key. Audit Channel sequences for equivocation and publish a higher sequence selecting a known-good new manifest.
+Follow routine revocation. Because the root remains trusted, a higher root-signed trust version can revoke the release key. Audit Channel sequences for equivocation and publish a higher sequence selecting a known-good new manifest.
 
 ### Root key suspected compromised
 

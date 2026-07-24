@@ -12,7 +12,7 @@ Each step is marked with its permitted operator:
 - **Human approval**: an agent stops and obtains an explicit decision or approval.
 - **Human only**: must run in the maintainer-controlled environment; an agent never runs it or receives its private inputs.
 
-An agent must never generate, read, receive, copy, configure, or search by value for a production private key. Never paste a private key, seed, recovery phrase, secret value, or unredacted secret output into chat. The only production secret accepted by Actions is `RELEASE_SIGNING_PRIVATE_KEY`. The offline root private key never enters GitHub, the repository, an agent-controlled temporary file, or a networked ceremony step.
+An agent must never generate, read, receive, copy, configure, or search by value for a production private key. Never paste a private key, seed, recovery phrase, secret value, or unredacted secret output into chat. The only production secret accepted by Actions is `RELEASE_SIGNING_PRIVATE_KEY`. The root private key never enters GitHub, the repository, or an agent-controlled path. The current policy permits a networked maintainer workstation, but all private-key commands remain human-operated in a private directory that the agent does not inspect.
 
 Public keys, SPKI fingerprints, signed public envelopes, signatures, key IDs, validity windows, and redacted success/failure results are safe public outputs.
 
@@ -24,9 +24,9 @@ Public policy is recorded in [`releases/signing-policy.json`](../../releases/sig
 - 180 days of delegated-key validity;
 - a maximum 60-day Channel validity window;
 - delegated-key rotation 45 days before expiry;
-- two offline ceremony reviewers;
+- one human ceremony operator on the FileVault-protected maintainer workstation;
 - a sole-admin GitHub Environment approval with self-approval permitted; and
-- private operational records in an encrypted maintainer vault with an offline encrypted backup.
+- private operational records in FileVault-protected maintainer storage with an encrypted backup.
 
 Changing policy requires a reviewed repository change before the affected ceremony or promotion.
 
@@ -147,14 +147,14 @@ gh variable set RELEASE_CHANNEL_SEQUENCE --env production-release --body '1'
 gh variable set RELEASE_CHANNEL_EXPIRES --env production-release --body 'YYYY-MM-DDTHH:MM:SS.000Z'
 ```
 
-## Phase 3: offline initial ceremony
+## Phase 3: sole-maintainer local ceremony
 
-See [`signing-keys.md`](signing-keys.md) for custody, backup, rotation, and compromise requirements.
+See [`signing-keys.md`](signing-keys.md) and ADR 0003 for custody, backup, rotation, and compromise requirements.
 
-**Human only, witnessed by two reviewers**
+**Human only, one operator**
 
-1. Generate the Ed25519 root key offline and the delegated Ed25519 key in the restricted signing environment.
-2. Store private custody material and private runbooks in the approved encrypted maintainer vault and offline encrypted backup.
+1. On the FileVault-protected maintainer workstation, generate the Ed25519 root and delegated keys from the human's terminal in a private directory outside the repository and every agent-controlled path.
+2. Store private custody material and private runbooks in FileVault-protected maintainer storage with an encrypted backup.
 3. Export only SPKI public keys.
 4. Create a public trust-signing input alongside the delegated public key:
 
@@ -177,13 +177,13 @@ See [`signing-keys.md`](signing-keys.md) for custody, backup, rotation, and comp
    }
    ```
 
-5. In the offline checkout, run the fixture-tested command below with private file paths supplied only inside that environment:
+5. From the exact reviewed checkout, run the fixture-tested command below in the human's terminal with private file paths supplied only there:
 
    ```bash
    node scripts/release-metadata.mjs sign-trust \
      --input <public-trust-input.json> \
      --root-key-id root-2026-1 \
-     --root-private-key <offline-root-private-key-file> \
+     --root-private-key <human-private-directory>/root-private.pem \
      --root-public-key <root-public-key-file> \
      --output <public-output-directory>/release-trust.json
    ```
@@ -196,7 +196,7 @@ See [`signing-keys.md`](signing-keys.md) for custody, backup, rotation, and comp
      > <public-output-directory>/root-public-key.sha256
    ```
 
-7. Have both reviewers compare the displayed and saved fingerprint over independent public channels and verify the trust envelope offline.
+7. Independently recompute the public fingerprint with OpenSSL, compare it with the saved fingerprint, and verify the trust envelope before transferring public outputs.
 8. Provision the delegated private key in the protected Environment through the human-only path. Do not send it to the agent.
 
 The only files transferred out of the ceremony for repository review are:

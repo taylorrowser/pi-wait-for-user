@@ -123,7 +123,7 @@ One signed immutable Release Manifest is authoritative for:
 
 ### Signing keys
 
-The Managed Dispatcher pins an offline root public key. Versioned root-signed trust metadata authorizes expiring release keys. Authorized release keys sign Release Channels and Release Manifests.
+The Managed Dispatcher pins a root public key. Versioned root-signed trust metadata authorizes expiring release keys. Private root custody follows the reviewed production signing policy and ADR 0003. Authorized release keys sign Release Channels and Release Manifests.
 
 - Routine release-key rotation or revocation uses newer root-signed trust metadata. The manager persists the highest accepted trust version and canonical complete-envelope digest, rejecting lower versions and non-identical equal-version retries.
 - Normal root rotation is cross-signed by old and new roots and distributed through a compatible dispatcher update.
