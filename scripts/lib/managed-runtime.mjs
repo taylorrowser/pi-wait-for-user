@@ -1644,6 +1644,20 @@ export function unpinManagedRelease(dataRoot, releaseId) {
   });
 }
 
+function finishRollback(dataRoot, paths, activation, heldReleaseId, checkpoint) {
+  const cleanupIssues = [];
+  checkpoint?.("after-rollback-switch");
+  try { unlinkSync(paths.rollback); } catch (error) {
+    cleanupIssues.push(`transaction retirement: ${error instanceof Error ? error.message : String(error)}`);
+    recordManagedUpdateDiagnostic(dataRoot, "rollback transaction retirement", error);
+  }
+  try { pruneInstalledPairsLocked(dataRoot); } catch (error) {
+    cleanupIssues.push(`retention: ${error instanceof Error ? error.message : String(error)}`);
+    recordManagedUpdateDiagnostic(dataRoot, "post-rollback retention", error);
+  }
+  return { kind: "rolled-back", activation, heldReleaseId, cleanupIssues };
+}
+
 export function rollbackManagedInstallation(dataRoot, options = {}) {
   const releaseId = options.releaseId;
   return withLifecycleLock(dataRoot, `rollback${releaseId ? ` to ${releaseId}` : ""}`, () => {
@@ -1653,8 +1667,15 @@ export function rollbackManagedInstallation(dataRoot, options = {}) {
       const state = pairTransactionState(dataRoot, interrupted);
       if (state === "committed") {
         atomicWrite(updateHoldPath(paths), interrupted.hold);
-        unlinkSync(paths.rollback);
-      } else if (state === "not-committed") unlinkSync(paths.rollback);
+        return finishRollback(
+          dataRoot,
+          paths,
+          readActivation(dataRoot),
+          interrupted.hold.releaseId,
+          options.checkpoint,
+        );
+      }
+      if (state === "not-committed") unlinkSync(paths.rollback);
       else fail("Rollback transaction does not match the selected Activation");
     }
     const current = readActivation(dataRoot);
@@ -1697,22 +1718,13 @@ export function rollbackManagedInstallation(dataRoot, options = {}) {
     options.checkpoint?.("before-rollback-switch");
     atomicWrite(paths.activation, rolledBack);
     options.checkpoint?.("rollback-activation-committed");
-    const cleanupIssues = [];
-    try { unlinkSync(paths.rollback); } catch (error) {
-      cleanupIssues.push(`transaction retirement: ${error instanceof Error ? error.message : String(error)}`);
-      recordManagedUpdateDiagnostic(dataRoot, "rollback transaction retirement", error);
-    }
-    options.checkpoint?.("after-rollback-switch");
-    try { pruneInstalledPairsLocked(dataRoot); } catch (error) {
-      cleanupIssues.push(`retention: ${error instanceof Error ? error.message : String(error)}`);
-      recordManagedUpdateDiagnostic(dataRoot, "post-rollback retention", error);
-    }
-    return {
-      kind: "rolled-back",
-      activation: rolledBack,
-      heldReleaseId: current.active.downstreamReleaseId,
-      cleanupIssues,
-    };
+    return finishRollback(
+      dataRoot,
+      paths,
+      rolledBack,
+      current.active.downstreamReleaseId,
+      options.checkpoint,
+    );
   });
 }
 
@@ -1966,8 +1978,11 @@ function safeTemporaryOwner(path) {
         && basename(path) === `${owner.scope.kind}.tombstone-${owner.token}`;
     }
     exactObject(owner, "temporary receipt", ["schemaVersion", "type", "ownedPath", "token"]);
+    const suffix = `.tmp-${owner.token}`;
+    const name = basename(path);
+    const kind = name.endsWith(suffix) ? name.slice(0, -suffix.length) : "";
     return owner.schemaVersion === 1 && owner.type === "managed-temporary" && resolve(owner.ownedPath) === resolve(path)
-      && basename(path).endsWith(owner.token);
+      && uuidPattern.test(owner.token) && idPattern.test(kind) && name === `${kind}${suffix}`;
   } catch {
     return false;
   }

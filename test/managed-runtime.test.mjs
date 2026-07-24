@@ -719,6 +719,35 @@ test("rollback interruption boundaries expose only the old pair or the complete 
   }
 });
 
+test("retrying an interrupted committed rollback completes it without reversing the Activation", () => {
+  for (const boundary of ["rollback-activation-committed", "after-rollback-switch"]) {
+    const dataRoot = mkdtempSync(join(tmpdir(), "managed-lifecycle-rollback-retry-"));
+    const previous = fixture({ releaseId: "pi-v0.81.1-patch.5" });
+    const active = fixture({ managerId: "manager-v2" });
+    try {
+      activate(dataRoot, previous);
+      activate(dataRoot, active);
+      assert.throws(() => rollbackManagedInstallation(dataRoot, {
+        checkpoint(name) {
+          if (name === boundary) throw new Error(`interrupted committed rollback at ${boundary}`);
+        },
+      }), new RegExp(boundary));
+
+      const retried = rollbackManagedInstallation(dataRoot);
+      assert.equal(retried.kind, "rolled-back");
+      assert.equal(retried.activation.active.downstreamReleaseId, "pi-v0.81.1-patch.5");
+      assert.equal(retried.activation.previous.downstreamReleaseId, "pi-v0.81.1-patch.6");
+      assert.equal(readActivation(dataRoot).active.downstreamReleaseId, "pi-v0.81.1-patch.5");
+      assert.equal(readManagedUpdateHold(dataRoot).releaseId, "pi-v0.81.1-patch.6");
+      assert.equal(existsSync(join(dataRoot, "state", "rollback-transaction.json")), false);
+    } finally {
+      destroy(dataRoot);
+      destroy(previous.directory);
+      destroy(active.directory);
+    }
+  }
+});
+
 test("stage-0 recovers the verified previous pair without the active manager", () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-recover-"));
   const oldCandidate = fixture({ releaseId: "pi-v0.81.1-patch.5" });
@@ -1652,6 +1681,36 @@ test("uninstall resumes when payload tombstoning completed before its central re
     const converged = uninstallManagedInstallation(dataRoot, { environment });
     assert.equal(converged.kind, "uninstalled");
     assert.equal(existsSync(dataRoot), false);
+  } finally {
+    destroy(root);
+    destroy(candidate.directory);
+  }
+});
+
+test("cleanup and uninstall reject forged temporary ownership", () => {
+  const root = mkdtempSync(join(tmpdir(), "managed-lifecycle-uninstall-temporary-owner-"));
+  const dataRoot = join(root, "data");
+  const bin = join(root, "bin");
+  const candidate = fixture();
+  const environment = { PATH: `${bin}:/usr/bin:/bin` };
+  try {
+    activate(dataRoot, candidate);
+    assert.equal(runManager(dataRoot, ["managed", "enable", "--bin-dir", bin], environment).status, 0);
+    const foreign = join(dataRoot, "tmp", "foreign");
+    mkdirSync(foreign);
+    writeFileSync(join(foreign, ".owner.json"), serializeMetadata({
+      schemaVersion: 1,
+      type: "managed-temporary",
+      ownedPath: foreign,
+      token: "",
+    }));
+    writeFileSync(join(foreign, "keep"), "foreign\n");
+
+    cleanupManagedState(dataRoot);
+    assert.equal(readFileSync(join(foreign, "keep"), "utf8"), "foreign\n");
+    assert.throws(() => uninstallManagedInstallation(dataRoot, { environment }), /Foreign temporary path/);
+    assert.equal(existsSync(join(bin, "pi")), true);
+    assert.equal(readFileSync(join(foreign, "keep"), "utf8"), "foreign\n");
   } finally {
     destroy(root);
     destroy(candidate.directory);
