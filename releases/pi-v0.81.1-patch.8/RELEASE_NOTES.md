@@ -1,6 +1,6 @@
 # Pi Wait for User · `pi-v0.81.1-patch.8`
 
-First production-signed managed-installation candidate with strict release-catalog hydration.
+First production-signed Managed Installation candidate with strict release-catalog hydration.
 
 ## What changed
 

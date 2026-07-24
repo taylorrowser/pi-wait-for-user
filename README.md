@@ -58,7 +58,7 @@ See the [Question Tool guide](packages/question-tool/README.md) for interaction 
 
 ## Checksum-first manual install
 
-Download `SHA256SUMS` and the matching asset from the [active GitHub release](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.8):
+After publication, download `SHA256SUMS` and the matching asset from the [immutable patch.8 GitHub Release](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.8):
 
 | Platform | Asset |
 | --- | --- |
