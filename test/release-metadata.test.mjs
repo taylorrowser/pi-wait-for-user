@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -170,7 +170,7 @@ test("authorized root and release signatures verify complete metadata", () => {
   assert.match(selected.envelopeSha256, /^[a-f0-9]{64}$/);
 });
 
-test("unknown schemas, expired trust, malformed metadata, and unauthorized signatures fail closed", () => {
+test("unknown schemas, expired trust, malformed metadata, unauthorized signatures, and non-Ed25519 keys fail closed", () => {
   assert.throws(() => verifiedTrust(trust({ schemaVersion: 99 })), /unknown release-trust schema version 99/i);
   assert.throws(() => verifiedTrust(trust({ expires: "2026-01-01T00:00:00.000Z" })), /trust metadata expired/i);
   assert.throws(() => verifiedTrust({ signed: {}, signatures: [] }), /malformed release-trust metadata/i);
@@ -193,6 +193,32 @@ test("unknown schemas, expired trust, malformed metadata, and unauthorized signa
   const invalid = structuredClone(validManifest);
   invalid.signatures[0].signature = `${invalid.signatures[0].signature.slice(0, -4)}AAAA`;
   assert.throws(() => verifyReleaseManifest(invalid, { trust: authority, now }), /invalid release-manifest signature/i);
+
+  const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  assert.throws(() => signMetadata(
+    validManifest.signed,
+    "not-ed25519",
+    rsa.privateKey.export({ type: "pkcs8", format: "pem" }),
+  ), /must be Ed25519/i);
+  const mislabeledRsaEnvelope = {
+    signed: validManifest.signed,
+    signatures: [{
+      keyId: "rsa-release",
+      algorithm: "ed25519",
+      signature: "AAAA",
+    }],
+  };
+  assert.throws(() => verifyReleaseManifest(mislabeledRsaEnvelope, {
+    trust: {
+      releaseKeys: new Map([["rsa-release", {
+        keyId: "rsa-release",
+        publicKey: rsa.publicKey.export({ type: "spki", format: "pem" }).toString(),
+        expires: "2026-12-01T00:00:00.000Z",
+        revoked: false,
+      }]]),
+    },
+    now,
+  }), /invalid release-manifest signature/i);
 });
 
 test("accepted trust state rejects replay that would undo release-key revocation", () => {
@@ -498,7 +524,10 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   assert.doesNotMatch(workflow, /ROOT_PRIVATE|RELEASE_ROOT_PUBLIC_KEY/);
   assert.match(workflow, /production-release:\n\s+if: startsWith\(github\.ref, 'refs\/tags\/'\)/);
   assert.match(workflow, /environment: production-release/);
-  assert.match(workflow, /releases\/release-trust\.json/);
+  assert.match(workflow, /origin\/main:releases\/\$file/);
+  assert.match(workflow, /--trust "\$AUTHORITY_DIR\/release-trust\.json"/);
+  assert.match(workflow, /test "\$\(git rev-parse origin\/main\)" = "\$AUTHORITY_COMMIT"/);
+  assert.doesNotMatch(workflow, /remaining < 59 \* 86400000/);
   assert.ok(
     workflow.indexOf("Publish immutable GitHub release") < workflow.indexOf("Stage the atomic stable-Channel promotion branch"),
   );
@@ -573,6 +602,15 @@ test("the fixture ceremony signs, rotates, revokes, and independently verifies r
       now,
       accepted: initialAuthority.acceptedState,
     });
+    const rotatedManifest = signMetadata(manifest().signed, "fixture-release-next", unauthorizedPrivate);
+    const rotatedChannel = signMetadata(channel(rotatedManifest).signed, "fixture-release-next", unauthorizedPrivate);
+    assert.equal(verifyReleaseManifest(rotatedManifest, { trust: rotatedAuthority, now }).releaseId, "pi-v0.81.1-patch.6");
+    assert.equal(verifyChannel(rotatedChannel, {
+      trust: rotatedAuthority,
+      now,
+      manifest: rotatedManifest,
+    }).sequence, 11);
+
     const revoked = signInput("revocation-input", input(3, [
       { ...oldKey, revoked: true },
       nextKey,
@@ -586,6 +624,11 @@ test("the fixture ceremony signs, rotates, revokes, and independently verifies r
       () => verifyReleaseManifest(manifest(), { trust: revokedAuthority, now }),
       /release key revoked/i,
     );
+    assert.equal(verifyChannel(rotatedChannel, {
+      trust: revokedAuthority,
+      now,
+      manifest: rotatedManifest,
+    }).releaseId, "pi-v0.81.1-patch.6");
 
     const verified = spawnSync(process.execPath, [metadataCli, "verify-trust",
       "--trust", join(directory, "revoked-trust.json"),

@@ -147,28 +147,43 @@ jobs:
           name: unsigned-${{ env.RELEASE_ID }}
           path: dist/${{ env.RELEASE_ID }}
 
-      - name: Validate production trust and promotion policy
+      - name: Validate current production trust and promotion policy
         shell: bash
         run: |
-          test -f releases/release-trust.json || { echo "Production release trust is not provisioned" >&2; exit 1; }
-          test -f releases/root-public-key.pem || { echo "Production root public key is not provisioned" >&2; exit 1; }
-          test -f releases/root-public-key.sha256 || { echo "Production root fingerprint is not provisioned" >&2; exit 1; }
           test -n "$RELEASE_SIGNING_KEY_ID"
           test -n "$RELEASE_CHANNEL_SEQUENCE"
           test -n "$RELEASE_CHANNEL_EXPIRES"
-          root_key_id=$(node -p 'JSON.parse(require("fs").readFileSync("releases/signing-policy.json", "utf8")).initialKeyIds.root')
-          channel_url=$(node -p 'JSON.parse(require("fs").readFileSync("releases/signing-policy.json", "utf8")).stableUrls.channel')
-          trust_channel_url=$(node -p 'JSON.parse(require("fs").readFileSync("releases/release-trust.json", "utf8")).signed.channelUrl')
+          git fetch origin main
+          authority="$RUNNER_TEMP/release-authority"
+          rm -rf "$authority"
+          mkdir -p "$authority"
+          for file in signing-policy.json release-trust.json root-public-key.pem root-public-key.sha256; do
+            git show "origin/main:releases/$file" > "$authority/$file" || {
+              echo "Current main has no production $file" >&2
+              exit 1
+            }
+          done
+          for file in trust-state.json channel-state.json; do
+            if git cat-file -e "origin/main:releases/$file" 2>/dev/null; then
+              git show "origin/main:releases/$file" > "$authority/$file"
+            fi
+          done
+          authority_commit=$(git rev-parse origin/main)
+          root_key_id=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).initialKeyIds.root' "$authority/signing-policy.json")
+          channel_url=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).stableUrls.channel' "$authority/signing-policy.json")
+          trust_channel_url=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).signed.channelUrl' "$authority/release-trust.json")
           test "$channel_url" = "$trust_channel_url"
-          actual_fingerprint=$(node scripts/release-metadata.mjs fingerprint --public-key releases/root-public-key.pem)
-          expected_fingerprint=$(tr -d '[:space:]' < releases/root-public-key.sha256)
+          actual_fingerprint=$(node scripts/release-metadata.mjs fingerprint --public-key "$authority/root-public-key.pem")
+          expected_fingerprint=$(tr -d '[:space:]' < "$authority/root-public-key.sha256")
           test "$actual_fingerprint" = "$expected_fingerprint"
+          echo "AUTHORITY_COMMIT=$authority_commit" >> "$GITHUB_ENV"
+          echo "AUTHORITY_DIR=$authority" >> "$GITHUB_ENV"
           echo "RELEASE_ROOT_KEY_ID=$root_key_id" >> "$GITHUB_ENV"
           node -e '
-            const expires = Date.parse(process.env.RELEASE_CHANNEL_EXPIRES);
-            const remaining = expires - Date.now();
-            if (!Number.isFinite(expires) || remaining < 59 * 86400000 || remaining > 61 * 86400000) {
-              throw new Error("RELEASE_CHANNEL_EXPIRES must be approximately 60 days in the future");
+            const value = process.env.RELEASE_CHANNEL_EXPIRES;
+            const expires = Date.parse(value);
+            if (!Number.isFinite(expires) || new Date(expires).toISOString() !== value || expires <= Date.now()) {
+              throw new Error("RELEASE_CHANNEL_EXPIRES must be an unexpired canonical ISO timestamp");
             }
           '
 
@@ -184,9 +199,9 @@ jobs:
           chmod 600 "$key_dir/release-private.pem"
           metadata="dist/$RELEASE_ID/.release-metadata"
           manifest="dist/$RELEASE_ID/release-manifest.json"
-          common=(--trust releases/release-trust.json --root-key "$RELEASE_ROOT_KEY_ID=releases/root-public-key.pem")
-          if test -f releases/trust-state.json; then
-            common+=(--accepted-trust-state releases/trust-state.json)
+          common=(--trust "$AUTHORITY_DIR/release-trust.json" --root-key "$RELEASE_ROOT_KEY_ID=$AUTHORITY_DIR/root-public-key.pem")
+          if test -f "$AUTHORITY_DIR/trust-state.json"; then
+            common+=(--accepted-trust-state "$AUTHORITY_DIR/trust-state.json")
           fi
           node scripts/release-metadata.mjs sign-manifest \
             --input "$metadata/unsigned-manifest.json" \
@@ -196,8 +211,8 @@ jobs:
             --private-key "$key_dir/release-private.pem" \
             --release-root "$GITHUB_WORKSPACE" \
             --output "$manifest"
-          if test -f releases/channel-state.json; then
-            promotion_state=(--accepted-state releases/channel-state.json)
+          if test -f "$AUTHORITY_DIR/channel-state.json"; then
+            promotion_state=(--accepted-state "$AUTHORITY_DIR/channel-state.json")
           else
             promotion_state=(--bootstrap true)
           fi
@@ -242,6 +257,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$AUTHORITY_COMMIT" || {
+            echo "main changed after production authority validation; refusing publication" >&2
+            exit 1
+          }
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             echo "Release $GITHUB_REF_NAME already exists; refusing to replace it" >&2
             exit 1

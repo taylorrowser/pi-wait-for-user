@@ -1,6 +1,6 @@
 # Production signing and Channel publication runbook
 
-This is the resumable operating procedure for issue #58 and later managed releases. A maintainer or a fresh coding agent should be able to recover the current stage from repository and GitHub state alone.
+This is the resumable operating procedure for issue #58 and later Downstream Releases. A maintainer or a fresh coding agent should be able to recover the current stage from repository and GitHub state alone.
 
 The acceptance checklist in GitHub issue #58 remains authoritative. This runbook does not permit an agent to cross the private-key custody boundary.
 
@@ -230,7 +230,7 @@ The public trust envelope already contains the delegated public key. Do not tran
 5. Inspect only public fields and confirm version `1`, the selected key IDs, validity windows, `revoked: false`, and the exact stable Channel URL.
 6. Open the public-preparation PR, run Standards and Spec reviews from its fixed `origin/main` merge base, wait for green CI, and merge only if the user authorizes it.
 
-## Phase 5: select the immutable first managed release
+## Phase 5: select the immutable first Downstream Release
 
 This phase is blocked until #62 is merged.
 
@@ -256,7 +256,9 @@ Create and push the exact release tag if the user has authorized tag publication
 The workflow has two jobs:
 
 1. `release-candidate` has no signing secret. It builds, gates, attests, verifies, and uploads an unsigned candidate.
-2. `production-release` runs only for a release tag, waits at the `production-release` Environment, receives the delegated secret after approval, signs metadata, publishes the immutable GitHub Release, and finally pushes a promotion branch.
+2. `production-release` runs only for a release tag, waits at the `production-release` Environment, receives the delegated secret after approval, fetches trust and replay checkpoints from current `origin/main`, signs metadata, publishes the immutable GitHub Release, and finally pushes a promotion branch.
+
+The production job records the exact `main` authority commit and checks it again immediately before immutable publication. A tag may identify an older source commit on `main`, but it cannot restore trust or Channel state from that older commit. If current authority changes after validation, publication fails before creating the GitHub Release and must be retried against the new public authority.
 
 **Agent**
 
@@ -319,7 +321,7 @@ Verify:
 3. candidate Channel signature, exact sequence, expiry, and replay checkpoint against the prior `main` state when one exists;
 4. manifest signature, release identity, manifest digest, and exact source commit;
 5. every manifest-declared artifact's SHA-256 and size;
-6. every artifact's GitHub attestation requires repository `taylorrowser/pi-wait-for-user`, workflow `.github/workflows/release.yml`, and the approved source commit; and
+6. every published top-level release asset's GitHub attestation requires repository `taylorrowser/pi-wait-for-user`, workflow `.github/workflows/release.yml`, and the approved source commit; and
 7. the promotion PR contains the exact `channel.json`, `channel-state.json`, and `trust-state.json` published as immutable release assets.
 
 Core metadata verification command:
@@ -336,10 +338,10 @@ node scripts/release-metadata.mjs verify \
 
 The bracketed state options are omitted only for the first accepted version/sequence.
 
-For every artifact name in `release-manifest.json`, compare downloaded bytes to the signed digest and size, then run:
+For every artifact name in `release-manifest.json`, compare downloaded bytes to the signed digest and size. Separately enumerate every downloaded top-level release asset—including generated manifests, Channel/state files, checksum projections, and archive metadata—and run for each:
 
 ```bash
-gh attestation verify <artifact> \
+gh attestation verify <published-release-asset> \
   --repo taylorrowser/pi-wait-for-user \
   --signer-workflow taylorrowser/pi-wait-for-user/.github/workflows/release.yml \
   --source-digest <approved-source-commit>

@@ -100,8 +100,11 @@ function readPublicKey(path) {
     fail(`Expected an SPKI public key: ${path}`);
   }
   try {
-    return createPublicKey(value).export({ type: "spki", format: "pem" }).toString();
-  } catch {
+    const key = createPublicKey(value);
+    if (key.asymmetricKeyType !== "ed25519") fail(`Public key must be Ed25519: ${path}`);
+    return key.export({ type: "spki", format: "pem" }).toString();
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Public key must be Ed25519")) throw error;
     fail(`Malformed public key: ${path}`);
   }
 }
