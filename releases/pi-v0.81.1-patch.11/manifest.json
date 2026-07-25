@@ -86,7 +86,7 @@
     },
     {
       "path": "patches/active/0018-fix-remove-withdrawn-vercel-models.patch",
-      "sha256": "af87e95a0a9efcc1011ffb797d0eccf9c2e1f7128d52362013d574f21deb1c40"
+      "sha256": "844f2b89000d1afe3407239323ea34dad58d7cc8e1074b20dc0a646e69469644"
     }
   ],
   "fixtureGate": {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,6 +28,12 @@ function artifact(name) {
 }
 
 function writeAuthority(directory, releaseKeyId = "fixture-release-2026") {
+  const path = join(directory, "authority", "release-trust.json");
+  mkdirSync(dirname(path), { recursive: true });
+  if (releaseKeyId === "fixture-release-2026") {
+    writeFileSync(path, readFileSync(join(fixtureKeys, "release-trust.json")));
+    return path;
+  }
   const trust = signMetadata({
     schemaVersion: 1,
     type: "release-trust",
@@ -42,15 +48,13 @@ function writeAuthority(directory, releaseKeyId = "fixture-release-2026") {
       revoked: false,
     }],
   }, "fixture-root-2026", rootPrivate);
-  const path = join(directory, "authority", "release-trust.json");
-  mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, serializeMetadata(trust));
   return path;
 }
 
 function writeManifest(directory, platforms = [
   "darwin-arm64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64",
-], releaseKeyId = "fixture-release-2026") {
+], releaseKeyId = "fixture-release-2026", releasePrivateKey = releasePrivate) {
   const manager = artifact("pi-wait-for-user-pi-v0.81.1-patch.11.tgz");
   const questionPackage = artifact("taylorrowser-pi-question-tool-0.1.4.tgz");
   const installer = artifact("install.sh");
@@ -111,7 +115,7 @@ function writeManifest(directory, platforms = [
       artifacts: provenanceArtifacts,
     },
     releaseNotes: notes,
-  }, releaseKeyId, releasePrivate);
+  }, releaseKeyId, releasePrivateKey);
   const path = join(directory, "dist", "pi-v0.81.1-patch.11", "release-manifest.json");
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, serializeMetadata(manifest));
@@ -219,15 +223,83 @@ test("receipt preflight refuses authority that is not explicitly identified as a
   try {
     writeAuthority(directory, "release-2026-1");
     writeManifest(directory, undefined, "release-2026-1");
+    const manifestPath = "dist/pi-v0.81.1-patch.11/release-manifest.json";
+    const production = runReceipts(directory, manifestPath, "production-output");
+    assert.equal(production.status, 0, production.stderr);
+
     const reportPath = join(directory, "preflight-report.json");
+    const result = runReceipts(
+      directory,
+      manifestPath,
+      "preflight-output",
+      ["--preflight-report", reportPath],
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /public fixture authority/i);
+    assert.equal(existsSync(reportPath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("receipt preflight rejects arbitrary delegated keys that reuse the fixture key IDs", () => {
+  const directory = mkdtempSync(join(tmpdir(), "release-receipts-authority-identity-"));
+  try {
+    const arbitraryRelease = generateKeyPairSync("ed25519");
+    const arbitraryReleasePublic = arbitraryRelease.publicKey.export({ type: "spki", format: "pem" }).toString();
+    const arbitraryReleasePrivate = arbitraryRelease.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const trust = signMetadata({
+      schemaVersion: 1,
+      type: "release-trust",
+      version: 1,
+      expires: "2027-01-01T00:00:00.000Z",
+      channelUrl: "https://example.test/fixture-channel.json",
+      releaseKeys: [{
+        keyId: "fixture-release-2026",
+        algorithm: "ed25519",
+        publicKey: arbitraryReleasePublic,
+        expires: "2027-01-01T00:00:00.000Z",
+        revoked: false,
+      }],
+    }, "fixture-root-2026", rootPrivate);
+    const trustPath = join(directory, "authority", "release-trust.json");
+    mkdirSync(dirname(trustPath), { recursive: true });
+    writeFileSync(trustPath, serializeMetadata(trust));
+    writeManifest(directory, undefined, "fixture-release-2026", arbitraryReleasePrivate);
+    const reportPath = join(directory, "preflight-report.json");
+
     const result = runReceipts(
       directory,
       "dist/pi-v0.81.1-patch.11/release-manifest.json",
       "output",
       ["--preflight-report", reportPath],
     );
+
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /public fixture authority/i);
+    assert.equal(existsSync(reportPath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("receipt preflight leaves no passing machine report when workflow summary writing fails", () => {
+  const directory = mkdtempSync(join(tmpdir(), "release-receipts-summary-failure-"));
+  try {
+    writeAuthority(directory);
+    writeManifest(directory);
+    const reportPath = join(directory, "evidence", "production-receipt-preflight.json");
+    const summaryPath = join(directory, "summary-is-a-directory");
+    mkdirSync(summaryPath);
+
+    const result = runReceipts(
+      directory,
+      "dist/pi-v0.81.1-patch.11/release-manifest.json",
+      "preflight-output",
+      ["--preflight-report", reportPath, "--summary", summaryPath],
+    );
+
+    assert.notEqual(result.status, 0);
     assert.equal(existsSync(reportPath), false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -257,7 +329,12 @@ test("receipt preflight reports exact inventory and fail-closed input probes wit
       releaseId: "pi-v0.81.1-patch.11",
       authority: {
         rootKeyId: "fixture-root-2026",
-        releaseKeyIds: ["fixture-release-2026"],
+        rootSpkiSha256: "463b162316bb6e680f37b9203566df7b5efdaaf44c3906b807173314be800f5e",
+        trustEnvelopeSha256: "0344a2669e5a6ad787f1b7c196f109aee4ceb0008fe20c2a6a4c96e7ddb7c52d",
+        releaseKeys: [{
+          keyId: "fixture-release-2026",
+          spkiSha256: "4599deb1ddc5c67edffebaff0a1953f02d5f572bf9892b34b08c01a6ba727d96",
+        }],
       },
       expectedPlatforms,
       expectedOutputs,
