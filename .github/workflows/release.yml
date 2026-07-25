@@ -184,9 +184,40 @@ jobs:
           "$pi" --list-models >/dev/null
           test -f "$root/pi-wait-for-user/question-tool/extensions/question-tool.ts"
 
+  windows-managed-smoke:
+    needs: release-candidate
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-${{ needs.release-candidate.outputs.release-id }}
+          path: candidate
+
+      - name: Smoke-test the Windows x64 payload and managed lifecycle
+        shell: pwsh
+        run: |
+          $releaseId = '${{ needs.release-candidate.outputs.release-id }}'
+          $root = Join-Path $env:RUNNER_TEMP "windows-payload"
+          Expand-Archive -LiteralPath "candidate/pi-wait-for-user-windows-x64.zip" -DestinationPath $root
+          $pi = Join-Path $root "pi-wait-for-user/pi-core.exe"
+          $expected = node -p "require('./candidate/.release-metadata/unsigned-manifest.json').upstream.packageVersion"
+          if ((& $pi --version) -ne $expected) { throw "Windows payload version mismatch" }
+          if ((& $pi conformance) -notmatch 'Deferred conformance passed \(8/8\)') { throw "Windows conformance failed" }
+          if (-not (Test-Path (Join-Path $root "pi-wait-for-user/install.ps1"))) { throw "Windows managed installer missing" }
+          node --test test/managed-windows.test.mjs
+
   production-release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [release-candidate, platform-smoke]
+    needs: [release-candidate, platform-smoke, windows-managed-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production-release

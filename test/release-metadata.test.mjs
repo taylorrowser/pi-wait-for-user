@@ -524,7 +524,7 @@ test("production signing is tag-only, delegated, protected, and stages stable st
   assert.doesNotMatch(workflow, /ROOT_PRIVATE|RELEASE_ROOT_PUBLIC_KEY/);
   assert.match(workflow, /production-release:\n\s+if: startsWith\(github\.ref, 'refs\/tags\/'\)/);
   assert.match(workflow, /environment: production-release/);
-  assert.match(workflow, /needs: \[release-candidate, platform-smoke\]/);
+  assert.match(workflow, /needs: \[release-candidate, platform-smoke, windows-managed-smoke\]/);
   const smokePlatforms = [...workflow.matchAll(/- runner: ([^\n]+)\n\s+platform: ([^\n]+)/g)]
     .map(([, runner, platform]) => [runner, platform]);
   assert.deepEqual(smokePlatforms, [
@@ -533,6 +533,7 @@ test("production signing is tag-only, delegated, protected, and stages stable st
     ["ubuntu-24.04", "linux-x64"],
   ]);
   assert.match(workflow, /Smoke-test the exact supported platform payload/);
+  assert.match(workflow, /windows-managed-smoke:[\s\S]*runs-on: windows-2025[\s\S]*node --test test\/managed-windows\.test\.mjs/);
   assert.match(workflow, /Deferred conformance passed \(8\/8\)/);
   assert.match(workflow, /test ! -e \.work\/upstream-binaries\/pi-darwin-x64\.tar\.gz/);
   assert.doesNotMatch(workflow.replace("pi-darwin-x64.tar.gz", ""), /darwin-x64/);

@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-export const shellHashRemediation = "Run `hash -r`, then confirm this shell with: command -v pi";
+export const shellHashRemediation = process.platform === "win32"
+  ? "Open a new terminal, then confirm command resolution with: Get-Command pi"
+  : "Run `hash -r`, then confirm this shell with: command -v pi";
 
 export function enabledEnvironmentFlag(value) {
   return value === "1" || value?.toLowerCase() === "true" || value?.toLowerCase() === "yes";
@@ -22,11 +24,11 @@ export function parseManagedOptions(args, { booleanFlags = [] } = {}) {
   return values;
 }
 
-export function nativeManagedPlatform() {
-  const os = process.platform === "darwin" ? "darwin" : process.platform;
-  const arch = process.arch === "x64" ? "x64" : process.arch;
+export function nativeManagedPlatform(platform = process.platform, architecture = process.arch) {
+  const os = platform === "darwin" ? "darwin" : platform === "win32" ? "windows" : platform;
+  const arch = architecture === "x64" ? "x64" : architecture;
   const identity = `${os}-${arch}`;
-  if (!/^(?:darwin-arm64|linux-(?:arm64|x64))$/.test(identity)) throw new Error(`Unsupported managed platform: ${identity}`);
+  if (!/^(?:darwin-arm64|(?:linux|windows)-(?:arm64|x64))$/.test(identity)) throw new Error(`Unsupported managed platform: ${identity}`);
   return identity;
 }
 

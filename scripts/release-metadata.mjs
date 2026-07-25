@@ -248,7 +248,7 @@ function createVerifiedReceipt(options) {
   console.log(`Generated verified receipt for ${signedManifest.releaseId}: ${output}`);
 }
 
-const managedReceiptPlatforms = ["darwin-arm64", "linux-arm64", "linux-x64"];
+const managedReceiptPlatforms = ["darwin-arm64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
 const receiptName = (platform) => `installation-receipt-${platform}.json`;
 const expectedReceiptOutputs = managedReceiptPlatforms.map(receiptName);
 
@@ -297,7 +297,7 @@ function projectVerifiedReceipts(options) {
   const { manifest, signedManifest } = projected;
   const declaredManagedPlatforms = signedManifest.platformArchives
     .map(({ platform }) => platform)
-    .filter((platform) => platform.startsWith("darwin-") || platform.startsWith("linux-"))
+    .filter((platform) => platform.startsWith("darwin-") || platform.startsWith("linux-") || platform.startsWith("windows-"))
     .sort();
   if (JSON.stringify(declaredManagedPlatforms) !== JSON.stringify(managedReceiptPlatforms)) {
     fail(`Managed receipt platform inventory must be exactly: ${managedReceiptPlatforms.join(", ")}`);

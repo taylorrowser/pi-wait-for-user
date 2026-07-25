@@ -1,13 +1,13 @@
 {
   "name": "@taylorrowser/pi-wait-for-user-release",
-  "version": "0.81.1-patch.11",
+  "version": "0.81.1-patch.12",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
   "piWaitForUser": {
-    "managerReleaseId": "manager-v2",
+    "managerReleaseId": "manager-v3",
     "compatibleReleaseManifestVersions": [
       1
     ]
@@ -16,6 +16,7 @@
     "LICENSE",
     "README.md",
     "manager",
+    "manager.mjs",
     "packages/question-tool/extensions",
     "packages/question-tool/src",
     "packages/question-tool/package.json",
@@ -23,7 +24,7 @@
     "patches/active",
     "releases/README.md",
     "releases/schemas",
-    "releases/pi-v0.81.1-patch.11",
+    "releases/pi-v0.81.1-patch.12",
     "scripts/bootstrap.sh",
     "scripts/install-binary.sh",
     "scripts/install.mjs",
@@ -32,6 +33,8 @@
     "scripts/managed-dispatcher.mjs",
     "scripts/managed-installer.mjs",
     "scripts/managed-manager.mjs",
+    "scripts/windows-bootstrap.mjs",
+    "scripts/install-windows.ps1",
     "scripts/package-binaries.mjs",
     "scripts/pi-patch.mjs",
     "scripts/release-metadata.mjs",

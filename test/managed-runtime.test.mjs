@@ -29,7 +29,11 @@ import {
   cleanupManagedState,
   defaultManagedBinDirectory,
   defaultManagedDataRoot,
+  disableManagedCommandOwnership,
+  enableManagedOwnership,
   installAndActivate,
+  installManagedCompatibility,
+  pruneManagedInstallation,
   readActivation,
   readManagedUpdateContext,
   readLegacyInstallationAdoption,
@@ -41,6 +45,7 @@ import {
   verifyManagedInstallation,
   withLifecycleLock,
 } from "../scripts/lib/managed-runtime.mjs";
+import { nativeManagedPlatform } from "../scripts/lib/managed-command.mjs";
 import {
   cachedManagedStartupNotice,
   checkManagedUpdate,
@@ -94,8 +99,12 @@ function writeExecutable(path, contents) {
   chmodSync(path, 0o755);
 }
 
-function archive(source, output) {
-  const result = spawnSync("tar", ["-czf", output, "-C", source, "."], { encoding: "utf8" });
+function archive(source, output, platform = "linux-x64") {
+  const result = platform.startsWith("windows-")
+    ? process.platform === "linux"
+      ? spawnSync("tar", ["-cf", output, "-C", source, "."], { encoding: "utf8" })
+      : spawnSync("zip", ["-qr", output, "."], { cwd: source, encoding: "utf8" })
+    : spawnSync("tar", ["-czf", output, "-C", source, "."], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
 }
 
@@ -116,6 +125,7 @@ function fixture({
   conformanceOutput = "Deferred conformance passed (8/8)",
   readableHandlers = [{ id: "dev.taylorrowser.pi-question-tool.question", versions: [1] }],
   sequence = Number(releaseId.match(/patch\.(\d+)$/)?.[1] ?? 1),
+  platform = "linux-x64",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "managed-runtime-fixture-"));
   const managerPayload = join(directory, "manager-payload");
@@ -134,13 +144,14 @@ set -eu
 directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 exec "${process.execPath}" "$directory/scripts/managed-manager.mjs" "$@"
 `);
+  writeFileSync(join(managerPayload, "package", "manager.mjs"), "import './scripts/managed-manager.mjs';\n");
   writeFileSync(join(managerPayload, "package", "package.json"), `${JSON.stringify({
     name: "fixture-manager",
     version: "1.0.0",
     piWaitForUser: { managerReleaseId: reportedManagerId, compatibleReleaseManifestVersions: [1] },
   }, null, 2)}\n`);
 
-  writeExecutable(join(releasePayload, "pi-wait-for-user", "pi-core"), `#!/bin/sh
+  writeExecutable(join(releasePayload, "pi-wait-for-user", platform.startsWith("windows-") ? "pi-core.exe" : "pi-core"), `#!/bin/sh
 case "\${1:-}" in
   --version) echo "${reportedUpstreamVersion}" ;;
   --help) echo "Pi fixture help"; exit ${smokeExitCode} ;;
@@ -165,13 +176,13 @@ esac
   writeFileSync(join(releasePayload, "pi-wait-for-user", "release.json"), `${JSON.stringify({
     schemaVersion: 1,
     releaseId,
-    platform: "linux-x64",
+    platform,
   }, null, 2)}\n`);
 
   const managerArchive = providedManagerArchive || join(directory, `${managerId}.tar.gz`);
-  const releaseArchive = join(directory, `${releaseId}-linux-x64.tar.gz`);
+  const releaseArchive = join(directory, `${releaseId}-${platform}.${platform.startsWith("windows-") ? "zip" : "tar.gz"}`);
   if (!providedManagerArchive) archive(managerPayload, managerArchive);
-  archive(releasePayload, releaseArchive);
+  archive(releasePayload, releaseArchive, platform);
 
   const manager = artifact(managerArchive);
   const downstream = artifact(releaseArchive);
@@ -226,7 +237,7 @@ esac
     },
     manager: { releaseId: managerId, compatibleReleaseManifestVersions: [1], artifacts: [manager] },
     bootstrap: { installer },
-    platformArchives: [{ platform: "linux-x64", artifact: downstream, payload: createPayloadInventory(releasePayload) }],
+    platformArchives: [{ platform, artifact: downstream, payload: createPayloadInventory(releasePayload) }],
     releaseGates: [{ name: "release-candidate", status: "passed", definition, report }],
     provenance: {
       repository: "taylorrowser/pi-wait-for-user",
@@ -258,6 +269,7 @@ esac
     channelEnvelope,
     manifestEnvelope,
     rootKeys: new Map([["fixture-root", rootPublic]]),
+    platform,
   };
 }
 
@@ -1237,7 +1249,12 @@ test("managed enable records Stock Pi and publishes both command names to one Di
     assert.equal(ownership.stock.version, "stock-9.7");
     assert.match(ownership.stock.sha256, /^[a-f0-9]{64}$/);
 
-    const launchEnvironment = { ...process.env, PI_MANAGED_DATA_ROOT: dataRoot, PI_MANAGED_PLATFORM: "linux-x64" };
+    const launchEnvironment = {
+      ...process.env,
+      PI_MANAGED_DATA_ROOT: dataRoot,
+      PI_MANAGED_PLATFORM: "linux-x64",
+      PI_SKIP_VERSION_CHECK: "1",
+    };
     const compatibilityLaunch = spawnSync(join(bin, "pi-wait-for-user"), ["--help"], {
       encoding: "utf8",
       env: launchEnvironment,
@@ -1387,7 +1404,86 @@ test("managed roots use platform-native data locations and ~/.local/bin by defau
   assert.equal(defaultManagedDataRoot({ HOME: "/Users/example" }, "darwin"), "/Users/example/Library/Application Support/pi-wait-for-user");
   assert.equal(defaultManagedDataRoot({ HOME: "/home/example" }, "linux"), "/home/example/.local/share/pi-wait-for-user");
   assert.equal(defaultManagedDataRoot({ HOME: "/home/example", XDG_DATA_HOME: "/data" }, "linux"), "/data/pi-wait-for-user");
+  assert.equal(defaultManagedDataRoot({ USERPROFILE: "/Users/example" }, "win32"), "/Users/example/AppData/Local/pi-wait-for-user");
   assert.equal(defaultManagedBinDirectory({ HOME: "/home/example" }), "/home/example/.local/bin");
+  assert.equal(defaultManagedBinDirectory({ USERPROFILE: "/Users/example" }, "win32"), "/Users/example/.local/bin");
+  assert.equal(nativeManagedPlatform("win32", "x64"), "windows-x64");
+  assert.equal(nativeManagedPlatform("win32", "arm64"), "windows-arm64");
+});
+
+test("Windows Command Ownership uses receipt-owned cmd entrypoints and refuses executable or PowerShell collisions", () => {
+  const home = mkdtempSync(join(tmpdir(), "managed-runtime-windows-home-"));
+  const dataRoot = join(home, "managed-data");
+  const bin = join(home, "bin");
+  const candidate = fixture({ platform: "windows-x64" });
+  const environment = { ...process.env, USERPROFILE: home, PATH: `${bin};`, PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+  try {
+    activate(dataRoot, candidate);
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "pi.exe"), "foreign executable\n");
+    assert.throws(
+      () => enableManagedOwnership(dataRoot, { binDirectory: bin, environment }),
+      /foreign command collision.*pi\.exe/i,
+    );
+    rmSync(join(bin, "pi.exe"));
+    writeFileSync(join(bin, "pi.ps1"), "# foreign PowerShell command\n");
+    assert.throws(
+      () => enableManagedOwnership(dataRoot, { binDirectory: bin, environment }),
+      /foreign command collision.*pi\.ps1/i,
+    );
+    rmSync(join(bin, "pi.ps1"));
+
+    installManagedCompatibility(dataRoot, { binDirectory: bin, environment });
+    assert.equal(enableManagedOwnership(dataRoot, { binDirectory: bin, environment }), "enabled");
+    const ownership = readManagedOwnership(dataRoot);
+    assert.equal(ownership.entrypoints.pi.path, join(bin, "pi.cmd"));
+    assert.equal(ownership.entrypoints.compatibility.path, join(bin, "pi-wait-for-user.cmd"));
+    assert.match(readFileSync(ownership.entrypoints.pi.path, "utf8"), /managed-dispatcher\.mjs/);
+    assert.equal(disableManagedCommandOwnership(dataRoot), "disabled");
+    assert.equal(existsSync(join(bin, "pi.cmd")), false);
+    assert.equal(existsSync(join(bin, "pi-wait-for-user.cmd")), true);
+  } finally {
+    destroy(dataRoot);
+    destroy(home);
+    destroy(candidate.directory);
+  }
+});
+
+test("Windows deferred deletion resumes from a receipt-owned partially removed tombstone", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-windows-tombstone-"));
+  const first = fixture({ releaseId: "pi-v0.81.1-patch.5", platform: "windows-x64" });
+  const second = fixture({ releaseId: "pi-v0.81.1-patch.6", platform: "windows-x64", managerArchive: first.managerArchive });
+  const third = fixture({ releaseId: "pi-v0.81.1-patch.7", platform: "windows-x64", managerArchive: first.managerArchive });
+  try {
+    activate(dataRoot, first);
+    activate(dataRoot, second);
+    const oldPair = readActivation(dataRoot).previous;
+    const lease = acquirePairLease(dataRoot, oldPair);
+    activate(dataRoot, third);
+    lease.release();
+    assert.throws(() => removeInstalledPair(dataRoot, oldPair, {
+      checkpoint(name) {
+        if (name === "retention-downstream-tombstone-renamed") throw new Error("simulated Windows delete interruption");
+      },
+    }), /simulated Windows delete interruption/);
+    const tombstone = readdirSync(join(dataRoot, "tmp")).find((name) => name.startsWith("downstream.tombstone-"));
+    assert.ok(tombstone);
+    const payload = join(dataRoot, "tmp", tombstone, "payload");
+    chmodSync(join(payload, "pi-wait-for-user"), 0o700);
+    chmodSync(join(payload, "pi-wait-for-user", "release.json"), 0o600);
+    chmodSync(join(payload, ".managed"), 0o700);
+    chmodSync(join(payload, ".managed", "receipt.json"), 0o600);
+    rmSync(join(payload, "pi-wait-for-user", "release.json"));
+    rmSync(join(payload, ".managed", "receipt.json"));
+    assert.doesNotThrow(() => pruneManagedInstallation(dataRoot));
+    assert.equal(existsSync(join(dataRoot, "downstream-releases", oldPair.downstreamReleaseId)), false);
+    assert.equal(readdirSync(join(dataRoot, "tmp")).some((name) => name.startsWith("downstream.tombstone-")), false);
+  } finally {
+    destroy(dataRoot);
+    destroy(first.directory);
+    destroy(second.directory);
+    destroy(third.directory);
+  }
 });
 
 test("Managed Installation roots cannot overlap shared Pi data", () => {

@@ -102,7 +102,13 @@ function packagePlatform(input, output, platform, release, question) {
       recursive: true,
       filter: (path) => !path.includes(`${join("question-tool", "test")}`),
     });
-    cpSync(join(projectRoot, "scripts", "install-binary.sh"), join(payload, "install.sh"));
+    if (windows) {
+      cpSync(join(projectRoot, "scripts", "install-windows.ps1"), join(payload, "install.ps1"));
+      const bootstrapRoot = join(payload, "managed-install");
+      mkdirSync(join(bootstrapRoot, "lib"), { recursive: true });
+      cpSync(join(projectRoot, "scripts", "windows-bootstrap.mjs"), join(bootstrapRoot, "windows-bootstrap.mjs"));
+      cpSync(join(projectRoot, "scripts", "lib", "release-metadata.mjs"), join(bootstrapRoot, "lib", "release-metadata.mjs"));
+    } else cpSync(join(projectRoot, "scripts", "install-binary.sh"), join(payload, "install.sh"));
     const archiveMetadata = {
       schemaVersion: 1,
       releaseId: release.releaseId,

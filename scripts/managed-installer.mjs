@@ -39,7 +39,11 @@ try {
   const { values, managePi } = parseArguments(process.argv.slice(2));
   const dataRoot = resolve(values.get("--data-root") || defaultManagedDataRoot());
   const binDirectory = resolve(values.get("--bin-dir") || defaultManagedBinDirectory());
-  preflightManagedCommandOwnership(dataRoot, { binDirectory, managePi });
+  preflightManagedCommandOwnership(dataRoot, {
+    binDirectory,
+    managePi,
+    platform: values.get("--platform"),
+  });
   const activationPath = join(dataRoot, "state", "activation.json");
   const priorActivation = existsSync(activationPath) ? readActivation(dataRoot) : undefined;
   const activation = installAndActivateFromPinnedRoot(managedActivationOptions(values, { dataRoot }));

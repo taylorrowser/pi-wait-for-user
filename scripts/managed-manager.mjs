@@ -153,7 +153,7 @@ function verifyInstallation(args) {
 }
 
 function piCommand(release, args, { loadQuestionTool = true } = {}) {
-  const pi = join(release, "pi-wait-for-user", "pi-core");
+  const pi = join(release, "pi-wait-for-user", process.platform === "win32" ? "pi-core.exe" : "pi-core");
   const questionTool = join(release, "pi-wait-for-user", "question-tool");
   return { pi, piArgs: loadQuestionTool ? [pi, "-e", questionTool, ...args] : [pi, ...args] };
 }
@@ -168,7 +168,7 @@ function executePi(args) {
   const leadingCommands = new Set(["install", "remove", "uninstall", "update", "list", "config", "conformance"]);
   const { pi, piArgs } = piCommand(release, args, { loadQuestionTool: !leadingCommands.has(args[0]) });
   const environment = piEnvironment();
-  if (typeof process.execve === "function") process.execve(pi, piArgs, environment);
+  if (process.platform !== "win32" && typeof process.execve === "function") process.execve(pi, piArgs, environment);
   const result = spawnSync(pi, piArgs.slice(1), { stdio: "inherit", env: environment });
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;
@@ -199,12 +199,13 @@ function interactiveLaunch(args) {
 function beginStartupCheck(args) {
   const environment = process.env;
   if (environment.PI_SKIP_VERSION_CHECK || enabledEnvironmentFlag(environment.PI_OFFLINE) || args.includes("--offline")) return;
-  const manager = process.env.PI_MANAGED_MANAGER_DIR
-    ? join(process.env.PI_MANAGED_MANAGER_DIR, "package", "manager")
-    : process.execPath;
-  const managerArgs = process.env.PI_MANAGED_MANAGER_DIR
-    ? ["managed", "_startup-check"]
-    : [fileURLToPath(import.meta.url), "managed", "_startup-check"];
+  const selectedManager = process.env.PI_MANAGED_MANAGER_DIR
+    ? join(process.env.PI_MANAGED_MANAGER_DIR, "package", process.platform === "win32" ? "manager.mjs" : "manager")
+    : fileURLToPath(import.meta.url);
+  const manager = selectedManager.endsWith(".mjs") ? process.execPath : selectedManager;
+  const managerArgs = selectedManager.endsWith(".mjs")
+    ? [selectedManager, "managed", "_startup-check"]
+    : ["managed", "_startup-check"];
   try {
     const child = spawn(manager, managerArgs, { detached: true, stdio: "ignore", env: environment });
     child.once("error", () => {});
