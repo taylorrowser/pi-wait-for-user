@@ -1486,6 +1486,48 @@ test("Windows deferred deletion resumes from a receipt-owned partially removed t
   }
 });
 
+test("Windows uninstall retains a manager-only pair when executable-lock cleanup is deferred", () => {
+  const dataRoot = mkdtempSync(join(tmpdir(), "managed-runtime-windows-uninstall-deferral-"));
+  const candidate = fixture({ platform: "windows-x64" });
+  let pendingAtBoundary;
+  try {
+    const activation = activate(dataRoot, candidate);
+    assert.throws(() => uninstallManagedInstallation(dataRoot, {
+      environment: { ...process.env, HOME: dirname(dataRoot), PATH: "/usr/bin:/bin" },
+      checkpoint(name) {
+        if (name === "uninstall-manager-tombstone-renamed") {
+          const error = new Error("simulated Windows executable lock");
+          error.code = "EACCES";
+          throw error;
+        }
+        if (name === "uninstall-payloads-removed") {
+          pendingAtBoundary = JSON.parse(readFileSync(join(dataRoot, "state", "uninstall-pending.json"), "utf8")).pairs;
+          throw new Error("stop after deferred-pair checkpoint");
+        }
+      },
+    }), /stop after deferred-pair checkpoint/);
+    assert.deepEqual(pendingAtBoundary, [activation.active]);
+
+    let retryBoundary;
+    assert.throws(() => uninstallManagedInstallation(dataRoot, {
+      environment: { ...process.env, HOME: dirname(dataRoot), PATH: "/usr/bin:/bin" },
+      checkpoint(name) {
+        if (name === "uninstall-payloads-removed") {
+          retryBoundary = {
+            managerReceipt: existsSync(join(dataRoot, "receipts", "managers", `${activation.active.managerReleaseId}.json`)),
+            managerTombstone: readdirSync(join(dataRoot, "tmp")).some((entry) => entry.startsWith("manager.tombstone-")),
+          };
+          throw new Error("stop after deferred-pair retry");
+        }
+      },
+    }), /stop after deferred-pair retry/);
+    assert.deepEqual(retryBoundary, { managerReceipt: false, managerTombstone: false });
+  } finally {
+    destroy(dataRoot);
+    destroy(candidate.directory);
+  }
+});
+
 test("Managed Installation roots cannot overlap shared Pi data", () => {
   const home = mkdtempSync(join(tmpdir(), "managed-runtime-shared-root-"));
   const shared = join(home, ".pi", "agent");

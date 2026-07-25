@@ -2097,6 +2097,23 @@ function validateTombstoneContents(paths, path, owner, pairs, dispatcher) {
   else comparePayload(remaining, central.payload, { platform: pair.platform });
 }
 
+function pairTombstone(paths, pair, kind) {
+  const identity = metadataDigest({ kind, pair });
+  const matches = [];
+  for (const name of readdirSync(paths.temporary)) {
+    const path = join(paths.temporary, name);
+    if (!safeTemporaryOwner(path)) continue;
+    const owner = readJson(join(path, ".owner.json"), "tombstone receipt");
+    if (owner.type === "managed-tombstone" && owner.scope.kind === kind && owner.scope.identity === identity) {
+      matches.push({ path, owner });
+    }
+  }
+  if (matches.length > 1) fail(`Multiple receipt-owned ${kind} tombstones exist for one pair`);
+  if (matches.length === 0) return null;
+  validateTombstoneContents(paths, matches[0].path, matches[0].owner, [pair], null);
+  return matches[0].path;
+}
+
 function readPendingPairs(paths) {
   if (!existsSync(paths.pending)) return [];
   const pending = readJson(paths.pending, "pending cleanup state");
@@ -2191,6 +2208,15 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
     return true;
   };
   const releasePath = join(paths.releases, pair.downstreamReleaseId);
+  const deferredReleaseTombstone = pairTombstone(paths, pair, "downstream");
+  if (deferredReleaseTombstone) {
+    try {
+      removeOwnedTombstone(deferredReleaseTombstone);
+    } catch (error) {
+      if (deferWindowsExecutableLock(error)) return "deferred";
+      throw error;
+    }
+  }
   const centralReleaseReceipt = ensureNoSymlinkPath(
     paths.receipts,
     receiptPath(paths, "downstream", pair.downstreamReleaseId),
@@ -2235,6 +2261,15 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
     "Manager cleanup receipt path",
   );
   if (!retainedManager && !installedManagerReference) {
+    const deferredManagerTombstone = pairTombstone(paths, pair, "manager");
+    if (deferredManagerTombstone) {
+      try {
+        removeOwnedTombstone(deferredManagerTombstone);
+      } catch (error) {
+        if (deferWindowsExecutableLock(error)) return "deferred";
+        throw error;
+      }
+    }
     if (existsSync(managerPath)) {
       readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
       try {
@@ -2883,6 +2918,17 @@ function writeUninstallPending(paths, pairs, createdAt = new Date().toISOString(
   atomicWrite(paths.uninstallPending, { schemaVersion: 1, type: "pending-uninstall", pairs, createdAt });
 }
 
+function uninstallPairsWithOwnedState(paths, pairs) {
+  return pairs.filter((pair) => [
+    join(paths.releases, pair.downstreamReleaseId),
+    receiptPath(paths, "downstream", pair.downstreamReleaseId),
+    join(paths.managers, pair.managerReleaseId),
+    receiptPath(paths, "manager", pair.managerReleaseId),
+    pairLeaseDirectory(paths, pair),
+    pairCleanupClaimPath(paths, pair),
+  ].some((path) => pathExists(path)));
+}
+
 function validatePairLeaseDirectory(paths, pair) {
   const directory = pairLeaseDirectory(paths, pair);
   for (const name of readdirSync(directory)) {
@@ -3119,14 +3165,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
     const pendingUninstall = readUninstallPending(paths);
     const pendingPairs = pendingUninstall?.pairs || [];
     const installed = installedPairs(paths, { allowMissingPairs: pendingPairs });
-    const pendingWithOwnedState = pendingPairs.filter((pair) => [
-      join(paths.releases, pair.downstreamReleaseId),
-      receiptPath(paths, "downstream", pair.downstreamReleaseId),
-      join(paths.managers, pair.managerReleaseId),
-      receiptPath(paths, "manager", pair.managerReleaseId),
-      pairLeaseDirectory(paths, pair),
-      pairCleanupClaimPath(paths, pair),
-    ].some((path) => pathExists(path)));
+    const pendingWithOwnedState = uninstallPairsWithOwnedState(paths, pendingPairs);
     const pairs = [...installed, ...pendingWithOwnedState]
       .filter((pair, index, all) => all.findIndex((candidate) => samePair(candidate, pair)) === index);
     validateManagerPayloadsForRemoval(paths, { allowMissingManagerIds: new Set(pendingPairs.map((pair) => pair.managerReleaseId)) });
@@ -3171,7 +3210,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
         mode: "uninstall",
         checkpoint: options.checkpoint,
       }) === "deferred") deferred += 1;
-      writeUninstallPending(paths, installedPairs(paths, { allowMissingPairs: pairs }), pendingCreatedAt, { preserveEmpty: true });
+      writeUninstallPending(paths, uninstallPairsWithOwnedState(paths, pairs), pendingCreatedAt, { preserveEmpty: true });
     }
     options.checkpoint?.("uninstall-payloads-removed");
 
@@ -3204,7 +3243,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
     }
     options.checkpoint?.("uninstall-state-removed");
 
-    const remainingPairs = installedPairs(paths, { allowMissingPairs: pairs });
+    const remainingPairs = uninstallPairsWithOwnedState(paths, pairs);
     writeUninstallPending(paths, remainingPairs, pendingCreatedAt);
     if (remainingPairs.length === 0) {
       for (const name of managedRootEntries) {
