@@ -303,6 +303,7 @@ test("receipt preflight cannot create a passing machine report without its requi
     writeAuthority(directory);
     writeManifest(directory);
     const reportPath = join(directory, "production-receipt-preflight.json");
+    writeFileSync(reportPath, '{"result":"passed","stale":true}\n');
 
     const result = runReceipts(
       directory,
@@ -313,6 +314,31 @@ test("receipt preflight cannot create a passing machine report without its requi
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /summary.*required|required.*summary/i);
+    assert.equal(existsSync(reportPath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("receipt preflight clears stale machine evidence before validating required inputs", () => {
+  const directory = mkdtempSync(join(tmpdir(), "release-receipts-required-input-"));
+  try {
+    writeAuthority(directory);
+    const reportPath = join(directory, "production-receipt-preflight.json");
+    writeFileSync(reportPath, '{"result":"passed","stale":true}\n');
+
+    const result = spawnSync(process.execPath, [metadataCli, "receipts",
+      "--trust", "authority/release-trust.json",
+      "--root-key", `fixture-root-2026=${join(fixtureKeys, "root-public.pem")}`,
+      "--now", now,
+      "--owned-path", "$MANAGED_DATA_ROOT/downstream-releases/pi-v0.81.1-patch.11",
+      "--output", "preflight-output",
+      "--preflight-report", reportPath,
+      "--summary", join(directory, "workflow-summary.md"),
+    ], { cwd: directory, encoding: "utf8" });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Missing required option: --manifest/);
     assert.equal(existsSync(reportPath), false);
   } finally {
     rmSync(directory, { recursive: true, force: true });

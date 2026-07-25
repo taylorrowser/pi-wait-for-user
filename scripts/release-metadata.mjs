@@ -280,6 +280,10 @@ function loadVerifiedReceiptManifest(options) {
   };
 }
 
+function receiptOutputInventory(output) {
+  return readdirSync(output).filter((name) => name.startsWith("installation-receipt-")).sort();
+}
+
 function projectVerifiedReceipts(options) {
   const projected = loadVerifiedReceiptManifest(options);
   const { manifest, signedManifest } = projected;
@@ -293,7 +297,7 @@ function projectVerifiedReceipts(options) {
 
   const output = resolve(required(options, "--output"));
   mkdirSync(output, { recursive: true });
-  const existingOutputs = readdirSync(output).filter((name) => name.startsWith("installation-receipt-")).sort();
+  const existingOutputs = receiptOutputInventory(output);
   if (existingOutputs.length > 0) fail("Receipt output inventory must be empty before projection");
   for (const platform of managedReceiptPlatforms) {
     writeJson(join(output, receiptName(platform)), createReceipt(
@@ -302,7 +306,7 @@ function projectVerifiedReceipts(options) {
       required(options, "--owned-path"),
     ));
   }
-  const actualOutputs = readdirSync(output).filter((name) => name.startsWith("installation-receipt-")).sort();
+  const actualOutputs = receiptOutputInventory(output);
   if (JSON.stringify(actualOutputs) !== JSON.stringify(expectedReceiptOutputs)) fail("Receipt output inventory mismatch");
   return projected;
 }
@@ -335,14 +339,14 @@ function createVerifiedReceipts(options) {
     "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--owned-path", "--output",
     "--preflight-report", "--summary",
   ]);
-  if (options.has("--summary") !== options.has("--preflight-report")) {
-    fail("--preflight-report and --summary are required together");
-  }
-  const manifestArgument = required(options, "--manifest");
   const reportPath = options.has("--preflight-report")
     ? resolve(required(options, "--preflight-report"))
     : undefined;
   if (reportPath) rmSync(reportPath, { force: true });
+  if (options.has("--summary") !== options.has("--preflight-report")) {
+    fail("--preflight-report and --summary are required together");
+  }
+  const manifestArgument = required(options, "--manifest");
   const projected = projectVerifiedReceipts(options);
   if (reportPath) {
     if (isAbsolute(manifestArgument)) fail("Receipt preflight requires a workspace-relative Release Manifest path");
