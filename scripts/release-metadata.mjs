@@ -335,24 +335,29 @@ function createVerifiedReceipts(options) {
     "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--owned-path", "--output",
     "--preflight-report", "--summary",
   ]);
-  if (options.has("--summary") && !options.has("--preflight-report")) fail("--summary requires --preflight-report");
+  if (options.has("--summary") !== options.has("--preflight-report")) {
+    fail("--preflight-report and --summary are required together");
+  }
   const manifestArgument = required(options, "--manifest");
+  const reportPath = options.has("--preflight-report")
+    ? resolve(required(options, "--preflight-report"))
+    : undefined;
+  if (reportPath) rmSync(reportPath, { force: true });
   const projected = projectVerifiedReceipts(options);
-  if (options.has("--preflight-report")) {
+  if (reportPath) {
     if (isAbsolute(manifestArgument)) fail("Receipt preflight requires a workspace-relative Release Manifest path");
     const fixtureAuthority = publicFixtureAuthorityIdentity(projected);
     if (serializeMetadata(fixtureAuthority) !== serializeMetadata(checkedInPublicFixtureAuthority)) {
       fail("Receipt preflight requires the explicitly identified public fixture authority");
     }
-    const reportPath = resolve(required(options, "--preflight-report"));
     mkdirSync(dirname(reportPath), { recursive: true });
     const temporary = mkdtempSync(join(dirname(reportPath), ".receipt-preflight-"));
     try {
-      const probe = (manifest, output) => {
+      const probe = (manifestPath, output) => {
         const probeOptions = new Map(options);
         probeOptions.delete("--preflight-report");
         probeOptions.delete("--summary");
-        probeOptions.set("--manifest", manifest);
+        probeOptions.set("--manifest", manifestPath);
         probeOptions.set("--output", output);
         return projectVerifiedReceipts(probeOptions);
       };

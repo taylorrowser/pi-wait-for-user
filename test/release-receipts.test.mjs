@@ -134,6 +134,10 @@ function runReceipts(directory, manifest, output, extra = []) {
   ], { cwd: directory, encoding: "utf8" });
 }
 
+function preflightOptions(directory, reportPath) {
+  return ["--preflight-report", reportPath, "--summary", join(directory, "workflow-summary.md")];
+}
+
 test("receipt projection loads workspace-relative and absolute generated manifests through one CLI boundary", () => {
   const directory = mkdtempSync(join(tmpdir(), "release-receipts-paths-"));
   try {
@@ -174,7 +178,7 @@ test("receipt projection rejects missing supported outputs and unsupported Intel
         directory,
         "dist/pi-v0.81.1-patch.11/release-manifest.json",
         "output",
-        ["--preflight-report", reportPath],
+        preflightOptions(directory, reportPath),
       );
       assert.notEqual(result.status, 0, name);
       assert.match(result.stderr, /platform inventory must be exactly/i, name);
@@ -190,14 +194,24 @@ test("receipt projection rejects missing, malformed, and unexpected output input
   try {
     writeAuthority(directory);
     const reportPath = join(directory, "preflight-report.json");
-    const missing = runReceipts(directory, "dist/missing/release-manifest.json", "missing-output", ["--preflight-report", reportPath]);
+    const missing = runReceipts(
+      directory,
+      "dist/missing/release-manifest.json",
+      "missing-output",
+      preflightOptions(directory, reportPath),
+    );
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /Missing Release Manifest/);
 
     const malformedPath = join(directory, "dist", "malformed", "release-manifest.json");
     mkdirSync(dirname(malformedPath), { recursive: true });
     writeFileSync(malformedPath, "not JSON\n");
-    const malformed = runReceipts(directory, "dist/malformed/release-manifest.json", "malformed-output", ["--preflight-report", reportPath]);
+    const malformed = runReceipts(
+      directory,
+      "dist/malformed/release-manifest.json",
+      "malformed-output",
+      preflightOptions(directory, reportPath),
+    );
     assert.notEqual(malformed.status, 0);
     assert.match(malformed.stderr, /Malformed Release Manifest JSON/);
 
@@ -208,7 +222,7 @@ test("receipt projection rejects missing, malformed, and unexpected output input
       directory,
       "dist/pi-v0.81.1-patch.11/release-manifest.json",
       "extra-output",
-      ["--preflight-report", reportPath],
+      preflightOptions(directory, reportPath),
     );
     assert.notEqual(extra.status, 0);
     assert.match(extra.stderr, /output inventory must be empty/i);
@@ -232,7 +246,7 @@ test("receipt preflight refuses authority that is not explicitly identified as a
       directory,
       manifestPath,
       "preflight-output",
-      ["--preflight-report", reportPath],
+      preflightOptions(directory, reportPath),
     );
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /public fixture authority/i);
@@ -272,11 +286,33 @@ test("receipt preflight rejects arbitrary delegated keys that reuse the fixture 
       directory,
       "dist/pi-v0.81.1-patch.11/release-manifest.json",
       "output",
-      ["--preflight-report", reportPath],
+      preflightOptions(directory, reportPath),
     );
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /public fixture authority/i);
+    assert.equal(existsSync(reportPath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("receipt preflight cannot create a passing machine report without its required workflow summary", () => {
+  const directory = mkdtempSync(join(tmpdir(), "release-receipts-summary-required-"));
+  try {
+    writeAuthority(directory);
+    writeManifest(directory);
+    const reportPath = join(directory, "production-receipt-preflight.json");
+
+    const result = runReceipts(
+      directory,
+      "dist/pi-v0.81.1-patch.11/release-manifest.json",
+      "preflight-output",
+      ["--preflight-report", reportPath],
+    );
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /summary.*required|required.*summary/i);
     assert.equal(existsSync(reportPath), false);
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -289,6 +325,8 @@ test("receipt preflight leaves no passing machine report when workflow summary w
     writeAuthority(directory);
     writeManifest(directory);
     const reportPath = join(directory, "evidence", "production-receipt-preflight.json");
+    mkdirSync(dirname(reportPath), { recursive: true });
+    writeFileSync(reportPath, '{"result":"passed","stale":true}\n');
     const summaryPath = join(directory, "summary-is-a-directory");
     mkdirSync(summaryPath);
 
