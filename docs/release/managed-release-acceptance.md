@@ -1,16 +1,24 @@
 # Managed Installation release acceptance
 
-This is the release-level traceability record for GitHub issues #63 and #80 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
+This is the release-level traceability record for GitHub issues #63, #80, and #82 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
 
 ## Release and bootstrap
 
 | Design / #63 requirement | Automated evidence |
 | --- | --- |
-| Signed trust, Channel, Release Manifest, exact Manager Release, Question Tool, platform Downstream Release payloads, generated projections, receipts, and provenance | `test/release-metadata.test.mjs` — “authorized root and release signatures verify complete metadata”, “manifest projections are generated from one verified identity”, “production signing is tag-only…”, and provenance/drift rejection; `test/release.test.mjs` — “a passing release stages complete artifacts while omitting Intel macOS”; `.github/workflows/release.yml` generates `installation-receipt-<platform>.json` for `darwin-arm64`, `linux-arm64`, and `linux-x64` before attesting and publishing every top-level asset |
+| Signed trust, Channel, Release Manifest, exact Manager Release, Question Tool, platform Downstream Release payloads, generated projections, receipts, and provenance | `test/release-metadata.test.mjs` — “authorized root and release signatures verify complete metadata”, “manifest projections are generated from one verified identity”, “production signing is tag-only…”, and provenance/drift rejection; `test/release-receipts.test.mjs` executes the shared production/preflight CLI boundary for relative/absolute paths, exact supported inventory, unsupported Intel, and missing/malformed input; `test/release.test.mjs` — “a passing release stages complete artifacts while omitting Intel macOS”; `.github/workflows/release.yml` preserves the fixture-authority preflight report before the protected dependency and later generates `installation-receipt-<platform>.json` for `darwin-arm64`, `linux-arm64`, and `linux-x64` before attesting and publishing every top-level asset |
 | Clean HTTPS side-by-side or explicit Command Ownership bootstrap | `test/binary-release.test.mjs` — managed bootstrap authority and signed-descriptor tests; `test/managed-runtime.test.mjs` — “installer claims pi only with explicit --manage-pi” and “plain side-by-side setup…” |
 | Independently checked first use | `README.md` “Independently checked first use”; workflow attestation of `install.sh`; root SPKI fixture/production fingerprint verification in `test/release-metadata.test.mjs` |
 | macOS Apple Silicon and Linux ARM64/x64 smoke and public conformance | `.github/workflows/release.yml` `platform-smoke` matrix; release-candidate Linux interactive Question Tool smoke |
 | Release CI fails on state-machine, drift, provenance, platform smoke, or conformance failure | `scripts/release-gate.mjs` repository tests and public-conformance stages; metadata mutation tests; required `platform-smoke` matrix; `production-release` depends on both |
+
+## Production receipt preflight and hydration prerequisite (#82)
+
+| #82 requirement | Automated evidence |
+| --- | --- |
+| Workspace-relative and absolute generated Release Manifest paths load through one production/preflight receipt boundary | `test/release-receipts.test.mjs` executes `release-metadata.mjs receipts` with both path forms and verifies the exact supported receipt inventory |
+| Unprotected no-secret preflight runs before protected production signing, emits machine-readable evidence and a workflow summary, and fails closed for missing/malformed inputs | `test/release-metadata.test.mjs` verifies workflow ordering, shared executable invocation, report upload, summary emission, fixture authority, and failure probes; `test/release-receipts.test.mjs` pins the checked-in fixture root/delegated SPKI fingerprints and canonical trust-envelope digest, rejects arbitrary keys reusing fixture IDs, and proves summary-write failure leaves no passing report; `.github/workflows/release.yml` keeps `production-release` dependent on the completed candidate/preflight jobs |
+| Strict hydration reconciles every remaining committed identity after the live Vercel AI Gateway withdrawals | Active patch `0018-fix-remove-withdrawn-vercel-models.patch` adds a regression at `hydrateModelDataStructure` for the exact withdrawn identities and proves an unrelated missing Gateway identity still fails |
 
 ## Installation, update, and compatibility
 

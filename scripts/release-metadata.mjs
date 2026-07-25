@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash, createPublicKey } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   createArchiveMetadata,
@@ -44,6 +44,14 @@ function parseOptions(args) {
   return options;
 }
 
+function clearReceiptPreflightEvidence(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--preflight-report" && args[index + 1] !== undefined) {
+      rmSync(resolve(args[index + 1]), { force: true });
+    }
+  }
+}
+
 function required(options, flag) {
   const value = options.get(flag);
   if (!value) fail(`Missing required option: ${flag}`);
@@ -72,16 +80,18 @@ function verificationTime(options) {
 
 function authority(options) {
   const trustPath = resolve(required(options, "--trust"));
+  const trustEnvelope = readJson(trustPath);
   const root = rootKey(options);
   const now = verificationTime(options);
   return {
-    trust: verifyTrustMetadata(readJson(trustPath), {
+    trust: verifyTrustMetadata(trustEnvelope, {
       trustedRootKeys: new Map([[root.keyId, root.publicKey]]),
       now,
       accepted: options.has("--accepted-trust-state")
         ? readJson(resolve(options.get("--accepted-trust-state")))
         : undefined,
     }),
+    root,
     now,
   };
 }
@@ -227,9 +237,7 @@ function createVerifiedReceipt(options) {
   allowed(options, [
     "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--platform", "--owned-path", "--output",
   ]);
-  const manifest = readJson(resolve(required(options, "--manifest")));
-  const { trust, now } = authority(options);
-  const signedManifest = verifyReleaseManifest(manifest, { trust, now });
+  const { signedManifest } = loadVerifiedReceiptManifest(options);
   const receipt = createReceipt(
     signedManifest,
     required(options, "--platform"),
@@ -238,6 +246,173 @@ function createVerifiedReceipt(options) {
   const output = resolve(required(options, "--output"));
   writeJson(output, receipt);
   console.log(`Generated verified receipt for ${signedManifest.releaseId}: ${output}`);
+}
+
+const managedReceiptPlatforms = ["darwin-arm64", "linux-arm64", "linux-x64"];
+const receiptName = (platform) => `installation-receipt-${platform}.json`;
+const expectedReceiptOutputs = managedReceiptPlatforms.map(receiptName);
+
+// Cryptographic identity of test/fixtures/release-keys, whose private counterparts are public test fixtures.
+const checkedInPublicFixtureAuthority = {
+  rootKeyId: "fixture-root-2026",
+  rootSpkiSha256: "463b162316bb6e680f37b9203566df7b5efdaaf44c3906b807173314be800f5e",
+  trustEnvelopeSha256: "0344a2669e5a6ad787f1b7c196f109aee4ceb0008fe20c2a6a4c96e7ddb7c52d",
+  releaseKeys: [{
+    keyId: "fixture-release-2026",
+    spkiSha256: "4599deb1ddc5c67edffebaff0a1953f02d5f572bf9892b34b08c01a6ba727d96",
+  }],
+};
+
+function readReceiptManifest(path) {
+  let contents;
+  try {
+    contents = readFileSync(resolve(path), "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") fail("Missing Release Manifest");
+    throw error;
+  }
+  try {
+    return JSON.parse(contents);
+  } catch {
+    fail("Malformed Release Manifest JSON");
+  }
+}
+
+function loadVerifiedReceiptManifest(options) {
+  const manifest = readReceiptManifest(required(options, "--manifest"));
+  const verifiedAuthority = authority(options);
+  return {
+    manifest,
+    signedManifest: verifyReleaseManifest(manifest, verifiedAuthority),
+    ...verifiedAuthority,
+  };
+}
+
+function receiptOutputInventory(output) {
+  return readdirSync(output).filter((name) => name.startsWith("installation-receipt-")).sort();
+}
+
+function projectVerifiedReceipts(options) {
+  const projected = loadVerifiedReceiptManifest(options);
+  const { manifest, signedManifest } = projected;
+  const declaredManagedPlatforms = signedManifest.platformArchives
+    .map(({ platform }) => platform)
+    .filter((platform) => platform.startsWith("darwin-") || platform.startsWith("linux-"))
+    .sort();
+  if (JSON.stringify(declaredManagedPlatforms) !== JSON.stringify(managedReceiptPlatforms)) {
+    fail(`Managed receipt platform inventory must be exactly: ${managedReceiptPlatforms.join(", ")}`);
+  }
+
+  const output = resolve(required(options, "--output"));
+  mkdirSync(output, { recursive: true });
+  const existingOutputs = receiptOutputInventory(output);
+  if (existingOutputs.length > 0) fail("Receipt output inventory must be empty before projection");
+  for (const platform of managedReceiptPlatforms) {
+    writeJson(join(output, receiptName(platform)), createReceipt(
+      signedManifest,
+      platform,
+      required(options, "--owned-path"),
+    ));
+  }
+  const actualOutputs = receiptOutputInventory(output);
+  if (JSON.stringify(actualOutputs) !== JSON.stringify(expectedReceiptOutputs)) fail("Receipt output inventory mismatch");
+  return projected;
+}
+
+function publicFixtureAuthorityIdentity(projected) {
+  const releaseKeyIds = projected.manifest.signatures.map(({ keyId }) => keyId).sort();
+  return {
+    rootKeyId: projected.root.keyId,
+    rootSpkiSha256: publicKeyFingerprint(projected.root.publicKey),
+    trustEnvelopeSha256: projected.trust.acceptedState.envelopeSha256,
+    releaseKeys: releaseKeyIds.map((keyId) => ({
+      keyId,
+      spkiSha256: publicKeyFingerprint(projected.trust.releaseKeys.get(keyId).publicKey),
+    })),
+  };
+}
+
+function expectFailedClosed(callback, expected) {
+  try {
+    callback();
+  } catch (error) {
+    if (error instanceof Error && expected.test(error.message)) return;
+    throw error;
+  }
+  fail("Receipt preflight probe did not fail closed");
+}
+
+function createVerifiedReceipts(options) {
+  const reportPath = options.has("--preflight-report")
+    ? resolve(required(options, "--preflight-report"))
+    : undefined;
+  if (reportPath) rmSync(reportPath, { force: true });
+  allowed(options, [
+    "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--owned-path", "--output",
+    "--preflight-report", "--summary",
+  ]);
+  if (options.has("--summary") !== options.has("--preflight-report")) {
+    fail("--preflight-report and --summary are required together");
+  }
+  const manifestArgument = required(options, "--manifest");
+  const projected = projectVerifiedReceipts(options);
+  if (reportPath) {
+    if (isAbsolute(manifestArgument)) fail("Receipt preflight requires a workspace-relative Release Manifest path");
+    const fixtureAuthority = publicFixtureAuthorityIdentity(projected);
+    if (serializeMetadata(fixtureAuthority) !== serializeMetadata(checkedInPublicFixtureAuthority)) {
+      fail("Receipt preflight requires the explicitly identified public fixture authority");
+    }
+    mkdirSync(dirname(reportPath), { recursive: true });
+    const temporary = mkdtempSync(join(dirname(reportPath), ".receipt-preflight-"));
+    try {
+      const probe = (manifestPath, output) => {
+        const probeOptions = new Map(options);
+        probeOptions.delete("--preflight-report");
+        probeOptions.delete("--summary");
+        probeOptions.set("--manifest", manifestPath);
+        probeOptions.set("--output", output);
+        return projectVerifiedReceipts(probeOptions);
+      };
+      probe(resolve(manifestArgument), join(temporary, "absolute-output"));
+      expectFailedClosed(
+        () => probe(join(temporary, "missing-release-manifest.json"), join(temporary, "missing-output")),
+        /^Missing Release Manifest$/,
+      );
+      const malformedPath = join(temporary, "malformed-release-manifest.json");
+      writeFileSync(malformedPath, "{}\n", { flag: "wx" });
+      expectFailedClosed(
+        () => probe(malformedPath, join(temporary, "malformed-output")),
+        /^Malformed release-manifest metadata/,
+      );
+    } finally {
+      rmSync(temporary, { recursive: true, force: true });
+    }
+    if (options.has("--summary")) {
+      const summaryPath = resolve(required(options, "--summary"));
+      mkdirSync(dirname(summaryPath), { recursive: true });
+      writeFileSync(summaryPath, [
+        "## Production receipt preflight: passed",
+        "",
+        `- Generated exact managed receipt inventory: ${managedReceiptPlatforms.join(", ")}.`,
+        "- Loaded the generated Release Manifest through workspace-relative and absolute paths.",
+        "- The missing and malformed Release Manifest probes failed closed.",
+        "- Authority: public fixture root and delegated release key material only.",
+        "",
+      ].join("\n"), { flag: "a" });
+    }
+    writeJson(reportPath, {
+      schemaVersion: 1,
+      type: "production-receipt-preflight",
+      result: "passed",
+      releaseId: projected.signedManifest.releaseId,
+      authority: fixtureAuthority,
+      expectedPlatforms: managedReceiptPlatforms,
+      expectedOutputs: expectedReceiptOutputs,
+      manifestLoading: { workspaceRelative: "passed", absolute: "passed" },
+      failClosedProbes: { missingManifest: "passed", malformedManifest: "passed" },
+    });
+  }
+  console.log(`Generated verified receipts for ${projected.signedManifest.releaseId}: ${managedReceiptPlatforms.join(", ")}`);
 }
 
 function verifyMetadata(options) {
@@ -281,12 +456,14 @@ function usage() {
     "  release-metadata.mjs sign-manifest --input FILE --provenance FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --output FILE [--release-root DIR] [--accepted-trust-state FILE] [--now DATE]",
     "  release-metadata.mjs promote --manifest FILE --trust FILE --root-key ID=FILE --key-id ID --private-key FILE --sequence N --expires DATE --manifest-url URL --output DIR (--accepted-state FILE | --bootstrap true) [--accepted-trust-state FILE] [--now DATE]",
     "  release-metadata.mjs receipt --manifest FILE --trust FILE --root-key ID=FILE --platform PLATFORM --owned-path PATH --output FILE [--accepted-trust-state FILE] [--now DATE]",
+    "  release-metadata.mjs receipts --manifest FILE --trust FILE --root-key ID=FILE --owned-path PATH --output DIR [--preflight-report FILE --summary FILE] [--accepted-trust-state FILE] [--now DATE]",
     "  release-metadata.mjs verify --manifest FILE --channel FILE --trust FILE --root-key ID=FILE [--accepted-trust-state FILE] [--accepted-state FILE] [--active FILE --artifact-manifest FILE --checksums FILE --archive-metadata-dir DIR --release-root DIR] [--now DATE]",
   ].join("\n");
 }
 
 try {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "receipts") clearReceiptPreflightEvidence(args);
   const options = parseOptions(args);
   if (command === "sign-trust") signTrust(options);
   else if (command === "verify-trust") verifyTrust(options);
@@ -294,6 +471,7 @@ try {
   else if (command === "sign-manifest") signManifest(options);
   else if (command === "promote") promote(options);
   else if (command === "receipt") createVerifiedReceipt(options);
+  else if (command === "receipts") createVerifiedReceipts(options);
   else if (command === "verify") verifyMetadata(options);
   else fail(usage());
 } catch (error) {
