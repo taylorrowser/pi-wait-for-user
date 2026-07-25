@@ -2,19 +2,19 @@
   "signed": {
     "schemaVersion": 1,
     "type": "release-channel",
-    "sequence": 1,
+    "sequence": 2,
     "expires": "2026-09-22T14:04:24.190Z",
     "manifest": {
-      "releaseId": "pi-v0.81.1-patch.8",
-      "url": "https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.8/release-manifest.json",
-      "sha256": "283aebceccdf1b87523e2f4a5912d8fc0e710b8a57a4fc2b6435b34dbf0f35ca"
+      "releaseId": "pi-v0.81.1-patch.11",
+      "url": "https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.11/release-manifest.json",
+      "sha256": "2c42d10f31a9fede74a82b2b28da2e87c284715f872e08a19ee94c4769142946"
     }
   },
   "signatures": [
     {
       "keyId": "release-2026-1",
       "algorithm": "ed25519",
-      "signature": "vjzp0dXpnTuBisuXQZv096xjZpZ7WZx3uuyA75n4maaXr67BlMIYKD16fv0d5g7DySVHq8Ct0wRsGOl7e+isBA=="
+      "signature": "b7m13ekrW7DhDgnfnbmapjgwJjmto1lSkJn0m1ImPraaNzcOszZ0mRnZ6TOP++b+mDuVlvTQ/eSsBSZQwP+MDw=="
     }
   ]
 }
