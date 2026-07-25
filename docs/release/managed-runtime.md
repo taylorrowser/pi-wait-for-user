@@ -1,6 +1,6 @@
 # Managed Installation components and command ownership
 
-This local runtime implements the stable Managed Dispatcher, versioned Manager Release seam, macOS/Linux command ownership, patch-aware Managed Update flow, rollback, retention, recovery, and uninstall defined by [`docs/design/managed-installation.md`](../design/managed-installation.md). GitHub issue [#59](https://github.com/taylorrowser/pi-wait-for-user/issues/59) delivered Activation; [#60](https://github.com/taylorrowser/pi-wait-for-user/issues/60) added Command Ownership and Legacy Downstream Installation adoption; [#61](https://github.com/taylorrowser/pi-wait-for-user/issues/61) added authenticated network discovery, update routing, startup status, and Patch Lag; and [#62](https://github.com/taylorrowser/pi-wait-for-user/issues/62) completes the local lifecycle state machines.
+This local runtime implements the stable Managed Dispatcher, versioned Manager Release seam, macOS/Linux/Windows command ownership, patch-aware Managed Update flow, rollback, retention, recovery, and uninstall defined by [`docs/design/managed-installation.md`](../design/managed-installation.md). GitHub issue [#59](https://github.com/taylorrowser/pi-wait-for-user/issues/59) delivered Activation; [#60](https://github.com/taylorrowser/pi-wait-for-user/issues/60) added Command Ownership and Legacy Downstream Installation adoption; [#61](https://github.com/taylorrowser/pi-wait-for-user/issues/61) added authenticated network discovery, update routing, startup status, and Patch Lag; and [#62](https://github.com/taylorrowser/pi-wait-for-user/issues/62) completes the local lifecycle state machines.
 
 ## Entrypoints
 
@@ -14,11 +14,11 @@ The release `install.sh` is the reviewed stage-0 bootstrap. It rejects Intel mac
 pi-wait-for-user managed enable [--bin-dir <directory>]
 ```
 
-Enable defaults to `$HOME/.local/bin`, records the currently PATH-resolved Stock Pi path, resolved executable, SHA-256, size, and reported version, then atomically publishes `pi` last. Both command names target the same immutable, receipt-owned Dispatcher. Stage 0 independently implements `managed recover --previous` and `managed disable`; disable removes only `pi` and retains the compatibility entrypoint, state, and releases.
+Enable defaults to `$HOME/.local/bin` on macOS/Linux and `%USERPROFILE%\.local\bin` on Windows, records the currently PATH-resolved Stock Pi path, resolved executable, SHA-256, size, and reported version, then atomically publishes `pi` last. Windows publishes receipt-owned `.cmd` files and refuses colliding extensionless, `.com`, `.exe`, `.bat`, `.cmd`, and `.ps1` commands; the PowerShell bootstrap also refuses current-session aliases, functions, and cmdlets. Both command names target the same immutable, receipt-owned Dispatcher. Stage 0 independently implements `managed recover --previous` and `managed disable`; disable removes only `pi` and retains the compatibility entrypoint, state, and releases.
 
 ## Local layout
 
-Under the platform-native `pi-wait-for-user` data root:
+Under the platform-native `pi-wait-for-user` data root (`%LOCALAPPDATA%\pi-wait-for-user` on Windows):
 
 ```text
 state/activation.json              atomic active + previous pair
@@ -126,6 +126,8 @@ One exclusive lifecycle lock records the active operation and serializes mutatio
 
 Staging and deletion use uniquely named `*.tmp-<uuid>` and `*.tombstone-<uuid>` directories with exact owner receipts. Cleanup ignores malformed, foreign, and symlink-substituted paths. Published payload deletion first validates both embedded and central receipts, then moves the payload through a receipt-scoped tombstone.
 
+On Windows, lifecycle ownership uses exclusive state-file publication plus process start identities from the native process table. Pair leases remain live for the child process lifetime. Versioned directories let updates proceed while older Pi executables run; cleanup first respects leases, then treats native executable-lock errors as receipt-scoped deferred cleanup. It never force-deletes or asks Windows to schedule deletion of an unreceipted path.
+
 Only fixture private keys are used by automated tests. This runtime stores pinned public keys and does not create, expose, or accept production signing secrets.
 
 ## Ticket traceability
@@ -134,4 +136,4 @@ Issue #61 acceptance behavior is exercised in `test/managed-runtime.test.mjs`: p
 
 Issue #62 behavior is exercised at the same filesystem/CLI seam: previous and explicit-local rollback, exact Update Holds and unhold, rollback and hold-clear interruption boundaries, active/previous/pinned/live-leased retention, convergent prune, corrupt-active fail-closed launch and explicit recovery, receipt-safe uninstall, foreign entrypoint/state/lease refusal, shared-data-root overlap refusal, current-process lease deferral, retry across every payload/tombstone/receipt uninstall boundary, absent-install no-op, final Stock Pi resolution, and preservation hashes for settings, credentials, packages, sessions, and Agent Threads. Post-switch adoption, retention, hold, status, or rollback cleanup is reported explicitly as deferred while the complete new Activation remains selected.
 
-Issue #63 release-level evidence, including the synthetic unchanged-upstream patch transition and the supported macOS/Linux platform smoke matrix, is indexed in [`managed-release-acceptance.md`](managed-release-acceptance.md). That traceability record also indexes #80's Intel macOS removal across the public inventory, bootstrap, smoke, and receipt seams.
+Issue #63 release-level evidence, including the synthetic unchanged-upstream patch transition and the supported macOS/Linux platform smoke matrix, is indexed in [`managed-release-acceptance.md`](managed-release-acceptance.md). Issue #64 Windows evidence is indexed there at the native filesystem/CLI, packaging, receipt, and workflow seams. That traceability record also indexes #80's Intel macOS removal across the public inventory, bootstrap, smoke, and receipt seams.

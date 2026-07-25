@@ -24,7 +24,7 @@ import {
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readPinnedRootKeys } from "./managed-command.mjs";
@@ -42,7 +42,7 @@ const idPattern = /^[a-z0-9][a-z0-9.-]+$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const semverPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-const supportedPlatforms = new Set(["darwin-arm64", "linux-arm64", "linux-x64"]);
+const supportedPlatforms = new Set(["darwin-arm64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"]);
 const rootKeyProvenanceType = Object.freeze({ callerSelected: "caller-selected", installerPinned: "installer-pinned" });
 const managedDiagnosticLimit = 10;
 const activeLifecycleCapabilities = new WeakSet();
@@ -110,6 +110,18 @@ function ensurePlatform(platform) {
   if (!supportedPlatforms.has(platform)) fail(`Unsupported managed platform: ${platform}`);
 }
 
+function isWindowsPlatform(platform = process.platform) {
+  return platform === "win32" || String(platform).startsWith("windows-");
+}
+
+function managerExecutablePath(root, platform) {
+  return join(root, "package", isWindowsPlatform(platform) ? "manager.mjs" : "manager");
+}
+
+function downstreamExecutablePath(root, platform) {
+  return join(root, "pi-wait-for-user", isWindowsPlatform(platform) ? "pi-core.exe" : "pi-core");
+}
+
 function ensureIdentifier(value, label) {
   return expectString(value, label, idPattern);
 }
@@ -174,12 +186,19 @@ function atomicWrite(path, value) {
 export function defaultManagedDataRoot(environment = process.env, platform = process.platform) {
   if (platform === "darwin") return `${environment.HOME}/Library/Application Support/pi-wait-for-user`;
   if (platform === "linux") return `${environment.XDG_DATA_HOME || `${environment.HOME}/.local/share`}/pi-wait-for-user`;
-  fail("Managed Installation supports macOS and Linux");
+  if (platform === "win32") {
+    const localAppData = environment.LOCALAPPDATA
+      || (environment.USERPROFILE && join(environment.USERPROFILE, "AppData", "Local"));
+    if (!localAppData) fail("LOCALAPPDATA or USERPROFILE is required to select the managed data root");
+    return join(localAppData, "pi-wait-for-user");
+  }
+  fail("Managed Installation supports macOS, Linux, and Windows");
 }
 
-export function defaultManagedBinDirectory(environment = process.env) {
-  if (!environment.HOME) fail("HOME is required to select the managed bin directory");
-  return join(environment.HOME, ".local", "bin");
+export function defaultManagedBinDirectory(environment = process.env, platform = process.platform) {
+  const home = platform === "win32" ? environment.USERPROFILE || environment.HOME : environment.HOME;
+  if (!home) fail(`${platform === "win32" ? "USERPROFILE or HOME" : "HOME"} is required to select the managed bin directory`);
+  return join(home, ".local", "bin");
 }
 
 function layout(dataRoot) {
@@ -302,6 +321,7 @@ function assertOutsideSharedPiData(dataRoot, environment = process.env) {
   const root = physicalPath(dataRoot);
   const sharedRoots = [
     environment.HOME && join(environment.HOME, ".pi", "agent"),
+    environment.USERPROFILE && join(environment.USERPROFILE, ".pi", "agent"),
     environment.PI_CODING_AGENT_DIR,
   ].filter(Boolean).map((path) => physicalPath(path));
   if (sharedRoots.some((shared) => root === shared || root.startsWith(`${shared}${sep}`) || shared.startsWith(`${root}${sep}`))) {
@@ -333,6 +353,15 @@ export function managedProcessStartIdentity(pid) {
     const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" });
     const startedAt = result.status === 0 ? result.stdout.trim() : "";
     return startedAt ? `darwin-ps-start:${startedAt}` : null;
+  }
+  if (process.platform === "win32") {
+    const shell = process.env.SystemRoot ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe") : "powershell.exe";
+    const result = spawnSync(shell, [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+      `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
+    ], { encoding: "utf8", windowsHide: true });
+    const startedAt = result.status === 0 ? result.stdout.trim() : "";
+    return /^\d+$/.test(startedAt) ? `windows-process-start:${startedAt}` : null;
   }
   return null;
 }
@@ -527,8 +556,15 @@ function validateArtifact(path, expected, label) {
   validateArtifactBytes(path, expected, label);
 }
 
+function archiveArguments(archivePath, operation) {
+  const gzip = archivePath.endsWith(".tgz") || archivePath.endsWith(".tar.gz");
+  if (operation === "list") return [gzip ? "-tzf" : "-tf", archivePath];
+  if (operation === "verbose") return [gzip ? "-tvzf" : "-tvf", archivePath];
+  return [gzip ? "-xzf" : "-xf", archivePath];
+}
+
 function validateArchiveEntries(archivePath) {
-  const names = spawnSync("tar", ["-tzf", archivePath], { encoding: "utf8" });
+  const names = spawnSync("tar", archiveArguments(archivePath, "list"), { encoding: "utf8" });
   if (names.error || names.status !== 0) fail(`Cannot inspect archive ${basename(archivePath)}: ${(names.stderr || names.stdout).trim()}`);
   for (const raw of names.stdout.split("\n")) {
     if (!raw) continue;
@@ -538,7 +574,7 @@ function validateArchiveEntries(archivePath) {
       fail(`Archive contains unsafe path: ${raw}`);
     }
   }
-  const verbose = spawnSync("tar", ["-tvzf", archivePath], { encoding: "utf8" });
+  const verbose = spawnSync("tar", archiveArguments(archivePath, "verbose"), { encoding: "utf8" });
   if (verbose.error || verbose.status !== 0) fail(`Cannot inspect archive ${basename(archivePath)}`);
   for (const line of verbose.stdout.split("\n")) {
     if (line && line[0] !== "-" && line[0] !== "d") fail(`Archive contains unsupported file kind: ${line}`);
@@ -562,7 +598,10 @@ function createStage(paths, kind) {
 
 function extractArchive(archivePath, destination) {
   validateArchiveEntries(archivePath);
-  const result = spawnSync("tar", ["-xzf", archivePath, "-C", destination, "--no-same-owner"], { encoding: "utf8" });
+  const result = spawnSync("tar", [
+    ...archiveArguments(archivePath, "extract"), "-C", destination,
+    ...(process.platform === "win32" ? [] : ["--no-same-owner"]),
+  ], { encoding: "utf8", windowsHide: true });
   if (result.error || result.status !== 0) fail(`Cannot extract ${basename(archivePath)}: ${(result.stderr || result.stdout).trim()}`);
   createPayloadInventory(destination); // Reject symlinks and unsupported file kinds after extraction too.
 }
@@ -603,7 +642,10 @@ function immutableTree(path) {
 }
 
 function runChecked(command, args, label, expected) {
-  const result = spawnSync(command, args, { encoding: "utf8", env: process.env });
+  const module = extname(command).toLowerCase() === ".mjs";
+  const result = spawnSync(module ? process.execPath : command, module ? [command, ...args] : args, {
+    encoding: "utf8", env: process.env, windowsHide: true,
+  });
   if (result.error || result.status !== 0) fail(`${label} failed: ${(result.stderr || result.stdout).trim()}`);
   const output = result.stdout.trim();
   if (expected !== undefined && output !== expected) fail(`${label} mismatch: expected ${expected}, found ${output}`);
@@ -631,14 +673,15 @@ function payloadWithoutManagerFiles(root) {
   return createPayloadInventory(root).filter((entry) => entry.path !== ".owner.json" && !entry.path.startsWith(".managed/"));
 }
 
-function comparePayload(actual, expected) {
+function comparePayload(actual, expected, { platform = process.platform } = {}) {
   const found = [...actual].sort((a, b) => a.path.localeCompare(b.path));
   const declared = [...expected].sort((a, b) => a.path.localeCompare(b.path));
   if (canonicalJson(found.map(({ path }) => path)) !== canonicalJson(declared.map(({ path }) => path))) fail("Extracted payload inventory mismatch");
   for (let index = 0; index < declared.length; index += 1) {
     if (found[index].size !== declared[index].size) fail(`Payload size mismatch: ${declared[index].path}`);
     if (found[index].sha256 !== declared[index].sha256) fail(`Payload digest mismatch: ${declared[index].path}`);
-    if (found[index].mode !== declared[index].mode) fail(`Payload mode mismatch: ${declared[index].path}`);
+    // Windows has no portable POSIX mode projection; ZIP extraction maps modes through local ACL defaults.
+    if (!isWindowsPlatform(platform) && found[index].mode !== declared[index].mode) fail(`Payload mode mismatch: ${declared[index].path}`);
   }
 }
 
@@ -661,7 +704,7 @@ function validateDispatcherReceipt(value, destination) {
 
 function validateDispatcherPayload(destination, receipt) {
   const installedPayload = createPayloadInventory(destination).filter((entry) => !entry.path.startsWith(".managed/"));
-  comparePayload(installedPayload, receipt.payload);
+  comparePayload(installedPayload, receipt.payload, { platform: receipt.platform });
   return installedPayload;
 }
 
@@ -700,14 +743,14 @@ function publishStableDispatcher(paths, selected) {
     if (pathExists(receiptPath)) {
       const central = readJson(receiptPath, "Managed Dispatcher receipt");
       if (canonicalJson(central) !== canonicalJson(receipt)) fail("Managed Dispatcher receipt copies mismatch");
-      comparePayload(installedPayload, receipt.payload);
+      comparePayload(installedPayload, receipt.payload, { platform: receipt.platform });
     } else {
       if (receipt.managerReleaseId !== selected.pair.managerReleaseId || receipt.platform !== selected.pair.platform
         || canonicalJson(receipt.sourceArtifact) !== canonicalJson(selected.managerReceipt.sourceArtifact)) {
         fail("Unreceipted Managed Dispatcher does not match the verified Manager Release");
       }
-      comparePayload(receipt.payload, expectedPayload);
-      comparePayload(installedPayload, expectedPayload);
+      comparePayload(receipt.payload, expectedPayload, { platform: receipt.platform });
+      comparePayload(installedPayload, expectedPayload, { platform: receipt.platform });
       atomicWrite(receiptPath, receipt);
     }
     return join(destination, "managed-dispatcher.mjs");
@@ -723,7 +766,7 @@ function publishStableDispatcher(paths, selected) {
     }
     writeFileSync(join(stage.payload, "managed-root-keys.json"), pinnedRootConfiguration, { flag: "wx", mode: 0o444 });
     const payload = createPayloadInventory(stage.payload);
-    comparePayload(payload, expectedPayload);
+    comparePayload(payload, expectedPayload, { platform: selected.pair.platform });
     const receipt = {
       schemaVersion: 1,
       type: "managed-dispatcher",
@@ -747,23 +790,23 @@ function publishStableDispatcher(paths, selected) {
   }
 }
 
-function legacyPayloadInventory(legacyPath, expected) {
+function legacyPayloadInventory(legacyPath, expected, platform) {
   if (!pathExists(legacyPath) || lstatSync(legacyPath).isSymbolicLink() || !lstatSync(legacyPath).isDirectory()) return null;
   if (!expected.every((entry) => entry.path.startsWith("pi-wait-for-user/"))) return null;
   let actual;
   try { actual = createPayloadInventory(legacyPath); } catch { return null; }
   const declared = expected.map((entry) => ({ ...entry, path: entry.path.slice("pi-wait-for-user/".length) }));
-  try { comparePayload(actual, declared); } catch { return null; }
+  try { comparePayload(actual, declared, { platform }); } catch { return null; }
   return actual;
 }
 
-function adoptVerifiedLegacyPayload(stage, legacyPath, expected) {
-  if (!legacyPayloadInventory(legacyPath, expected)) return false;
+function adoptVerifiedLegacyPayload(stage, legacyPath, expected, platform) {
+  if (!legacyPayloadInventory(legacyPath, expected, platform)) return false;
   const packagedPayload = join(stage.payload, "pi-wait-for-user");
   makeWritable(packagedPayload);
   rmSync(packagedPayload, { recursive: true, force: true });
   cpSync(legacyPath, packagedPayload, { recursive: true, dereference: false, preserveTimestamps: true });
-  comparePayload(payloadWithoutManagerFiles(stage.payload), expected);
+  comparePayload(payloadWithoutManagerFiles(stage.payload), expected, { platform });
   return true;
 }
 
@@ -869,7 +912,7 @@ function publishStage(stage, destination, receipt, paths, checkpoint, boundary) 
       || canonicalJson(existingReceipt.payload) !== canonicalJson(receipt.payload)) {
       fail(`Immutable ${receipt.type} release identity already exists with different content`);
     }
-    comparePayload(payloadWithoutManagerFiles(destination), existingReceipt.payload);
+    comparePayload(payloadWithoutManagerFiles(destination), existingReceipt.payload, { platform: receipt.platform });
     publishedReceipt = existingReceipt;
     removeStage(stage.stage);
   } else {
@@ -996,8 +1039,8 @@ export function validateActivePair(dataRoot, pair = readActivation(dataRoot).act
   const managerReceipt = readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
   const releaseReceipt = readReceiptCopies(paths, "downstream", pair.downstreamReleaseId, releasePath, pair);
   if (releaseReceipt.manifestSha256 !== pair.manifestSha256) fail("Activation manifest identity mismatch");
-  const managerExecutable = ensureNoSymlinkPath(managerPath, join(managerPath, "package", "manager"), "Manager Release executable path");
-  const pi = ensureNoSymlinkPath(releasePath, join(releasePath, "pi-wait-for-user", "pi-core"), "Pi executable path");
+  const managerExecutable = ensureNoSymlinkPath(managerPath, managerExecutablePath(managerPath, pair.platform), "Manager Release executable path");
+  const pi = ensureNoSymlinkPath(releasePath, downstreamExecutablePath(releasePath, pair.platform), "Pi executable path");
   const question = ensureNoSymlinkPath(
     releasePath,
     join(releasePath, "pi-wait-for-user", "question-tool", "extensions", "question-tool.ts"),
@@ -1018,7 +1061,7 @@ export function validateActivePair(dataRoot, pair = readActivation(dataRoot).act
   ]) {
     const stat = lstatSync(path);
     if (!stat.isFile() || stat.isSymbolicLink()) fail(`${label} is missing or foreign`);
-    if (executable && (stat.mode & 0o111) === 0) fail(`${label} is not executable`);
+    if (executable && !isWindowsPlatform(pair.platform) && (stat.mode & 0o111) === 0) fail(`${label} is not executable`);
   }
   const projectedRelease = readJson(releaseMetadata, "Downstream Release metadata");
   if (projectedRelease.schemaVersion !== 1 || projectedRelease.releaseId !== pair.downstreamReleaseId
@@ -1027,13 +1070,13 @@ export function validateActivePair(dataRoot, pair = readActivation(dataRoot).act
   return { paths, config, pair, managerPath, releasePath, managerExecutable, pi, managerReceipt, releaseReceipt };
 }
 
-function verifyPayloadAgainstArtifact(installedPath, artifactPath, label) {
+function verifyPayloadAgainstArtifact(installedPath, artifactPath, label, platform) {
   const temporary = mkdtempSync(join(tmpdir(), "pi-managed-artifact-verification-"));
   const payload = join(temporary, "payload");
   mkdirSync(payload, { mode: 0o700 });
   try {
     extractArchive(artifactPath, payload);
-    comparePayload(payloadWithoutManagerFiles(installedPath), payloadWithoutManagerFiles(payload));
+    comparePayload(payloadWithoutManagerFiles(installedPath), payloadWithoutManagerFiles(payload), { platform });
   } catch (error) {
     fail(`${label} payload verification failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
@@ -1070,9 +1113,9 @@ function verifyPair(dataRoot, pair, { provenance = false, gh = "gh" } = {}) {
   );
   validateArtifactBytes(cachedManagerArtifact, managerArtifact, "Cached Manager Release");
   validateArtifactBytes(cachedDownstreamArtifact, downstream.artifact, "Cached Downstream Release");
-  verifyPayloadAgainstArtifact(selected.managerPath, cachedManagerArtifact, "Manager Release");
-  comparePayload(payloadWithoutManagerFiles(selected.managerPath), selected.managerReceipt.payload);
-  comparePayload(payloadWithoutManagerFiles(selected.releasePath), downstream.payload);
+  verifyPayloadAgainstArtifact(selected.managerPath, cachedManagerArtifact, "Manager Release", pair.platform);
+  comparePayload(payloadWithoutManagerFiles(selected.managerPath), selected.managerReceipt.payload, { platform: pair.platform });
+  comparePayload(payloadWithoutManagerFiles(selected.releasePath), downstream.payload, { platform: pair.platform });
   runChecked(selected.managerExecutable, ["--manager-version"], "Manager reported version", pair.managerReleaseId);
   runChecked(selected.pi, ["--version"], "Pi reported version", manifest.upstream.packageVersion);
   runChecked(selected.pi, ["--help"], "Pi smoke check");
@@ -1221,8 +1264,8 @@ function installAndActivateWithProvenance(options, provenanceType) {
 
       managerStage = createStage(paths, "manager");
       extractArchive(cachedManagerArchive, managerStage.payload);
-      const managerExecutable = join(managerStage.payload, "package", "manager");
-      if (!existsSync(managerExecutable) || (lstatSync(managerExecutable).mode & 0o111) === 0) fail("Manager Release executable is missing");
+      const managerExecutable = managerExecutablePath(managerStage.payload, platform);
+      if (!existsSync(managerExecutable) || (!isWindowsPlatform(platform) && (lstatSync(managerExecutable).mode & 0o111) === 0)) fail("Manager Release executable is missing");
       const managerPackage = readJson(join(managerStage.payload, "package", "package.json"), "Manager Release package manifest");
       if (managerPackage.piWaitForUser?.managerReleaseId !== manifest.manager.releaseId
         || !Array.isArray(managerPackage.piWaitForUser.compatibleReleaseManifestVersions)
@@ -1234,17 +1277,17 @@ function installAndActivateWithProvenance(options, provenanceType) {
 
       releaseStage = createStage(paths, "downstream");
       extractArchive(cachedReleaseArchive, releaseStage.payload);
-      comparePayload(payloadWithoutManagerFiles(releaseStage.payload), downstream.payload);
+      comparePayload(payloadWithoutManagerFiles(releaseStage.payload), downstream.payload, { platform });
       validateQuestionTool(releaseStage.payload, manifest);
-      const core = join(releaseStage.payload, "pi-wait-for-user", "pi-core");
+      const core = downstreamExecutablePath(releaseStage.payload, platform);
       runChecked(core, ["--version"], "Pi reported version", manifest.upstream.packageVersion);
       runChecked(core, ["--help"], "Pi smoke check");
       const conformance = runChecked(core, ["conformance"], "Pi conformance");
       if (!/conformance passed/i.test(conformance)) fail("Pi conformance did not report success");
       const legacyPaths = discoverLegacyPaths(paths, manifest.releaseId, legacyDirectories);
-      const verifiedLegacyPath = legacyPaths.find((path) => legacyPayloadInventory(path, downstream.payload));
+      const verifiedLegacyPath = legacyPaths.find((path) => legacyPayloadInventory(path, downstream.payload, platform));
       const legacyAdopted = Boolean(verifiedLegacyPath)
-        && adoptVerifiedLegacyPayload(releaseStage, verifiedLegacyPath, downstream.payload);
+        && adoptVerifiedLegacyPayload(releaseStage, verifiedLegacyPath, downstream.payload, platform);
       const legacyPath = legacyAdopted ? verifiedLegacyPath : legacyPaths[0];
       checkpoint?.("downstream-staged");
 
@@ -1556,7 +1599,7 @@ function installedPairForRelease(paths, releaseId, { allowMissingPairs = [] } = 
   validatePairShape(pair, "installed local pair");
   if (pathExists(releasePath)) {
     const verifiedReceipt = readReceiptCopies(paths, "downstream", releaseId, releasePath, pair);
-    comparePayload(payloadWithoutManagerFiles(releasePath), verifiedReceipt.payload);
+    comparePayload(payloadWithoutManagerFiles(releasePath), verifiedReceipt.payload, { platform: pair.platform });
   } else if (allowMissingPairs.some((pending) => samePair(pending, pair))) {
     validateReceipt(receipt, "downstream", releasePath, pair);
   } else return null;
@@ -1926,8 +1969,10 @@ export async function dispatchActivePair(dataRoot, args, { environment = process
     lease.release();
     throw error;
   }
-  const child = spawn(selected.managerExecutable, args, {
+  const managerIsModule = extname(selected.managerExecutable).toLowerCase() === ".mjs";
+  const child = spawn(managerIsModule ? process.execPath : selected.managerExecutable, managerIsModule ? [selected.managerExecutable, ...args] : args, {
     stdio: "inherit",
+    windowsHide: true,
     env: {
       ...environment,
       PI_MANAGED_DATA_ROOT: selected.paths.root,
@@ -1988,6 +2033,27 @@ function safeTemporaryOwner(path) {
   }
 }
 
+function compareRemainingPayload(actual, expected, platform) {
+  const declared = new Map(expected.map((entry) => [entry.path, entry]));
+  for (const found of actual) {
+    const entry = declared.get(found.path);
+    if (!entry) fail(`Tombstone contains foreign payload: ${found.path}`);
+    if (found.size !== entry.size) fail(`Payload size mismatch: ${found.path}`);
+    if (found.sha256 !== entry.sha256) fail(`Payload digest mismatch: ${found.path}`);
+    if (!isWindowsPlatform(platform) && found.mode !== entry.mode) fail(`Payload mode mismatch: ${found.path}`);
+  }
+}
+
+function removeOwnedTombstone(path) {
+  const payload = join(path, "payload");
+  if (pathExists(payload)) {
+    makeWritable(payload);
+    rmSync(payload, { recursive: true, force: true });
+  }
+  unlinkSync(join(path, ".owner.json"));
+  rmSync(path, { recursive: true });
+}
+
 function validateTombstoneContents(paths, path, owner, pairs, dispatcher) {
   const names = readdirSync(path).sort();
   if (![[".owner.json"], [".owner.json", "payload"]].some((expected) => canonicalJson(expected) === canonicalJson(names))) {
@@ -2005,10 +2071,15 @@ function validateTombstoneContents(paths, path, owner, pairs, dispatcher) {
     if (!dispatcher || owner.scope.identity !== metadataDigest(readJson(dispatcher.centralPath, "Managed Dispatcher receipt"))) {
       fail(`Tombstone identity mismatch: ${basename(path)}`);
     }
-    const embedded = validateDispatcherReceipt(readJson(join(payload, ".managed", "receipt.json"), "Managed Dispatcher receipt"), owner.scope.sourcePath);
+    const embeddedPath = join(payload, ".managed", "receipt.json");
     const central = validateDispatcherReceipt(readJson(dispatcher.centralPath, "Managed Dispatcher receipt"), owner.scope.sourcePath);
-    if (canonicalJson(embedded) !== canonicalJson(central)) fail("Managed Dispatcher receipt copies mismatch");
-    validateDispatcherPayload(payload, central);
+    if (pathExists(embeddedPath)) {
+      const embedded = validateDispatcherReceipt(readJson(embeddedPath, "Managed Dispatcher receipt"), owner.scope.sourcePath);
+      if (canonicalJson(embedded) !== canonicalJson(central)) fail("Managed Dispatcher receipt copies mismatch");
+    } else if (!isWindowsPlatform(central.platform)) fail("Managed Dispatcher tombstone receipt is missing");
+    const remaining = createPayloadInventory(payload).filter((entry) => !entry.path.startsWith(".managed/"));
+    if (isWindowsPlatform(central.platform)) compareRemainingPayload(remaining, central.payload, central.platform);
+    else validateDispatcherPayload(payload, central);
     return;
   }
   const pair = pairs.find((candidate) => owner.scope.identity === metadataDigest({ kind: owner.scope.kind, pair: candidate }));
@@ -2016,9 +2087,31 @@ function validateTombstoneContents(paths, path, owner, pairs, dispatcher) {
   const type = owner.scope.kind === "manager" ? "manager" : "downstream";
   const id = type === "manager" ? pair.managerReleaseId : pair.downstreamReleaseId;
   const central = validateReceipt(readJson(receiptPath(paths, type, id), `${type} receipt`), type, owner.scope.sourcePath, pair);
-  const embedded = validateReceipt(readJson(join(payload, ".managed", "receipt.json"), `${type} receipt`), type, owner.scope.sourcePath, pair);
-  if (canonicalJson(central) !== canonicalJson(embedded)) fail(`${type} receipt copies mismatch`);
-  comparePayload(payloadWithoutManagerFiles(payload), central.payload);
+  const embeddedPath = join(payload, ".managed", "receipt.json");
+  if (pathExists(embeddedPath)) {
+    const embedded = validateReceipt(readJson(embeddedPath, `${type} receipt`), type, owner.scope.sourcePath, pair);
+    if (canonicalJson(central) !== canonicalJson(embedded)) fail(`${type} receipt copies mismatch`);
+  } else if (!isWindowsPlatform(pair.platform)) fail(`${type} tombstone receipt is missing`);
+  const remaining = payloadWithoutManagerFiles(payload);
+  if (isWindowsPlatform(pair.platform)) compareRemainingPayload(remaining, central.payload, pair.platform);
+  else comparePayload(remaining, central.payload, { platform: pair.platform });
+}
+
+function pairTombstone(paths, pair, kind) {
+  const identity = metadataDigest({ kind, pair });
+  const matches = [];
+  for (const name of readdirSync(paths.temporary)) {
+    const path = join(paths.temporary, name);
+    if (!safeTemporaryOwner(path)) continue;
+    const owner = readJson(join(path, ".owner.json"), "tombstone receipt");
+    if (owner.type === "managed-tombstone" && owner.scope.kind === kind && owner.scope.identity === identity) {
+      matches.push({ path, owner });
+    }
+  }
+  if (matches.length > 1) fail(`Multiple receipt-owned ${kind} tombstones exist for one pair`);
+  if (matches.length === 0) return null;
+  validateTombstoneContents(paths, matches[0].path, matches[0].owner, [pair], null);
+  return matches[0].path;
 }
 
 function readPendingPairs(paths) {
@@ -2043,8 +2136,10 @@ function cleanupTemporaryStateLocked(paths) {
     const path = ensureInside(paths.temporary, join(paths.temporary, name), "Temporary cleanup path");
     if (!safeTemporaryOwner(path)) continue;
     const owner = readJson(join(path, ".owner.json"), "temporary receipt");
-    if (owner.type === "managed-tombstone") validateTombstoneContents(paths, path, owner, readPendingPairs(paths), null);
-    removeStage(path);
+    if (owner.type === "managed-tombstone") {
+      validateTombstoneContents(paths, path, owner, readPendingPairs(paths), null);
+      removeOwnedTombstone(path);
+    } else removeStage(path);
     removed += 1;
   }
   return removed;
@@ -2078,9 +2173,16 @@ function removeThroughTombstone(paths, source, kind, identity, checkpoint, check
   }), { flag: "wx", mode: 0o600 });
   checkpoint?.(`${checkpointPrefix}-tombstone-created`);
   chmodSync(source, 0o700);
-  renameSync(source, join(tombstone, "payload"));
+  try {
+    renameSync(source, join(tombstone, "payload"));
+  } catch (error) {
+    // A Windows executable lock can reject the rename. Remove only the empty receipt-owned tombstone;
+    // the source remains untouched and its pair is recorded for a later cleanup pass by the caller.
+    if (pathExists(source) && !pathExists(join(tombstone, "payload"))) removeStage(tombstone);
+    throw error;
+  }
   checkpoint?.(`${checkpointPrefix}-tombstone-renamed`);
-  removeStage(tombstone);
+  removeOwnedTombstone(tombstone);
   checkpoint?.(`${checkpointPrefix}-tombstone-removed`);
 }
 
@@ -2099,7 +2201,22 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
     return "deferred";
   }
   if (mode === "retention") writePendingPairs(paths, [...readPendingPairs(paths), pair]);
+  const deferWindowsExecutableLock = (error) => {
+    if (!isWindowsPlatform(pair.platform) || !["EACCES", "EBUSY", "ENOTEMPTY", "EPERM"].includes(error?.code)) return false;
+    writePendingPairs(paths, [...readPendingPairs(paths), pair]);
+    if (pathExists(cleanupClaim)) unlinkSync(cleanupClaim);
+    return true;
+  };
   const releasePath = join(paths.releases, pair.downstreamReleaseId);
+  const deferredReleaseTombstone = pairTombstone(paths, pair, "downstream");
+  if (deferredReleaseTombstone) {
+    try {
+      removeOwnedTombstone(deferredReleaseTombstone);
+    } catch (error) {
+      if (deferWindowsExecutableLock(error)) return "deferred";
+      throw error;
+    }
+  }
   const centralReleaseReceipt = ensureNoSymlinkPath(
     paths.receipts,
     receiptPath(paths, "downstream", pair.downstreamReleaseId),
@@ -2107,14 +2224,19 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
   );
   if (existsSync(releasePath)) {
     readReceiptCopies(paths, "downstream", pair.downstreamReleaseId, releasePath, pair);
-    removeThroughTombstone(
-      paths,
-      releasePath,
-      "downstream",
-      metadataDigest({ kind: "downstream", pair }),
-      checkpoint,
-      `${mode}-downstream`,
-    );
+    try {
+      removeThroughTombstone(
+        paths,
+        releasePath,
+        "downstream",
+        metadataDigest({ kind: "downstream", pair }),
+        checkpoint,
+        `${mode}-downstream`,
+      );
+    } catch (error) {
+      if (deferWindowsExecutableLock(error)) return "deferred";
+      throw error;
+    }
     checkpoint?.("uninstall-downstream-payload-removed");
     unlinkSync(centralReleaseReceipt);
     checkpoint?.("uninstall-downstream-receipt-removed");
@@ -2139,16 +2261,30 @@ function removeInstalledPairLocked(dataRoot, pair, { mode = "retention", checkpo
     "Manager cleanup receipt path",
   );
   if (!retainedManager && !installedManagerReference) {
+    const deferredManagerTombstone = pairTombstone(paths, pair, "manager");
+    if (deferredManagerTombstone) {
+      try {
+        removeOwnedTombstone(deferredManagerTombstone);
+      } catch (error) {
+        if (deferWindowsExecutableLock(error)) return "deferred";
+        throw error;
+      }
+    }
     if (existsSync(managerPath)) {
       readReceiptCopies(paths, "manager", pair.managerReleaseId, managerPath, pair);
-      removeThroughTombstone(
-        paths,
-        managerPath,
-        "manager",
-        metadataDigest({ kind: "manager", pair }),
-        checkpoint,
-        `${mode}-manager`,
-      );
+      try {
+        removeThroughTombstone(
+          paths,
+          managerPath,
+          "manager",
+          metadataDigest({ kind: "manager", pair }),
+          checkpoint,
+          `${mode}-manager`,
+        );
+      } catch (error) {
+        if (deferWindowsExecutableLock(error)) return "deferred";
+        throw error;
+      }
       checkpoint?.("uninstall-manager-payload-removed");
       unlinkSync(centralManagerReceipt);
       checkpoint?.("uninstall-manager-receipt-removed");
@@ -2266,8 +2402,9 @@ export function readManagedOwnership(dataRoot) {
   validateEntrypoint(ownership.entrypoints.compatibility, "Compatibility Entrypoint");
   const binDirectory = resolve(ownership.binDirectory);
   const dispatcherPath = join(paths.root, "dispatcher", "managed-dispatcher.mjs");
-  if (resolve(ownership.entrypoints.pi.path) !== join(binDirectory, "pi")
-    || resolve(ownership.entrypoints.compatibility.path) !== join(binDirectory, "pi-wait-for-user")
+  const windows = isWindowsPlatform(ownership.createdFrom.platform);
+  if (resolve(ownership.entrypoints.pi.path) !== join(binDirectory, windows ? "pi.cmd" : "pi")
+    || resolve(ownership.entrypoints.compatibility.path) !== join(binDirectory, windows ? "pi-wait-for-user.cmd" : "pi-wait-for-user")
     || resolve(ownership.entrypoints.pi.target) !== dispatcherPath
     || resolve(ownership.entrypoints.compatibility.target) !== dispatcherPath
     || resolve(ownership.dispatcher.path) !== dispatcherPath) {
@@ -2282,20 +2419,45 @@ function shellQuote(value) {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function commandPath(name, environment) {
-  for (const directory of (environment.PATH || "").split(":")) {
-    const candidate = resolve(directory || process.cwd(), name);
-    if (!pathExists(candidate)) continue;
-    let stat;
-    try { stat = lstatSync(realpathSync(candidate)); } catch { continue; }
-    if (stat.isFile() && (stat.mode & 0o111) !== 0) return candidate;
+function commandPath(name, environment, platform = process.platform) {
+  const windows = isWindowsPlatform(platform);
+  const extensions = windows
+    ? [...new Set((environment.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").map((value) => value.toLowerCase()).concat([".ps1", ""]))]
+    : [""];
+  for (const directory of (environment.PATH || "").split(windows ? ";" : delimiter)) {
+    for (const extension of extensions) {
+      const candidate = resolve(directory || process.cwd(), `${name}${extension}`);
+      if (!pathExists(candidate)) continue;
+      let stat;
+      try { stat = lstatSync(realpathSync(candidate)); } catch { continue; }
+      if (stat.isFile() && (windows || (stat.mode & 0o111) !== 0)) return candidate;
+    }
   }
   return null;
+}
+
+function windowsEntrypointContents(target) {
+  return `@echo off\r\nnode "${resolve(target)}" %*\r\n`;
+}
+
+function windowsEntrypointTarget(path) {
+  try {
+    const contents = readFileSync(path, "utf8");
+    const match = contents.match(/^@echo off\r?\nnode "([^"]+managed-dispatcher\.mjs)" %\*\r?\n$/i);
+    return match ? resolve(match[1]) : null;
+  } catch {
+    return null;
+  }
 }
 
 function isManagedDispatcherExecutable(path) {
   let executablePath;
   try { executablePath = realpathSync(path); } catch { return false; }
+  if (extname(executablePath).toLowerCase() === ".cmd") {
+    const target = windowsEntrypointTarget(executablePath);
+    if (!target) return false;
+    executablePath = target;
+  }
   const dispatcherDirectory = dirname(executablePath);
   if (basename(executablePath) !== "managed-dispatcher.mjs" || basename(dispatcherDirectory) !== "dispatcher") return false;
   const receiptPath = join(dispatcherDirectory, ".managed", "receipt.json");
@@ -2308,10 +2470,34 @@ function isManagedDispatcherExecutable(path) {
   }
 }
 
+function spawnCommand(path, args, options = {}) {
+  const extension = extname(path).toLowerCase();
+  if (process.platform === "win32" && [".cmd", ".bat", ".ps1"].includes(extension)) {
+    const shell = process.env.SystemRoot
+      ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+      : "powershell.exe";
+    const environment = {
+      ...(options.env || process.env),
+      PI_MANAGED_STOCK_COMMAND_PATH: path,
+      PI_MANAGED_STOCK_COMMAND_ARGS: JSON.stringify(args),
+    };
+    const command = [
+      "$stockPath = $env:PI_MANAGED_STOCK_COMMAND_PATH",
+      "$stockArgs = @(ConvertFrom-Json -InputObject $env:PI_MANAGED_STOCK_COMMAND_ARGS)",
+      "& $stockPath @stockArgs",
+      "if ($null -eq $LASTEXITCODE) { exit 0 } else { exit $LASTEXITCODE }",
+    ].join("; ");
+    return spawnSync(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command], {
+      ...options, env: environment, windowsHide: true,
+    });
+  }
+  return spawnSync(path, args, options);
+}
+
 function executableIdentity(path, environment, expected) {
   const executablePath = realpathSync(path);
   const stat = lstatSync(executablePath);
-  if (!stat.isFile() || (stat.mode & 0o111) === 0) fail(`Stock Pi is not executable: ${path}`);
+  if (!stat.isFile() || (process.platform !== "win32" && (stat.mode & 0o111) === 0)) fail(`Stock Pi is not executable: ${path}`);
   const baseIdentity = {
     resolvedPath: resolve(path),
     executablePath,
@@ -2322,7 +2508,7 @@ function executableIdentity(path, environment, expected) {
     || baseIdentity.executablePath !== expected.executablePath
     || baseIdentity.sha256 !== expected.sha256
     || baseIdentity.size !== expected.size)) fail(`Stock Pi identity changed at ${path}`);
-  const observed = spawnSync(path, ["--version"], { encoding: "utf8", env: environment });
+  const observed = spawnCommand(path, ["--version"], { encoding: "utf8", env: environment });
   if (observed.error || observed.status !== 0) fail(`Cannot read Stock Pi version from ${path}`);
   const version = observed.stdout.trim();
   if (!version) fail(`Stock Pi returned no version identity: ${path}`);
@@ -2340,6 +2526,10 @@ function resolvedStockIdentity(environment) {
 function entrypointMatches(entrypoint) {
   if (!pathExists(entrypoint.path)) return false;
   const stat = lstatSync(entrypoint.path);
+  if (extname(entrypoint.path).toLowerCase() === ".cmd") {
+    return stat.isFile() && !stat.isSymbolicLink()
+      && readFileSync(entrypoint.path, "utf8") === windowsEntrypointContents(entrypoint.target);
+  }
   return stat.isSymbolicLink() && resolve(dirname(entrypoint.path), readlinkSync(entrypoint.path)) === resolve(entrypoint.target);
 }
 
@@ -2351,10 +2541,39 @@ function assertEntrypointAvailable(entrypoint) {
 function publishEntrypoint(entrypoint) {
   if (entrypointMatches(entrypoint)) return;
   try {
-    symlinkSync(entrypoint.target, entrypoint.path);
+    if (extname(entrypoint.path).toLowerCase() === ".cmd") {
+      const temporary = join(dirname(entrypoint.path), `.${basename(entrypoint.path)}.tmp-${randomUUID()}`);
+      const fd = openSync(temporary, "wx", 0o600);
+      try {
+        writeSync(fd, windowsEntrypointContents(entrypoint.target));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      try {
+        linkSync(temporary, entrypoint.path);
+      } finally {
+        unlinkSync(temporary);
+      }
+    } else symlinkSync(entrypoint.target, entrypoint.path);
   } catch (error) {
     if (error?.code === "EEXIST") fail(`Unowned foreign command collision: ${entrypoint.path}`);
     throw error;
+  }
+}
+
+function managedEntrypointPath(binDirectory, name, platform = process.platform) {
+  return join(binDirectory, isWindowsPlatform(platform) ? `${name}.cmd` : name);
+}
+
+function assertNoForeignCommandVariants(binDirectory, name, expectedPath, platform = process.platform) {
+  const candidates = isWindowsPlatform(platform)
+    ? [name, `${name}.com`, `${name}.exe`, `${name}.bat`, `${name}.cmd`, `${name}.ps1`]
+    : [name];
+  for (const candidate of candidates.map((value) => join(binDirectory, value))) {
+    if (resolve(candidate) !== resolve(expectedPath) && pathExists(candidate)) {
+      fail(`Unowned foreign command collision: ${candidate}`);
+    }
   }
 }
 
@@ -2376,7 +2595,7 @@ function readCompatibilityEntrypoint(paths) {
 function dispatcherIdentity(path) {
   const target = resolve(path);
   const stat = lstatSync(target);
-  if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o111) === 0) fail(`Managed Dispatcher is missing or not executable: ${target}`);
+  if (!stat.isFile() || stat.isSymbolicLink() || (process.platform !== "win32" && (stat.mode & 0o111) === 0)) fail(`Managed Dispatcher is missing or not executable: ${target}`);
   return { path: target, sha256: sha256File(target), size: stat.size };
 }
 
@@ -2393,7 +2612,7 @@ function validateBinDirectory(binDirectory) {
   while (ancestor !== dirname(ancestor)) {
     if (pathExists(ancestor)) {
       const stat = lstatSync(ancestor);
-      if (stat.isSymbolicLink() && stat.uid !== 0) {
+      if (stat.isSymbolicLink() && (process.platform === "win32" || stat.uid !== 0)) {
         fail(`Managed bin directory ancestor is a foreign symbolic link: ${ancestor}`);
       }
     }
@@ -2414,17 +2633,19 @@ function requireOwnedCompatibility(paths, expected, { allowMissing = false } = {
 export function preflightManagedCommandOwnership(dataRoot, options = {}) {
   const environment = options.environment || process.env;
   assertOutsideSharedPiData(dataRoot, environment);
+  const platform = options.platform || process.platform;
   const binDirectory = resolve(options.binDirectory || defaultManagedBinDirectory(environment));
   validateBinDirectory(binDirectory);
   const paths = layout(dataRoot);
   const expectedCompatibility = {
-    path: join(binDirectory, "pi-wait-for-user"),
+    path: managedEntrypointPath(binDirectory, "pi-wait-for-user", platform),
     target: join(paths.root, "dispatcher", "managed-dispatcher.mjs"),
   };
   if (pathExists(compatibilityReceiptPath(paths))) {
     requireOwnedCompatibility(paths, expectedCompatibility, { allowMissing: true });
   } else if (pathExists(expectedCompatibility.path)) fail(`Unowned foreign command collision: ${expectedCompatibility.path}`);
-  const piPath = join(binDirectory, "pi");
+  assertNoForeignCommandVariants(binDirectory, "pi-wait-for-user", expectedCompatibility.path, platform);
+  const piPath = managedEntrypointPath(binDirectory, "pi", platform);
   const ownershipPath = join(paths.state, "entrypoints.json");
   if (pathExists(ownershipPath)) {
     const ownership = readManagedOwnership(dataRoot);
@@ -2433,6 +2654,7 @@ export function preflightManagedCommandOwnership(dataRoot, options = {}) {
       fail(`Command Ownership pi entrypoint mismatch: ${piPath}`);
     }
   } else if (options.managePi && pathExists(piPath)) fail(`Unowned foreign command collision: ${piPath}`);
+  if (options.managePi) assertNoForeignCommandVariants(binDirectory, "pi", piPath, platform);
   return { binDirectory };
 }
 
@@ -2448,13 +2670,14 @@ export function installManagedCompatibility(dataRoot, options = {}) {
   return withLifecycleLock(dataRoot, "install Compatibility Entrypoint", () => {
     const paths = initializeLayout(dataRoot);
     const expected = {
-      path: join(binDirectory, "pi-wait-for-user"),
+      path: managedEntrypointPath(binDirectory, "pi-wait-for-user", selected.pair.platform),
       target: join(paths.root, "dispatcher", "managed-dispatcher.mjs"),
     };
     const receiptPath = compatibilityReceiptPath(paths);
     if (pathExists(receiptPath)) {
       requireOwnedCompatibility(paths, expected, { allowMissing: true });
     } else if (pathExists(expected.path)) fail(`Unowned foreign command collision: ${expected.path}`);
+    assertNoForeignCommandVariants(binDirectory, "pi-wait-for-user", expected.path, selected.pair.platform);
     validateBinDirectory(binDirectory);
     const dispatcher = dispatcherIdentity(publishStableDispatcher(paths, selected));
     if (dispatcher.path !== expected.target) fail("Managed Dispatcher path mismatch");
@@ -2491,11 +2714,13 @@ export function enableManagedOwnership(dataRoot, options = {}) {
         fail("Command Ownership configuration mismatch");
       }
     } else {
-      const pi = { path: join(binDirectory, "pi"), target: expectedDispatcherPath };
-      const compatibility = { path: join(binDirectory, "pi-wait-for-user"), target: expectedDispatcherPath };
+      const pi = { path: managedEntrypointPath(binDirectory, "pi", selected.pair.platform), target: expectedDispatcherPath };
+      const compatibility = { path: managedEntrypointPath(binDirectory, "pi-wait-for-user", selected.pair.platform), target: expectedDispatcherPath };
       if (pathExists(pi.path)) fail(`Unowned foreign command collision: ${pi.path}`);
       if (pathExists(compatibilityReceiptPath(paths))) requireOwnedCompatibility(paths, compatibility, { allowMissing: true });
       else if (pathExists(compatibility.path)) fail(`Unowned foreign command collision: ${compatibility.path}`);
+      assertNoForeignCommandVariants(binDirectory, "pi", pi.path, selected.pair.platform);
+      assertNoForeignCommandVariants(binDirectory, "pi-wait-for-user", compatibility.path, selected.pair.platform);
       validateBinDirectory(binDirectory);
       pendingOwnership = {
         entrypoints: { pi, compatibility },
@@ -2543,17 +2768,22 @@ export function enableManagedOwnership(dataRoot, options = {}) {
     publishEntrypoint(ownership.entrypoints.pi);
     options.checkpoint?.("pi-entrypoint-published");
 
-    const resolvedCommand = commandPath("pi", environment);
+    const resolvedCommand = commandPath("pi", environment, selected.pair.platform);
     const resolvesToManagedDispatcher = resolvedCommand
-      && basename(resolvedCommand) === basename(ownership.entrypoints.pi.path)
+      && basename(resolvedCommand).toLowerCase() === basename(ownership.entrypoints.pi.path).toLowerCase()
       && realpathSync(dirname(resolvedCommand)) === realpathSync(dirname(ownership.entrypoints.pi.path))
       && entrypointMatches(ownership.entrypoints.pi)
-      && realpathSync(resolvedCommand) === realpathSync(ownership.dispatcher.path);
+      && (isWindowsPlatform(selected.pair.platform)
+        ? windowsEntrypointTarget(resolvedCommand) === resolve(ownership.dispatcher.path)
+        : realpathSync(resolvedCommand) === realpathSync(ownership.dispatcher.path));
     if (!resolvesToManagedDispatcher) {
       const pathRemediation = resolvedCommand
         ? `Put ${binDirectory} before ${dirname(resolvedCommand)} in PATH`
-        : `Add ${binDirectory} to the front of PATH, for example: export PATH=${shellQuote(binDirectory)}:"$PATH"`;
-      fail(`Managed Dispatcher is installed but current command resolution selects ${resolvedCommand || "no pi command"}. ${pathRemediation}, run \`hash -r\`, then rerun: pi-wait-for-user managed enable --bin-dir ${shellQuote(binDirectory)}`);
+        : isWindowsPlatform(selected.pair.platform)
+          ? `Add ${binDirectory} to the front of PATH without removing or replacing existing entries`
+          : `Add ${binDirectory} to the front of PATH, for example: export PATH=${shellQuote(binDirectory)}:"$PATH"`;
+      const refresh = isWindowsPlatform(selected.pair.platform) ? "open a new terminal" : "run `hash -r`";
+      fail(`Managed Dispatcher is installed but current command resolution selects ${resolvedCommand || "no pi command"}. ${pathRemediation}, ${refresh}, then rerun: pi-wait-for-user managed enable --bin-dir ${shellQuote(binDirectory)}`);
     }
     return alreadyEnabled ? "already enabled" : "enabled";
   });
@@ -2588,8 +2818,8 @@ export function executeStockPi(dataRoot, args, { environment = process.env } = {
   if (canonicalJson(current) !== canonicalJson(stock)) fail(`Stock Pi identity changed at ${stock.resolvedPath}`);
   console.error("Warning: Stock Pi cannot open downstream session files. Use it only for Stock Pi sessions.");
   if (realpathSync(stock.resolvedPath) !== current.executablePath) fail(`Stock Pi identity changed at ${stock.resolvedPath}`);
-  if (typeof process.execve === "function") process.execve(stock.resolvedPath, [stock.resolvedPath, ...args], environment);
-  const result = spawnSync(stock.resolvedPath, args, { stdio: "inherit", env: environment });
+  if (process.platform !== "win32" && typeof process.execve === "function") process.execve(stock.resolvedPath, [stock.resolvedPath, ...args], environment);
+  const result = spawnCommand(stock.resolvedPath, args, { stdio: "inherit", env: environment });
   if (result.error) throw result.error;
   return result.status ?? 1;
 }
@@ -2635,7 +2865,7 @@ function validateManagerPayloadsForRemoval(paths, { allowMissingManagerIds = new
     };
     if (pathExists(managerPath)) {
       const receipt = readReceiptCopies(paths, "manager", managerReleaseId, managerPath, pair);
-      comparePayload(payloadWithoutManagerFiles(managerPath), receipt.payload);
+      comparePayload(payloadWithoutManagerFiles(managerPath), receipt.payload, { platform: pair.platform });
     } else if (allowMissingManagerIds.has(managerReleaseId)) validateReceipt(central, "manager", managerPath, pair);
     else fail(`Inconsistent receipt for Manager Release ${managerReleaseId}`);
     found.push(managerReleaseId);
@@ -2686,6 +2916,17 @@ function writeUninstallPending(paths, pairs, createdAt = new Date().toISOString(
     return;
   }
   atomicWrite(paths.uninstallPending, { schemaVersion: 1, type: "pending-uninstall", pairs, createdAt });
+}
+
+function uninstallPairsWithOwnedState(paths, pairs) {
+  return pairs.filter((pair) => [
+    join(paths.releases, pair.downstreamReleaseId),
+    receiptPath(paths, "downstream", pair.downstreamReleaseId),
+    join(paths.managers, pair.managerReleaseId),
+    receiptPath(paths, "manager", pair.managerReleaseId),
+    pairLeaseDirectory(paths, pair),
+    pairCleanupClaimPath(paths, pair),
+  ].some((path) => pathExists(path)));
 }
 
 function validatePairLeaseDirectory(paths, pair) {
@@ -2924,14 +3165,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
     const pendingUninstall = readUninstallPending(paths);
     const pendingPairs = pendingUninstall?.pairs || [];
     const installed = installedPairs(paths, { allowMissingPairs: pendingPairs });
-    const pendingWithOwnedState = pendingPairs.filter((pair) => [
-      join(paths.releases, pair.downstreamReleaseId),
-      receiptPath(paths, "downstream", pair.downstreamReleaseId),
-      join(paths.managers, pair.managerReleaseId),
-      receiptPath(paths, "manager", pair.managerReleaseId),
-      pairLeaseDirectory(paths, pair),
-      pairCleanupClaimPath(paths, pair),
-    ].some((path) => pathExists(path)));
+    const pendingWithOwnedState = uninstallPairsWithOwnedState(paths, pendingPairs);
     const pairs = [...installed, ...pendingWithOwnedState]
       .filter((pair, index, all) => all.findIndex((candidate) => samePair(candidate, pair)) === index);
     validateManagerPayloadsForRemoval(paths, { allowMissingManagerIds: new Set(pendingPairs.map((pair) => pair.managerReleaseId)) });
@@ -2976,7 +3210,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
         mode: "uninstall",
         checkpoint: options.checkpoint,
       }) === "deferred") deferred += 1;
-      writeUninstallPending(paths, installedPairs(paths, { allowMissingPairs: pairs }), pendingCreatedAt, { preserveEmpty: true });
+      writeUninstallPending(paths, uninstallPairsWithOwnedState(paths, pairs), pendingCreatedAt, { preserveEmpty: true });
     }
     options.checkpoint?.("uninstall-payloads-removed");
 
@@ -3009,7 +3243,7 @@ export function uninstallManagedInstallation(dataRoot, options = {}) {
     }
     options.checkpoint?.("uninstall-state-removed");
 
-    const remainingPairs = installedPairs(paths, { allowMissingPairs: pairs });
+    const remainingPairs = uninstallPairsWithOwnedState(paths, pairs);
     writeUninstallPending(paths, remainingPairs, pendingCreatedAt);
     if (remainingPairs.length === 0) {
       for (const name of managedRootEntries) {
@@ -3048,8 +3282,7 @@ export function disableManagedCommandOwnership(dataRoot) {
     validateBinDirectory(dirname(entrypoint.path));
     const path = resolve(entrypoint.path);
     if (!pathExists(path)) return "already disabled";
-    const stat = lstatSync(path);
-    if (!stat.isSymbolicLink() || resolve(dirname(path), readlinkSync(path)) !== resolve(entrypoint.target)) fail("Command Ownership pi entrypoint mismatch");
+    if (!entrypointMatches(entrypoint)) fail("Command Ownership pi entrypoint mismatch");
     unlinkSync(path);
     return "disabled";
   });

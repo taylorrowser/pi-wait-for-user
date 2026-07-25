@@ -16,7 +16,7 @@ const rootPrivate = readFileSync(join(fixtureKeys, "root-private.pem"), "utf8");
 const releasePrivate = readFileSync(join(fixtureKeys, "release-private.pem"), "utf8");
 const releasePublic = readFileSync(join(fixtureKeys, "release-public.pem"), "utf8");
 const now = "2026-07-24T12:00:00.000Z";
-const expectedPlatforms = ["darwin-arm64", "linux-arm64", "linux-x64"];
+const expectedPlatforms = ["darwin-arm64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
 const expectedOutputs = expectedPlatforms.map((platform) => `installation-receipt-${platform}.json`);
 
 function digest(value) {
@@ -164,7 +164,8 @@ test("receipt projection loads workspace-relative and absolute generated manifes
 
 test("receipt projection rejects missing supported outputs and unsupported Intel macOS", () => {
   for (const [name, platforms] of [
-    ["missing linux ARM64", ["darwin-arm64", "linux-x64", "windows-arm64", "windows-x64"]],
+    ["missing Linux ARM64", ["darwin-arm64", "linux-x64", "windows-arm64", "windows-x64"]],
+    ["missing Windows ARM64", ["darwin-arm64", "linux-arm64", "linux-x64", "windows-x64"]],
     ["unsupported Intel macOS", [
       "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64",
     ]],
@@ -461,7 +462,7 @@ test("receipt preflight reports exact inventory and fail-closed input probes wit
     });
     assert.deepEqual(readdirSync(join(directory, "preflight-output")).sort(), expectedOutputs);
     assert.match(readFileSync(summaryPath, "utf8"), /Production receipt preflight: passed/);
-    assert.match(readFileSync(summaryPath, "utf8"), /darwin-arm64, linux-arm64, linux-x64/);
+    assert.match(readFileSync(summaryPath, "utf8"), /darwin-arm64, linux-arm64, linux-x64, windows-arm64, windows-x64/);
     assert.match(readFileSync(summaryPath, "utf8"), /missing and malformed Release Manifest probes failed closed/);
     assert.doesNotMatch(result.stdout + result.stderr + readFileSync(summaryPath, "utf8"), /PRIVATE KEY|BEGIN [A-Z ]*PRIVATE/);
   } finally {

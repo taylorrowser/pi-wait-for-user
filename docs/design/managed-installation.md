@@ -349,8 +349,9 @@ Default data roots remain platform-native:
 
 - macOS: `$HOME/Library/Application Support/pi-wait-for-user`
 - Linux: `${XDG_DATA_HOME:-$HOME/.local/share}/pi-wait-for-user`
+- Windows: `%LOCALAPPDATA%\pi-wait-for-user`
 
-The default bin directory remains `$HOME/.local/bin`, subject to PATH and collision checks. The manager data root separates immutable manager releases, immutable downstream releases, activation/channel/trust state, receipts, leases, diagnostics, cache, and temporary/tombstone paths.
+The default bin directory remains `$HOME/.local/bin` on macOS/Linux and `%USERPROFILE%\.local\bin` on Windows, subject to PATH and collision checks. The manager data root separates immutable manager releases, immutable downstream releases, activation/channel/trust state, receipts, leases, diagnostics, cache, and temporary/tombstone paths.
 
 Receipts include schema, owned path, content identity, release/manager identity, platform, and creation provenance sufficient to prove cleanup ownership. Paths are validated against traversal and symlink substitution before mutation. Shared Pi data is never listed in a manager receipt.
 
@@ -366,7 +367,7 @@ Commands converge safely:
 
 ## Platform and migration plan
 
-The metadata, Activation, receipt, lease, and lifecycle state machines are cross-platform. Initial managed implementation targets macOS Apple Silicon plus Linux ARM64/x64, matching the supported one-command bootstrap. Intel macOS is unsupported and rejected before bootstrap metadata or payload download. Existing Windows ARM64/x64 archives remain manual and side-by-side. A blocked follow-up ticket implements equivalent Windows entrypoint, atomic replacement, locking, leases, and uninstall semantics.
+The metadata, Activation, receipt, lease, and lifecycle state machines are cross-platform. Managed delivery supports macOS Apple Silicon, Linux ARM64/x64, and Windows ARM64/x64. Intel macOS remains unsupported. Windows uses receipt-owned `.cmd` entrypoints, native process identities, atomic replacement, exclusive lifecycle locks, process-lifetime leases, and deferred receipt-scoped cleanup for executable locks. GitHub-hosted native Windows CI runs x64; ARM64 remains covered by signed payload, inventory, receipt, and architecture-selection gates until hosted native ARM64 runner coverage is available.
 
 The first managed implementation accepts only publisher-built artifacts declared by the signed Release Manifest. The existing source-build path remains an unmanaged side-by-side fallback. Supporting locally built managed payloads requires a separate signed-input/local-build receipt design.
 
@@ -438,5 +439,5 @@ Tests must cover state transitions and observable filesystem/CLI behavior, not p
 - #61 adds network update discovery/routing and Patch Lag UX; it is blocked by #59.
 - #62 adds rollback, retention, recovery, and uninstall on the shared lifecycle primitives; it is blocked by #59 and #60.
 - #63 is the macOS/Linux end-to-end release gate; it is blocked by #58, #60, #61, and #62.
-- #64 adds equivalent managed Windows support after #63.
+- #64 adds equivalent managed Windows support after #63 (implemented by Manager Release `manager-v3` and the `patch.12` release candidate).
 - Managed local source builds remain an explicit future design rather than part of these tickets.

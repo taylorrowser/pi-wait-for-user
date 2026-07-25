@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-release_id="pi-v0.81.1-patch.11"
+release_id="pi-v0.81.1-patch.12"
 
 for command in node tar; do
   if ! command -v "$command" >/dev/null 2>&1; then
@@ -245,7 +245,7 @@ try {
   for (let index = 0; index < options.forwarded.length; index += 2) values.set(options.forwarded[index], options.forwarded[index + 1]);
   const dataRoot = resolve(values.get("--data-root") || runtime.defaultManagedDataRoot());
   const binDirectory = resolve(values.get("--bin-dir") || runtime.defaultManagedBinDirectory());
-  runtime.preflightManagedCommandOwnership(dataRoot, { binDirectory, managePi: options.managePi });
+  runtime.preflightManagedCommandOwnership(dataRoot, { binDirectory, managePi: options.managePi, platform });
   const activationPath = join(dataRoot, "state", "activation.json");
   const prior = existsSync(activationPath) ? runtime.readActivation(dataRoot) : undefined;
   const activation = runtime.installAndActivateFromPinnedRoot({

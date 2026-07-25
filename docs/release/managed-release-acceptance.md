@@ -1,12 +1,12 @@
 # Managed Installation release acceptance
 
-This is the release-level traceability record for GitHub issues #63, #80, and #82 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
+This is the release-level traceability record for GitHub issues #63, #64, #80, and #82 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
 
 ## Release and bootstrap
 
 | Design / #63 requirement | Automated evidence |
 | --- | --- |
-| Signed trust, Channel, Release Manifest, exact Manager Release, Question Tool, platform Downstream Release payloads, generated projections, receipts, and provenance | `test/release-metadata.test.mjs` — “authorized root and release signatures verify complete metadata”, “manifest projections are generated from one verified identity”, “production signing is tag-only…”, and provenance/drift rejection; `test/release-receipts.test.mjs` executes the shared production/preflight CLI boundary for relative/absolute paths, exact supported inventory, unsupported Intel, and missing/malformed input; `test/release.test.mjs` — “a passing release stages complete artifacts while omitting Intel macOS”; `.github/workflows/release.yml` preserves the fixture-authority preflight report before the protected dependency and later generates `installation-receipt-<platform>.json` for `darwin-arm64`, `linux-arm64`, and `linux-x64` before attesting and publishing every top-level asset |
+| Signed trust, Channel, Release Manifest, exact Manager Release, Question Tool, platform Downstream Release payloads, generated projections, receipts, and provenance | `test/release-metadata.test.mjs` — “authorized root and release signatures verify complete metadata”, “manifest projections are generated from one verified identity”, “production signing is tag-only…”, and provenance/drift rejection; `test/release-receipts.test.mjs` executes the shared production/preflight CLI boundary for relative/absolute paths, exact supported inventory, unsupported Intel, and missing/malformed input; `test/release.test.mjs` — “a passing release stages complete artifacts while omitting Intel macOS”; `.github/workflows/release.yml` preserves the fixture-authority preflight report before the protected dependency and later generates `installation-receipt-<platform>.json` for `darwin-arm64`, `linux-arm64`, `linux-x64`, `windows-arm64`, and `windows-x64` before attesting and publishing every top-level asset |
 | Clean HTTPS side-by-side or explicit Command Ownership bootstrap | `test/binary-release.test.mjs` — managed bootstrap authority and signed-descriptor tests; `test/managed-runtime.test.mjs` — “installer claims pi only with explicit --manage-pi” and “plain side-by-side setup…” |
 | Independently checked first use | `README.md` “Independently checked first use”; workflow attestation of `install.sh`; root SPKI fixture/production fingerprint verification in `test/release-metadata.test.mjs` |
 | macOS Apple Silicon and Linux ARM64/x64 smoke and public conformance | `.github/workflows/release.yml` `platform-smoke` matrix; release-candidate Linux interactive Question Tool smoke |
@@ -50,10 +50,24 @@ This is the release-level traceability record for GitHub issues #63, #80, and #8
 | --- | --- |
 | Intel macOS is not built and the public release inventory omits its archives, descriptors, checksums, and provenance subjects | `test/release-metadata.test.mjs` verifies the workflow's post-build Intel-archive absence guard; `test/release.test.mjs` — “a passing release stages complete artifacts while omitting Intel macOS”; `test/binary-release.test.mjs` — “the binary packager rejects the retired Intel macOS target” |
 | Managed HTTPS bootstrap rejects Intel macOS before selection or download | `test/binary-release.test.mjs` — “the managed HTTPS bootstrap rejects Intel macOS before any download” |
-| Production smoke and receipt outputs contain only supported managed targets | `test/release-metadata.test.mjs` — exact `darwin-arm64`, `linux-arm64`, and `linux-x64` workflow matrix plus receipt filter |
+| Production smoke and receipt outputs contain only supported managed targets | `test/release-metadata.test.mjs` — exact `darwin-arm64`, `linux-arm64`, and `linux-x64` Unix smoke matrix plus the five-platform managed receipt filter |
 
 ## Documentation and scope
 
-`README.md` documents installation, Managed Update, Patch Lag, verification, provenance audit, rollback, recovery, disablement, Stock Pi, uninstall, Legacy Downstream Installation guidance, key rotation/compromise boundaries, Windows manual scope, and unmanaged source-build fallback. Detailed command and state semantics remain in [`managed-runtime.md`](managed-runtime.md); public signing and key rotation are in [`signing-keys.md`](signing-keys.md) and [`production-signing-runbook.md`](production-signing-runbook.md).
+## Managed Windows delivery (#64)
+
+| #64 requirement | Automated evidence |
+| --- | --- |
+| Explicit enable/disable/uninstall without foreign command or PATH replacement | `test/managed-windows.test.mjs` runs the native Windows filesystem/CLI lifecycle; `test/managed-runtime.test.mjs` exercises `.exe` and `.ps1` collision refusal plus receipt-owned `.cmd` disablement; `scripts/install-windows.ps1` refuses PowerShell aliases, functions, and cmdlets |
+| Stock Pi identity and escape boundary | Native Windows lifecycle records a Stock `pi.cmd`, leaves it byte-identical, verifies final resolution, and preserves the downstream-session warning path shared with macOS/Linux |
+| Atomic compatible pair selection, patch-only transition, interruption, rollback, holds, recovery, and verification | Native lifecycle installs four same-upstream signed fixture releases, interrupts before the Activation switch, rolls back, corrupts the active executable, fails closed, explicitly recovers, and fully verifies the recovered pair |
+| Exclusive lifecycle lock, process-lifetime leases, and executable-lock cleanup | Shared lock/lease race tests remain platform-neutral; native Windows lifecycle proves a live leased old pair survives update and is pruned after lease release; runtime treats only receipt-proven Windows lock errors as deferred cleanup and never schedules deletion |
+| Windows x64 and ARM64 release payloads and receipts | `test/release.test.mjs` gates both ZIPs; `test/release-receipts.test.mjs` gates exact five-platform receipt output; `scripts/package-binaries.mjs` embeds the PowerShell/bootstrap payload in both architectures |
+| Native CI and release promotion gate | `.github/workflows/ci.yml` runs `test/managed-windows.test.mjs` on `windows-2025`; `.github/workflows/release.yml` smoke-tests the exact x64 ZIP and native lifecycle before protected publication. ARM64 packaging/receipt/selection remain required where hosted native ARM64 runners are unavailable |
+| Shared-data preservation and documentation promotion | Native uninstall preserves `%USERPROFILE%\.pi\agent` byte-for-byte; `README.md`, `managed-runtime.md`, this traceability record, and the accepted design document the supported Windows flow |
+
+## Documentation and scope
+
+`README.md` documents installation on macOS, Linux, and Windows, Managed Update, Patch Lag, verification, provenance audit, rollback, recovery, disablement, Stock Pi, uninstall, Legacy Downstream Installation guidance, key rotation/compromise boundaries, and unmanaged source-build fallback. Detailed command and state semantics remain in [`managed-runtime.md`](managed-runtime.md); public signing and key rotation are in [`signing-keys.md`](signing-keys.md) and [`production-signing-runbook.md`](production-signing-runbook.md).
 
 The release candidate remains unpublished until the protected workflow signs it with the human-provisioned delegated key. No production private signing material is created or handled by this acceptance gate.

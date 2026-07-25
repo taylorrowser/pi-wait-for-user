@@ -104,6 +104,34 @@ test("the bootstrap uses signed artifact descriptors rather than an unauthentica
   assert.match(bootstrap, /createHash\("sha256"\).*expected\.sha256/s);
 });
 
+test("Windows x64 and ARM64 payloads embed the signed managed PowerShell bootstrap", () => {
+  for (const platformName of ["windows-x64", "windows-arm64"]) {
+    const root = mkdtempSync(join(tmpdir(), `pi-${platformName}-package-`));
+    temporaryRoots.push(root);
+    const input = join(root, "input", platformName);
+    const output = join(root, "output");
+    mkdirSync(input, { recursive: true });
+    writeFileSync(join(input, "pi.exe"), "fixture Windows executable");
+    execFileSync(process.execPath, [
+      join(repositoryRoot, "scripts", "package-binaries.mjs"),
+      "--input", join(root, "input"), "--output", output, "--platform", platformName,
+    ], { cwd: repositoryRoot });
+    const archive = join(output, `pi-wait-for-user-${platformName}.zip`);
+    const extracted = join(root, "extracted");
+    mkdirSync(extracted);
+    execFileSync("unzip", ["-q", archive, "-d", extracted]);
+    const payload = join(extracted, "pi-wait-for-user");
+    assert.equal(existsSync(join(payload, "install.ps1")), true);
+    assert.equal(existsSync(join(payload, "managed-install", "windows-bootstrap.mjs")), true);
+    assert.equal(existsSync(join(payload, "managed-install", "lib", "release-metadata.mjs")), true);
+    const bootstrap = readFileSync(join(payload, "managed-install", "windows-bootstrap.mjs"), "utf8");
+    assert.ok(bootstrap.indexOf("verifyChannelSelection(channelEnvelope") < bootstrap.indexOf("download(manifestUrl"));
+    assert.equal(existsSync(join(payload, "install.sh")), false);
+    const metadata = JSON.parse(readFileSync(`${archive}.metadata.json`, "utf8"));
+    verifyReleasePayloads(extracted, metadata.payload);
+  }
+});
+
 test("the binary packager rejects the retired Intel macOS target", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-intel-package-"));
   temporaryRoots.push(root);
