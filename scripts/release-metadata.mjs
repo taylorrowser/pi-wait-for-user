@@ -44,6 +44,14 @@ function parseOptions(args) {
   return options;
 }
 
+function clearReceiptPreflightEvidence(args) {
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--preflight-report" && args[index + 1] !== undefined) {
+      rmSync(resolve(args[index + 1]), { force: true });
+    }
+  }
+}
+
 function required(options, flag) {
   const value = options.get(flag);
   if (!value) fail(`Missing required option: ${flag}`);
@@ -455,6 +463,7 @@ function usage() {
 
 try {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "receipts") clearReceiptPreflightEvidence(args);
   const options = parseOptions(args);
   if (command === "sign-trust") signTrust(options);
   else if (command === "verify-trust") verifyTrust(options);
