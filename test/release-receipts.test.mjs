@@ -345,6 +345,29 @@ test("receipt preflight clears stale machine evidence before validating required
   }
 });
 
+test("receipt preflight clears stale machine evidence before rejecting unknown options", () => {
+  const directory = mkdtempSync(join(tmpdir(), "release-receipts-unknown-option-"));
+  try {
+    writeAuthority(directory);
+    writeManifest(directory);
+    const reportPath = join(directory, "production-receipt-preflight.json");
+    writeFileSync(reportPath, '{"result":"passed","stale":true}\n');
+
+    const result = runReceipts(
+      directory,
+      "dist/pi-v0.81.1-patch.11/release-manifest.json",
+      "preflight-output",
+      [...preflightOptions(directory, reportPath), "--unknown-option", "value"],
+    );
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Unknown option: --unknown-option/);
+    assert.equal(existsSync(reportPath), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("receipt preflight leaves no passing machine report when workflow summary writing fails", () => {
   const directory = mkdtempSync(join(tmpdir(), "release-receipts-summary-failure-"));
   try {

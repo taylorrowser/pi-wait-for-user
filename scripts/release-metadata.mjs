@@ -335,14 +335,14 @@ function expectFailedClosed(callback, expected) {
 }
 
 function createVerifiedReceipts(options) {
-  allowed(options, [
-    "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--owned-path", "--output",
-    "--preflight-report", "--summary",
-  ]);
   const reportPath = options.has("--preflight-report")
     ? resolve(required(options, "--preflight-report"))
     : undefined;
   if (reportPath) rmSync(reportPath, { force: true });
+  allowed(options, [
+    "--manifest", "--trust", "--root-key", "--accepted-trust-state", "--now", "--owned-path", "--output",
+    "--preflight-report", "--summary",
+  ]);
   if (options.has("--summary") !== options.has("--preflight-report")) {
     fail("--preflight-report and --summary are required together");
   }
