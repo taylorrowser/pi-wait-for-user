@@ -517,6 +517,7 @@ test("the metadata CLI verifies provenance, signs a manifest, and promotes one C
 
 test("production signing is tag-only, delegated, protected, and stages stable state after immutable publication", () => {
   const workflow = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
+  const ciWorkflow = readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf8");
   const policy = JSON.parse(readFileSync(join(root, "releases", "signing-policy.json"), "utf8"));
   const secretNames = [...workflow.matchAll(/\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}/g)].map((match) => match[1]);
 
@@ -533,8 +534,8 @@ test("production signing is tag-only, delegated, protected, and stages stable st
     ["ubuntu-24.04", "linux-x64"],
   ]);
   assert.match(workflow, /Smoke-test the exact supported platform payload/);
-  assert.match(workflow, /windows-managed-smoke:[\s\S]*runs-on: windows-2025[\s\S]*node --test test\/managed-windows\.test\.mjs/);
-  assert.match(workflow, /Deferred conformance passed \(8\/8\)/);
+  assert.match(workflow, /windows-managed-smoke:[\s\S]*runs-on: windows-2025[\s\S]*\.\/scripts\/assert-conformance\.ps1 -Pi \$pi[\s\S]*node --test test\/managed-windows\.test\.mjs/);
+  assert.match(ciWorkflow, /runs-on: windows-2025[\s\S]*\.\/test\/release-smoke-output\.test\.ps1/);
   assert.match(workflow, /test ! -e \.work\/upstream-binaries\/pi-darwin-x64\.tar\.gz/);
   assert.doesNotMatch(workflow.replace("pi-darwin-x64.tar.gz", ""), /darwin-x64/);
   assert.equal(workflow.match(/node scripts\/release-metadata\.mjs receipts \\/g)?.length, 2);

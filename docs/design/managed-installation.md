@@ -439,5 +439,5 @@ Tests must cover state transitions and observable filesystem/CLI behavior, not p
 - #61 adds network update discovery/routing and Patch Lag UX; it is blocked by #59.
 - #62 adds rollback, retention, recovery, and uninstall on the shared lifecycle primitives; it is blocked by #59 and #60.
 - #63 is the macOS/Linux end-to-end release gate; it is blocked by #58, #60, #61, and #62.
-- #64 adds equivalent managed Windows support after #63 (implemented by Manager Release `manager-v3` and the `patch.12` release candidate).
+- #64 adds equivalent managed Windows support after #63 (implemented by Manager Release `manager-v3`, first attempted as the immutable unpublished `patch.12` identity, with the release-smoke correction prepared as `patch.13` by #89).
 - Managed local source builds remain an explicit future design rather than part of these tickets.

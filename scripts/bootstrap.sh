@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-release_id="pi-v0.81.1-patch.12"
+release_id="pi-v0.81.1-patch.13"
 
 for command in node tar; do
   if ! command -v "$command" >/dev/null 2>&1; then

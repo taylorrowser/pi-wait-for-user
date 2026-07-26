@@ -211,7 +211,7 @@ jobs:
           $pi = Join-Path $root "pi-wait-for-user/pi-core.exe"
           $expected = node -p "require('./candidate/.release-metadata/unsigned-manifest.json').upstream.packageVersion"
           if ((& $pi --version) -ne $expected) { throw "Windows payload version mismatch" }
-          if ((& $pi conformance) -notmatch 'Deferred conformance passed \(8/8\)') { throw "Windows conformance failed" }
+          & ./scripts/assert-conformance.ps1 -Pi $pi
           if (-not (Test-Path (Join-Path $root "pi-wait-for-user/install.ps1"))) { throw "Windows managed installer missing" }
           node --test test/managed-windows.test.mjs
 
