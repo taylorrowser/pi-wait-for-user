@@ -20,7 +20,7 @@ The local consumer of these identities is documented in [`docs/release/managed-r
 
 ## Build and promotion
 
-1. Create a new release ID and immutable input directory; never edit an already published release.
+1. Create a new release ID and input directory; never edit an already tagged or published release. An explicitly retained unpublished candidate may revise its inputs only when every digest, report, and approval is refreshed before tagging.
 2. Pin the exact upstream lock, ordered patch hashes, fixture gate, Question Tool/session/protocol/handler compatibility, Manager Release compatibility, and provenance identity.
 3. Set the package version to the downstream version. Generate or check shell/package identity with `node scripts/release.mjs verify`.
 4. Run `npm test` and `node scripts/release-gate.mjs` from a clean checkout.

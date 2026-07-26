@@ -1,6 +1,6 @@
 # Managed Installation release acceptance
 
-This is the release-level traceability record for GitHub issues #63, #64, #80, and #82 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
+This is the release-level traceability record for GitHub issues #63, #64, #80, #82, and #87 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
 
 ## Release and bootstrap
 
@@ -19,6 +19,16 @@ This is the release-level traceability record for GitHub issues #63, #64, #80, a
 | Workspace-relative and absolute generated Release Manifest paths load through one production/preflight receipt boundary | `test/release-receipts.test.mjs` executes `release-metadata.mjs receipts` with both path forms and verifies the exact supported receipt inventory |
 | Unprotected no-secret preflight runs before protected production signing, emits machine-readable evidence and a workflow summary, and fails closed for missing/malformed inputs | `test/release-metadata.test.mjs` verifies workflow ordering, shared executable invocation, report upload, summary emission, fixture authority, and failure probes; `test/release-receipts.test.mjs` pins the checked-in fixture root/delegated SPKI fingerprints and canonical trust-envelope digest, rejects arbitrary keys reusing fixture IDs, and proves summary-write failure leaves no passing report; `.github/workflows/release.yml` keeps `production-release` dependent on the completed candidate/preflight jobs |
 | Strict hydration reconciles every remaining committed identity after the live Vercel AI Gateway withdrawals | Active patch `0018-fix-remove-withdrawn-vercel-models.patch` adds a regression at `hydrateModelDataStructure` for the exact withdrawn identities and proves an unrelated missing Gateway identity still fails |
+
+## ModelRegistry release-gate stability (#87)
+
+| #87 requirement | Automated evidence |
+| --- | --- |
+| Public config refresh reloads changed custom-model data without waiting for a remote catalog | Active patch `0019-fix-keep-model-config-refresh-offline.patch` strengthens `packages/coding-agent/test/model-registry.test.ts` at public `ModelRegistry.refresh()` plus `getAll()` seams: the stale custom identity disappears, the replacement appears, built-ins remain merged, and a remote `fetch` is forbidden |
+| Explicit catalog refresh remains available | The same test file calls the public `ModelRuntime.refresh({ allowNetwork: true, force: true })` path and proves it still requests the remote catalog |
+| Suite/load-sensitive timeout is eliminated without a broader timeout or repository serialization | The patch removes the test-local 60-second allowance and makes `ModelRuntime.reloadConfig()` refresh local/cache/auth state with `allowNetwork: false`; the complete `full-pi-suite` release stage retains its normal parallel execution |
+
+The minimized diagnosis replaced `pi.dev` with a local catalog delayed by 500 ms. Before the fix, that server received one request and public config refresh took 515 ms; after the fix, it received none and refresh took 15 ms while loading the replacement model. A 40-run, four-process focused stress loop passed after the fix. Two separately reset-home complete coding-agent runs each passed 1,711 tests with 48 skips, matching the fresh 12-stage gate. The exact commands and ranked hypotheses are preserved on #87.
 
 ## Installation, update, and compatibility
 
