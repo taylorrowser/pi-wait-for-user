@@ -11,6 +11,7 @@ Managed Installation release for macOS Apple Silicon, Linux ARM64/x64, and Windo
 - Patch-aware update, Patch Lag, verification, rollback, holds, recovery, retention, disablement, and uninstall use the same signed cross-platform state machines.
 - Cleanup never force-deletes or schedules foreign paths for deletion. Live leases and Windows executable locks remain receipt-scoped pending cleanup for a later lifecycle pass.
 - Native Windows x64 CI covers fresh side-by-side/managed installation, PATH and launcher collisions, Stock Pi preservation, patch-only Activation, interruption, rollback, leases, corrupt-active recovery, and uninstall. Signed Windows ARM64 packaging and receipt projections remain gated where GitHub-hosted native ARM64 runners are unavailable.
+- `ModelRegistry.refresh()` reloads local `models.json` data without coupling config refresh to a remote model-catalog request, preventing suite/load-sensitive stalls while preserving built-in/custom model merging.
 - `%USERPROFILE%\.pi\agent`, configured Pi data, Stock Pi, sessions, settings, credentials, and packages remain outside manager ownership.
 
 ## Install

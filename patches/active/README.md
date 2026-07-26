@@ -3,8 +3,9 @@
 This directory is the complete ordered delta from the Pi release pinned in
 `upstream/pi.lock.json`. Patch files use zero-padded names and are applied in
 lexicographic order, for example `0001-deferred-entry.patch`. The active release
-manifest pins every filename and SHA-256; changing any patch requires a new
-release ID and a fresh release-candidate report.
+manifest pins every filename and SHA-256. Changing an unpublished candidate
+patch requires a refreshed manifest digest and release-candidate report;
+changing a publicly tagged or published patch requires a new release ID.
 
 The active series currently contains the durable deferral, Response-resumption,
 atomic whole-batch, idempotent recovery, unavailable recovery/abandonment,
@@ -13,8 +14,9 @@ non-TUI projection, extension/TUI presentation, extension conformance, the live
 unavailable-resolver fix, the restart-safe reference-presenter fix, explicit
 eager session-header compatibility documentation, the core-owned deferred
 re-entry affordance, the retired NVIDIA, OpenAI, and Vercel AI Gateway
-model-catalog corrections, and the supported-platform binary-build boundary
-for issues #13 through #22, #43 through #45, #49, #58, #80, and #82. It adds the
+model-catalog corrections, the supported-platform binary-build boundary, and
+the offline ModelRegistry config-refresh correction for issues #13 through #22,
+#43 through #45, #49, #58, #80, #82, and #87. It adds the
 versioned tool capability, fail-closed downstream session identity, typed
 live-path resolver failures, persisted deferred-batch marker, neutral
 markerless/deferred/partial/continuation AgentSession snapshot, package-owned

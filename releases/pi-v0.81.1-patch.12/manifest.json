@@ -87,11 +87,15 @@
     {
       "path": "patches/active/0018-fix-remove-withdrawn-vercel-models.patch",
       "sha256": "844f2b89000d1afe3407239323ea34dad58d7cc8e1074b20dc0a646e69469644"
+    },
+    {
+      "path": "patches/active/0019-fix-keep-model-config-refresh-offline.patch",
+      "sha256": "0118753a15a42f537c8c3edfa69098e83166a3b1a00a5312d4e02d5d786f7895"
     }
   ],
   "fixtureGate": {
     "path": "releases/pi-v0.81.1-patch.12/fixture-gate.json",
-    "sha256": "ae0100d1c3e1315b329c71f73125e477ef086598e6f3721a4de753f2a0a9e5ae"
+    "sha256": "be8546ebc1df37df489a8cd4caa62ce4a51008fd839b1cda814a0fd3870ad73d"
   },
   "questionTool": {
     "name": "@taylorrowser/pi-question-tool",

@@ -7,7 +7,7 @@
     "commit": "20be4b18d4c57487f8993d2762bace129f0cf7c6",
     "packageVersion": "0.81.1"
   },
-  "startedAt": "2026-07-25T13:56:31.075Z",
+  "startedAt": "2026-07-26T20:44:31.813Z",
   "result": "passed",
   "fixtureCategories": [
     {
@@ -119,6 +119,12 @@
       ]
     },
     {
+      "name": "model-refresh",
+      "fixtures": [
+        "packages/coding-agent/test/model-registry.test.ts"
+      ]
+    },
+    {
       "name": "question-tool",
       "fixtures": [
         "packages/question-tool/test/agent-session.test.mjs",
@@ -137,7 +143,7 @@
         "verify"
       ],
       "status": "passed",
-      "durationMs": 37
+      "durationMs": 31
     },
     {
       "name": "repository-tests",
@@ -146,7 +152,7 @@
         "test"
       ],
       "status": "passed",
-      "durationMs": 121014
+      "durationMs": 117635
     },
     {
       "name": "prepare-exact-patch",
@@ -157,7 +163,7 @@
         ".work/pi-v0.81.1"
       ],
       "status": "passed",
-      "durationMs": 4766
+      "durationMs": 7987
     },
     {
       "name": "install-dependencies",
@@ -167,7 +173,7 @@
         "--ignore-scripts"
       ],
       "status": "passed",
-      "durationMs": 4567
+      "durationMs": 6555
     },
     {
       "name": "typecheck",
@@ -177,7 +183,7 @@
         "check"
       ],
       "status": "passed",
-      "durationMs": 7334
+      "durationMs": 10288
     },
     {
       "name": "hydrate-model-data",
@@ -187,7 +193,7 @@
         "hydrate:model-data"
       ],
       "status": "passed",
-      "durationMs": 1178
+      "durationMs": 1789
     },
     {
       "name": "build",
@@ -197,7 +203,7 @@
         "build:offline"
       ],
       "status": "passed",
-      "durationMs": 4018
+      "durationMs": 5327
     },
     {
       "name": "legacy-compatibility",
@@ -206,7 +212,7 @@
         ".work/pi-v0.81.1/packages/coding-agent"
       ],
       "status": "passed",
-      "durationMs": 1300
+      "durationMs": 2085
     },
     {
       "name": "full-pi-suite",
@@ -214,7 +220,7 @@
         ".work/pi-v0.81.1/test.sh"
       ],
       "status": "passed",
-      "durationMs": 52672
+      "durationMs": 62183
     },
     {
       "name": "public-conformance",
@@ -224,7 +230,7 @@
         "conformance"
       ],
       "status": "passed",
-      "durationMs": 428,
+      "durationMs": 456,
       "result": {
         "passed": 8,
         "required": 8
@@ -238,7 +244,7 @@
         "typecheck:question-tool"
       ],
       "status": "passed",
-      "durationMs": 1305
+      "durationMs": 1409
     },
     {
       "name": "question-tool-suite",
@@ -248,8 +254,8 @@
         "test:question-tool"
       ],
       "status": "passed",
-      "durationMs": 3788
+      "durationMs": 4265
     }
   ],
-  "finishedAt": "2026-07-25T13:59:53.500Z"
+  "finishedAt": "2026-07-26T20:48:11.840Z"
 }

@@ -1,0 +1,67 @@
+diff --git a/packages/coding-agent/src/core/model-runtime.ts b/packages/coding-agent/src/core/model-runtime.ts
+index 2cd85b8d..4acdeba0 100644
+--- a/packages/coding-agent/src/core/model-runtime.ts
++++ b/packages/coding-agent/src/core/model-runtime.ts
+@@ -522,7 +522,7 @@ export class ModelRuntime implements Models {
+ 		this.config = await ModelConfig.load(this.modelsPath);
+ 		this.configureRadiusProviders();
+ 		this.rebuildProviders();
+-		await this.refresh({ allowNetwork: this.modelNetworkEnabled });
++		await this.refresh({ allowNetwork: false });
+ 	}
+ 
+ 	async refresh(options: ModelsRefreshOptions = {}): Promise<ModelsRefreshResult> {
+diff --git a/packages/coding-agent/test/model-registry.test.ts b/packages/coding-agent/test/model-registry.test.ts
+index 70a8fe9e..7f2b8e5c 100644
+--- a/packages/coding-agent/test/model-registry.test.ts
++++ b/packages/coding-agent/test/model-registry.test.ts
+@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+ import { AuthStorage } from "../src/core/auth-storage.ts";
+ import { clearApiKeyCache, type ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
+ 
+-import { createModelRegistry } from "./model-runtime-test-utils.ts";
++import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
+ 
+ describe("ModelRegistry", () => {
+ 	let tempDir: string;
+@@ -635,12 +635,13 @@ describe("ModelRegistry", () => {
+ 			).toBe(true);
+ 		});
+ 
+-		test("refresh() reloads merged custom models from disk", async () => {
++		test("refresh() reloads merged custom models from disk without refreshing remote catalogs", async () => {
+ 			writeModelsJson({
+ 				anthropic: providerConfig("https://first-proxy.example.com/v1", [{ id: "claude-custom" }]),
+ 			});
+ 			const registry = await createModelRegistry(authStorage, modelsJsonPath);
+ 			expect(getModelsForProvider(registry, "anthropic").some((m) => m.id === "claude-custom")).toBe(true);
++			const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("catalog unavailable"));
+ 
+ 			// Update and refresh
+ 			writeModelsJson({
+@@ -649,10 +650,23 @@ describe("ModelRegistry", () => {
+ 			await registry.refresh();
+ 
+ 			const anthropicModels = getModelsForProvider(registry, "anthropic");
++			expect(fetchSpy).not.toHaveBeenCalled();
+ 			expect(anthropicModels.some((m) => m.id === "claude-custom")).toBe(false);
+ 			expect(anthropicModels.some((m) => m.id === "claude-custom-2")).toBe(true);
+-			expect(anthropicModels.some((m) => m.id.includes("claude"))).toBe(true);
+-		}, 60_000);
++			expect(anthropicModels.some((m) => m.id === "claude-haiku-4-5")).toBe(true);
++		});
++
++		test("explicit runtime refresh still refreshes remote catalogs", async () => {
++			writeModelsJson({
++				anthropic: providerConfig("https://proxy.example.com/v1", [{ id: "claude-custom" }]),
++			});
++			const registry = await createModelRegistry(authStorage, modelsJsonPath);
++			const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("[]"));
++
++			await getModelRuntime(registry).refresh({ allowNetwork: true, force: true });
++
++			expect(fetchSpy).toHaveBeenCalledOnce();
++		});
+ 
+ 		test("removing custom models from models.json keeps built-in provider models", async () => {
+ 			writeModelsJson({
