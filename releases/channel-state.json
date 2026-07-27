@@ -1,6 +1,6 @@
 {
-  "sequence": 2,
-  "releaseId": "pi-v0.81.1-patch.11",
-  "manifestSha256": "2c42d10f31a9fede74a82b2b28da2e87c284715f872e08a19ee94c4769142946",
-  "envelopeSha256": "89d919518173919ef7b7305b72de77cece8ccb53b4deff6d8a35e96a1ccaf572"
+  "sequence": 3,
+  "releaseId": "pi-v0.81.1-patch.13",
+  "manifestSha256": "e4bccd9e46ab15ff24091520574a6f29c0bb5d55f5c7f9945fddd20db9fb91f0",
+  "envelopeSha256": "b08f7cf1babcba74e59cad104ddfa706f724e5176cb46adb3f3d17374cedc82f"
 }
