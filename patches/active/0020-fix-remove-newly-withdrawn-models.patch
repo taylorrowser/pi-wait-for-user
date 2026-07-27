@@ -1,0 +1,92 @@
+diff --git a/packages/ai/src/providers/fireworks.models.ts b/packages/ai/src/providers/fireworks.models.ts
+index 1b06766..5a834ca 100644
+--- a/packages/ai/src/providers/fireworks.models.ts
++++ b/packages/ai/src/providers/fireworks.models.ts
+@@ -13,10 +13,6 @@ export const FIREWORKS_MODELS = values as {
+ 		id: "accounts/fireworks/models/deepseek-v4-pro";
+ 		provider: "fireworks";
+ 	};
+-	"accounts/fireworks/models/glm-5p1": Model<"anthropic-messages"> & {
+-		id: "accounts/fireworks/models/glm-5p1";
+-		provider: "fireworks";
+-	};
+ 	"accounts/fireworks/models/glm-5p2": Model<"openai-completions"> & {
+ 		id: "accounts/fireworks/models/glm-5p2";
+ 		provider: "fireworks";
+@@ -49,10 +45,6 @@ export const FIREWORKS_MODELS = values as {
+ 		id: "accounts/fireworks/models/qwen3p7-plus";
+ 		provider: "fireworks";
+ 	};
+-	"accounts/fireworks/routers/glm-5p1-fast": Model<"anthropic-messages"> & {
+-		id: "accounts/fireworks/routers/glm-5p1-fast";
+-		provider: "fireworks";
+-	};
+ 	"accounts/fireworks/routers/glm-5p2-fast": Model<"openai-completions"> & {
+ 		id: "accounts/fireworks/routers/glm-5p2-fast";
+ 		provider: "fireworks";
+diff --git a/packages/ai/src/providers/nvidia.models.ts b/packages/ai/src/providers/nvidia.models.ts
+index b08b584..d3a7973 100644
+--- a/packages/ai/src/providers/nvidia.models.ts
++++ b/packages/ai/src/providers/nvidia.models.ts
+@@ -29,10 +29,6 @@ export const NVIDIA_MODELS = values as {
+ 		id: "minimaxai/minimax-m3";
+ 		provider: "nvidia";
+ 	};
+-	"mistralai/mistral-small-4-119b-2603": Model<"openai-completions"> & {
+-		id: "mistralai/mistral-small-4-119b-2603";
+-		provider: "nvidia";
+-	};
+ 	"moonshotai/kimi-k2.6": Model<"openai-completions"> & {
+ 		id: "moonshotai/kimi-k2.6";
+ 		provider: "nvidia";
+@@ -65,10 +61,6 @@ export const NVIDIA_MODELS = values as {
+ 		id: "openai/gpt-oss-20b";
+ 		provider: "nvidia";
+ 	};
+-	"stepfun-ai/step-3.5-flash": Model<"openai-completions"> & {
+-		id: "stepfun-ai/step-3.5-flash";
+-		provider: "nvidia";
+-	};
+ 	"stepfun-ai/step-3.7-flash": Model<"openai-completions"> & {
+ 		id: "stepfun-ai/step-3.7-flash";
+ 		provider: "nvidia";
+diff --git a/packages/ai/test/model-data-validation.test.ts b/packages/ai/test/model-data-validation.test.ts
+index 547bec9..d1224f7 100644
+--- a/packages/ai/test/model-data-validation.test.ts
++++ b/packages/ai/test/model-data-validation.test.ts
+@@ -130,6 +130,35 @@ describe("generated model data validation", () => {
+ 		);
+ 	});
+ 
++	it("strict hydration excludes four withdrawn provider identities and rejects missing or unknown drift", () => {
++		const structure = readModelDataStructure(packageRoot);
++		const generated = generatedCatalogFor(structure);
++		const withdrawnModels = [
++			["fireworks", "accounts/fireworks/models/glm-5p1"],
++			["fireworks", "accounts/fireworks/routers/glm-5p1-fast"],
++			["nvidia", "mistralai/mistral-small-4-119b-2603"],
++			["nvidia", "stepfun-ai/step-3.5-flash"],
++		] as const;
++
++		for (const [provider, modelId] of withdrawnModels) {
++			delete generated[provider][modelId];
++		}
++		expect(() => hydrateModelDataStructure(structure, generated)).not.toThrow();
++		expect(withdrawnModels.every(([provider, modelId]) => !(modelId in structure[provider]))).toBe(true);
++
++		const catalogMissingUnrelatedModel = generatedCatalogFor(structure);
++		delete catalogMissingUnrelatedModel.fireworks["accounts/fireworks/models/glm-5p2"];
++		expect(() => hydrateModelDataStructure(structure, catalogMissingUnrelatedModel)).toThrow(
++			"missing fireworks/accounts/fireworks/models/glm-5p2",
++		);
++
++		const catalogWithUnknownApi = generatedCatalogFor(structure);
++		catalogWithUnknownApi.fireworks["accounts/fireworks/models/glm-5p2"].api = "unknown-api";
++		expect(() => hydrateModelDataStructure(structure, catalogWithUnknownApi)).toThrow(
++			"fireworks/accounts/fireworks/models/glm-5p2 uses unknown-api, expected openai-completions",
++		);
++	});
++
+ 	it("validates complete data against generated structural catalogs", () => {
+ 		const { dataDir, structure } = createFixture();
+ 		expect(() => validateModelDataDirectory(structure, dataDir)).not.toThrow();

@@ -1,6 +1,6 @@
 # Managed Installation release acceptance
 
-This is the release-level traceability record for GitHub issues #63, #64, #80, #82, #87, and #89 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
+This is the release-level traceability record for GitHub issues #63, #64, #80, #82, #87, #89, and #91 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
 
 ## Release and bootstrap
 
@@ -18,7 +18,15 @@ This is the release-level traceability record for GitHub issues #63, #64, #80, #
 | --- | --- |
 | Workspace-relative and absolute generated Release Manifest paths load through one production/preflight receipt boundary | `test/release-receipts.test.mjs` executes `release-metadata.mjs receipts` with both path forms and verifies the exact supported receipt inventory |
 | Unprotected no-secret preflight runs before protected production signing, emits machine-readable evidence and a workflow summary, and fails closed for missing/malformed inputs | `test/release-metadata.test.mjs` verifies workflow ordering, shared executable invocation, report upload, summary emission, fixture authority, and failure probes; `test/release-receipts.test.mjs` pins the checked-in fixture root/delegated SPKI fingerprints and canonical trust-envelope digest, rejects arbitrary keys reusing fixture IDs, and proves summary-write failure leaves no passing report; `.github/workflows/release.yml` keeps `production-release` dependent on the completed candidate/preflight jobs |
-| Strict hydration reconciles every remaining committed identity after the live Vercel AI Gateway withdrawals | Active patch `0018-fix-remove-withdrawn-vercel-models.patch` adds a regression at `hydrateModelDataStructure` for the exact withdrawn identities and proves an unrelated missing Gateway identity still fails |
+| Strict hydration reconciles the committed Vercel AI Gateway identities withdrawn before patch.11 | Active patch `0018-fix-remove-withdrawn-vercel-models.patch` adds a regression at `hydrateModelDataStructure` for the exact withdrawn identities and proves an unrelated missing Gateway identity still fails |
+
+## Newly withdrawn model identities (#91)
+
+| #91 requirement | Automated evidence |
+| --- | --- |
+| Reconcile only the two Fireworks and two NVIDIA identities absent from repeated complete public catalog probes | Active patch `0020-fix-remove-newly-withdrawn-models.patch` removes exactly `accounts/fireworks/models/glm-5p1`, `accounts/fireworks/routers/glm-5p1-fast`, `mistralai/mistral-small-4-119b-2603`, and `stepfun-ai/step-3.5-flash` from the committed structural catalog; issue #91 records repeated public models.dev, NVIDIA NIM, OpenRouter, and Vercel counts and absence evidence |
+| Preserve strict rejection of unrelated missing and malformed/unknown drift | `packages/ai/test/model-data-validation.test.ts` exercises public `hydrateModelDataStructure`: the exact four withdrawals reconcile, while missing `fireworks/accounts/fireworks/models/glm-5p2` and an `unknown-api` mismatch both fail closed; `model-catalog-retirement` pins this regression in the patch.13 fixture gate |
+| Preserve the unpublished patch.13 identity and Manager Release while refreshing every candidate input | `releases/pi-v0.81.1-patch.13/manifest.json`, fixture gate, candidate report, release notes, package/bootstrap projections, and this traceability record select the same untagged patch.13 candidate with `manager-v3` and the ordered 20-patch series |
 
 ## ModelRegistry release-gate stability (#87)
 
@@ -36,7 +44,7 @@ The minimized diagnosis replaced `pi.dev` with a local catalog delayed by 500 ms
 | --- | --- |
 | Representative valid multiline conformance output passes while a missing or wrong exact 8/8 summary fails | `test/release-smoke-output.test.ps1` executes the release-smoke assertion on native PowerShell; `.github/workflows/ci.yml` runs it on `windows-2025` |
 | Release smoke preserves command failure and displays bounded diagnostic output without array-filter truthiness | `scripts/assert-conformance.ps1` captures the native command status before checking one case-sensitive exact summary line and displays only the final 100 lines; `.github/workflows/release.yml` calls that same script for the Windows x64 payload |
-| Failed public patch.12 remains immutable while the corrected candidate uses a new identity | `README.md` and `releases/pi-v0.81.1-patch.13/RELEASE_NOTES.md` record patch.12 as unpublished after run `30224148376`; package, bootstrap, manifest, fixture gate, fresh candidate report, install examples, and notes select `pi-v0.81.1-patch.13` with `manager-v3` and the unchanged 19-patch series |
+| Failed public patch.12 remains immutable while the corrected candidate uses a new identity | `README.md` and `releases/pi-v0.81.1-patch.13/RELEASE_NOTES.md` record patch.12 as unpublished after run `30224148376`; package, bootstrap, manifest, fixture gate, fresh candidate report, install examples, and notes select `pi-v0.81.1-patch.13` with `manager-v3`. Patch #20 later reconciles issue #91's pre-publication model withdrawals without changing that candidate identity |
 
 ## Installation, update, and compatibility
 
