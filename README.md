@@ -2,11 +2,11 @@
 
 A maintained downstream Pi release that can stop an Agent Thread for durable human input, survive complete process teardown, and continue through an explicit Response, Interruption, Cancellation, resume, or abandonment path.
 
-The packaged release candidate is **`pi-v0.81.1-patch.13`**. It combines:
+The packaged release candidate is **`pi-v0.81.1-patch.14`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 - the twenty ordered downstream patches in [`patches/active`](patches/active); and
-- the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.4`.
+- the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.5`.
 
 The public `pi-v0.81.1-patch.12` tag is an unpublished failed identity from release run `30224148376`. It remains immutable and is never moved, deleted, reused, or rerun; it has no GitHub Release, signature, promotion branch, or Channel sequence 3.
 
@@ -25,13 +25,13 @@ Review [`scripts/bootstrap.sh`](scripts/bootstrap.sh), then choose one explicit 
 **Side-by-side (default):** installs `pi-wait-for-user` and never claims `pi`.
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.13/install.sh | sh
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.14/install.sh | sh
 ```
 
 **Managed Installation:** additionally claims `pi` through the manager-owned `$HOME/.local/bin` entrypoint.
 
 ```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.13/install.sh | sh -s -- --manage-pi
+curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.14/install.sh | sh -s -- --manage-pi
 ```
 
 Use `--bin-dir <path>` to select another launcher directory. The installer never edits shell startup files. If that directory loses PATH resolution, enablement exits nonzero and prints the exact PATH and `hash -r` remediation; rerunning converges safely. An existing Stock Pi is recorded and shadowed, never moved, copied, changed, or deleted. A foreign `pi` or `pi-wait-for-user` launcher is a hard error.
@@ -45,7 +45,7 @@ Existing Legacy Downstream Installations are adopted only when every payload pat
 Download and attest the signed Windows payload before running its embedded PowerShell installer:
 
 ```powershell
-$tag = "pi-v0.81.1-patch.13"
+$tag = "pi-v0.81.1-patch.14"
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
 gh release download $tag --pattern "pi-wait-for-user-windows-$arch.zip"
 gh attestation verify "pi-wait-for-user-windows-$arch.zip" `
@@ -102,7 +102,7 @@ See the [Question Tool guide](packages/question-tool/README.md) for interaction 
 The checksum/attestation-first path verifies the bootstrap before executing it:
 
 ```bash
-tag=pi-v0.81.1-patch.13
+tag=pi-v0.81.1-patch.14
 source=$(gh api "repos/taylorrowser/pi-wait-for-user/commits/$tag" --jq .sha)
 gh release download "$tag" --pattern install.sh --pattern SHA256SUMS
 grep ' install.sh$' SHA256SUMS | shasum -a 256 -c -       # macOS
@@ -142,8 +142,8 @@ Routine release-key rotation/revocation and the public fingerprint are documente
 The source-build path is explicitly **unmanaged and side-by-side**. It requires Node.js 22.19+, Git, and npm:
 
 ```bash
-gh release download pi-v0.81.1-patch.13 --pattern 'pi-wait-for-user-pi-v0.81.1-patch.13.tgz'
-tar -xzf pi-wait-for-user-pi-v0.81.1-patch.13.tgz
+gh release download pi-v0.81.1-patch.14 --pattern 'pi-wait-for-user-pi-v0.81.1-patch.14.tgz'
+tar -xzf pi-wait-for-user-pi-v0.81.1-patch.14.tgz
 node package/scripts/install.mjs install
 ```
 

@@ -1,6 +1,6 @@
 {
 	"name": "@taylorrowser/pi-question-tool",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"description": "A durable Question Tool for the Pi coding agent",
 	"type": "module",
 	"license": "MIT",
