@@ -134,7 +134,7 @@ test("the release gate lists every required fixture category", () => {
   for (const category of [
     "legacy", "markerless", "deferred", "ready", "partial", "complete", "unavailable",
     "incompatible-version", "compaction", "branch", "queue", "abandonment", "rpc", "json",
-    "print", "tui", "question-tool",
+    "print", "tui", "model-catalog-retirement", "question-tool",
   ]) {
     assert.match(result.stdout, new RegExp(`^${category}$`, "m"));
   }

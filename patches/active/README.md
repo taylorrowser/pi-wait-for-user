@@ -13,10 +13,10 @@ ordinary/queued user-input Interruption, branch/compaction preservation,
 non-TUI projection, extension/TUI presentation, extension conformance, the live
 unavailable-resolver fix, the restart-safe reference-presenter fix, explicit
 eager session-header compatibility documentation, the core-owned deferred
-re-entry affordance, the retired NVIDIA, OpenAI, and Vercel AI Gateway
-model-catalog corrections, the supported-platform binary-build boundary, and
-the offline ModelRegistry config-refresh correction for issues #13 through #22,
-#43 through #45, #49, #58, #80, #82, and #87. It adds the
+re-entry affordance, the retired NVIDIA, OpenAI, Fireworks, and Vercel AI
+Gateway model-catalog corrections, the supported-platform binary-build
+boundary, and the offline ModelRegistry config-refresh correction for issues
+#13 through #22, #43 through #45, #49, #58, #80, #82, #87, and #91. It adds the
 versioned tool capability, fail-closed downstream session identity, typed
 live-path resolver failures, persisted deferred-batch marker, neutral
 markerless/deferred/partial/continuation AgentSession snapshot, package-owned

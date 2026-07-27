@@ -5,7 +5,7 @@ A maintained downstream Pi release that can stop an Agent Thread for durable hum
 The packaged release candidate is **`pi-v0.81.1-patch.13`**. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
-- the nineteen ordered downstream patches in [`patches/active`](patches/active); and
+- the twenty ordered downstream patches in [`patches/active`](patches/active); and
 - the independently versioned Question Tool `@taylorrowser/pi-question-tool@0.1.4`.
 
 The public `pi-v0.81.1-patch.12` tag is an unpublished failed identity from release run `30224148376`. It remains immutable and is never moved, deleted, reused, or rerun; it has no GitHub Release, signature, promotion branch, or Channel sequence 3.
