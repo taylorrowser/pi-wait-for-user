@@ -114,6 +114,24 @@ test("the release candidate input verifies every pinned identity without becomin
   );
 });
 
+test("README identifies an unpromoted package release as a candidate", () => {
+  const root = copyReleaseFixture();
+  const channelPath = join(root, "releases", "channel.json");
+  const channel = JSON.parse(readFileSync(channelPath, "utf8"));
+  channel.signed.manifest.releaseId = "previous-stable-release";
+  writeFileSync(channelPath, `${JSON.stringify(channel, null, 2)}\n`);
+
+  const readmePath = join(root, "README.md");
+  const stableIdentity = `The current stable Downstream Release is **[\`${releaseCandidateId}\`](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/${releaseCandidateId})**`;
+  const candidateIdentity = `The packaged release candidate is **\`${releaseCandidateId}\`**`;
+  const readme = readFileSync(readmePath, "utf8").replace(stableIdentity, candidateIdentity);
+  writeFileSync(readmePath, readme);
+
+  const result = verify(root);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("the repository does not carry an independent active release pointer", () => {
   const root = copyReleaseFixture();
 

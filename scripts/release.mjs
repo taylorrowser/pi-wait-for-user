@@ -16,7 +16,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { loadReleaseCandidateInput } from "./lib/release-input.mjs";
-import { createArchiveMetadata } from "./lib/release-metadata.mjs";
+import { createArchiveMetadata, readmeReleaseIdentity } from "./lib/release-metadata.mjs";
 
 const defaultRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const binaryPlatforms = ["darwin-arm64", "linux-arm64", "linux-x64", "windows-arm64", "windows-x64"];
@@ -127,7 +127,7 @@ function verifyRelease(root) {
   expectIncludes(releaseNotes, `# Pi Wait for User · \`${releaseId}\``, "Release notes heading");
   expectIncludes(releaseNotes, `/download/${releaseId}/install.sh`, "Release notes install identity");
   const readme = readFileSync(join(root, "README.md"), "utf8");
-  expectIncludes(readme, `The packaged release candidate is **\`${releaseId}\`**`, "README release candidate identity");
+  expectIncludes(readme, readmeReleaseIdentity(manifest, root), "README release identity");
   expectIncludes(readme, `/download/${releaseId}/install.sh`, "README install identity");
 
   const questionManifestPath = safePath(root, manifest.questionTool.manifestPath);

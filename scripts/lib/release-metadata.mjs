@@ -453,6 +453,18 @@ export function createReceipt(manifest, platform, ownedPath, { existing } = {}) 
   }, "receipt");
 }
 
+export function readmeReleaseIdentity(manifest, root) {
+  const channel = JSON.parse(readFileSync(join(root, "releases", "channel.json"), "utf8"));
+  const selectedReleaseId = expectString(
+    channel?.signed?.manifest?.releaseId,
+    "Release Channel selected release ID",
+    releaseIdPattern,
+  );
+  return selectedReleaseId === manifest.releaseId
+    ? `The current stable Downstream Release is **[\`${manifest.releaseId}\`](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/${manifest.releaseId})**`
+    : `The packaged release candidate is **\`${manifest.releaseId}\`**`;
+}
+
 export function verifyReleaseIdentityProjections(manifest, root) {
   const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const candidateVersion = manifest.releaseId.startsWith("pi-v") ? manifest.releaseId.slice(4) : "";
@@ -484,8 +496,8 @@ export function verifyReleaseIdentityProjections(manifest, root) {
   verifyFile(manifest.releaseNotes, join("releases", manifest.releaseId, "RELEASE_NOTES.md"), "Release documentation");
 
   const readme = readFileSync(join(root, "README.md"), "utf8");
-  if (!readme.includes(`The packaged release candidate is **\`${manifest.releaseId}\`**`)) {
-    fail("README release candidate projection drift");
+  if (!readme.includes(readmeReleaseIdentity(manifest, root))) {
+    fail("README release identity projection drift");
   }
   if (!readme.includes(`/download/${manifest.releaseId}/install.sh`)) fail("README installer projection drift");
   const notes = readFileSync(join(root, "releases", manifest.releaseId, "RELEASE_NOTES.md"), "utf8");
