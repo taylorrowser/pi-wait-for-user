@@ -1,6 +1,6 @@
 # Managed Installation release acceptance
 
-This is the release-level traceability record for GitHub issues #63, #64, #80, #82, and #87 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
+This is the release-level traceability record for GitHub issues #63, #64, #80, #82, #87, and #89 and the accepted [Managed Installation design](../design/managed-installation.md). Observable behavior is tested at the filesystem/CLI, signed-metadata, release-bundle, and workflow boundaries; private helpers are not acceptance seams.
 
 ## Release and bootstrap
 
@@ -29,6 +29,14 @@ This is the release-level traceability record for GitHub issues #63, #64, #80, #
 | Suite/load-sensitive timeout is eliminated without a broader timeout or repository serialization | The patch removes the test-local 60-second allowance and makes `ModelRuntime.reloadConfig()` refresh local/cache/auth state with `allowNetwork: false`; the complete `full-pi-suite` release stage retains its normal parallel execution |
 
 The minimized diagnosis replaced `pi.dev` with a local catalog delayed by 500 ms. Before the fix, that server received one request and public config refresh took 515 ms; after the fix, it received none and refresh took 15 ms while loading the replacement model. A 40-run, four-process focused stress loop passed after the fix. Two separately reset-home complete coding-agent runs each passed 1,711 tests with 48 skips, matching the fresh 12-stage gate. The exact commands and ranked hypotheses are preserved on #87.
+
+## Windows release-smoke output assertion (#89)
+
+| #89 requirement | Automated evidence |
+| --- | --- |
+| Representative valid multiline conformance output passes while a missing or wrong exact 8/8 summary fails | `test/release-smoke-output.test.ps1` executes the release-smoke assertion on native PowerShell; `.github/workflows/ci.yml` runs it on `windows-2025` |
+| Release smoke preserves command failure and displays bounded diagnostic output without array-filter truthiness | `scripts/assert-conformance.ps1` captures the native command status before checking one case-sensitive exact summary line and displays only the final 100 lines; `.github/workflows/release.yml` calls that same script for the Windows x64 payload |
+| Failed public patch.12 remains immutable while the corrected candidate uses a new identity | `README.md` and `releases/pi-v0.81.1-patch.13/RELEASE_NOTES.md` record patch.12 as unpublished after run `30224148376`; package, bootstrap, manifest, fixture gate, fresh candidate report, install examples, and notes select `pi-v0.81.1-patch.13` with `manager-v3` and the unchanged 19-patch series |
 
 ## Installation, update, and compatibility
 

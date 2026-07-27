@@ -52,6 +52,10 @@ jobs:
         with:
           node-version: 22.19.0
 
+      - name: Exercise the native release-smoke output assertion
+        shell: pwsh
+        run: ./test/release-smoke-output.test.ps1
+
       - name: Exercise the native Windows Managed Installation lifecycle
         shell: pwsh
         run: node --test test/managed-windows.test.mjs
