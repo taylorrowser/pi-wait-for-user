@@ -2,7 +2,7 @@
 
 A maintained downstream Pi release that can stop an Agent Thread for durable human input, survive complete process teardown, and continue through an explicit Response, Interruption, Cancellation, resume, or abandonment path.
 
-The packaged release candidate is **`pi-v0.81.1-patch.14`**. It combines:
+The current stable Downstream Release is **[`pi-v0.81.1-patch.14`](https://github.com/taylorrowser/pi-wait-for-user/releases/tag/pi-v0.81.1-patch.14)**. Signed Release Channel sequence `4` selects it with Manager Release `manager-v3`. It combines:
 
 - the exact upstream Pi `v0.81.1` source at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`;
 - the twenty ordered downstream patches in [`patches/active`](patches/active); and
@@ -67,6 +67,24 @@ powershell -ExecutionPolicy Bypass -File .\pi-wait-for-user-download\pi-wait-for
 ```
 
 Use `-BinDir <path>` to select another launcher directory. The installer never changes the user or system PATH. It refuses an unowned extensionless command, `.com`, `.exe`, `.bat`, `.cmd`, or `.ps1` in the selected bin directory and refuses a current PowerShell alias, function, or cmdlet collision. An existing package-manager or version-manager command elsewhere on PATH is recorded as Stock Pi and shadowed only when the managed bin directory already wins resolution. Open a new terminal after PATH changes and rerun enablement to converge safely.
+
+## Update an existing installation
+
+When the manager owns the normal `pi` command, update through the authenticated Release Channel:
+
+```bash
+pi update
+pi managed status
+```
+
+For a side-by-side installation, Stock Pi may still own `pi`. Use the Compatibility Entrypoint instead:
+
+```bash
+pi-wait-for-user update
+pi-wait-for-user managed status
+```
+
+Both forms verify signed trust metadata, the Channel, the Release Manifest, payload identities, smoke behavior, and conformance before atomically selecting a new compatible pair. They never install an Upstream Release directly. If an older installation predates the Managed Dispatcher, rerun the current stable installer for the same side-by-side or managed mode shown above. The installer adopts a Legacy Downstream Installation only when it exactly matches the signed payload; otherwise it installs fresh and leaves the legacy directory untouched with cleanup guidance.
 
 ## Use
 
