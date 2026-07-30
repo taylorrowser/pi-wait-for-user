@@ -1,49 +1,13 @@
 {
-  "name": "@taylorrowser/pi-wait-for-user-release",
-  "version": "0.81.1-patch.14",
+  "name": "@taylorrowser/pi-wait-for-user-source",
+  "version": "0.1.0",
   "private": true,
+  "description": "Source Patches and the independently versioned Question Tool for Pi durable interaction",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
   },
-  "piWaitForUser": {
-    "managerReleaseId": "manager-v3",
-    "compatibleReleaseManifestVersions": [
-      1
-    ]
-  },
-  "files": [
-    "LICENSE",
-    "README.md",
-    "manager",
-    "manager.mjs",
-    "packages/question-tool/extensions",
-    "packages/question-tool/src",
-    "packages/question-tool/package.json",
-    "packages/question-tool/README.md",
-    "patches/active",
-    "releases/README.md",
-    "releases/schemas",
-    "releases/pi-v0.81.1-patch.14",
-    "scripts/bootstrap.sh",
-    "scripts/install-binary.sh",
-    "scripts/install.mjs",
-    "scripts/launch.mjs",
-    "scripts/lib",
-    "scripts/managed-dispatcher.mjs",
-    "scripts/managed-installer.mjs",
-    "scripts/managed-manager.mjs",
-    "scripts/windows-bootstrap.mjs",
-    "scripts/install-windows.ps1",
-    "scripts/package-binaries.mjs",
-    "scripts/pi-patch.mjs",
-    "scripts/release-metadata.mjs",
-    "scripts/release.mjs",
-    "upstream"
-  ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
-    "test:question-tool": "node scripts/test-question-tool.mjs",
-    "typecheck:question-tool": ".work/pi-v0.81.1/node_modules/.bin/tsc -p packages/question-tool/tsconfig.json --noEmit"
+    "test": "node --test test/source-content.test.mjs packages/question-tool/test/contracts.test.mjs packages/question-tool/test/lifecycle.test.mjs"
   }
 }
