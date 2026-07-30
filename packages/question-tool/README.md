@@ -18,31 +18,16 @@ Handler and protocol compatibility is exact. Restoring this package to an unavai
 
 ## Install
 
-The supported release installer builds the exact patched Pi and places this exact Question Tool beside it:
+The package requires the compatible Patch series to be active on PorcuPi's exact Pi Base. Follow the repository's [PorcuPi instructions](../../README.md#use-through-porcupi), then install this directory through Managed Pi's ordinary package lifecycle:
 
-```bash
-curl -fsSL https://github.com/taylorrowser/pi-wait-for-user/releases/download/pi-v0.81.1-patch.8/install.sh | sh
-pi-wait-for-user --version
+```sh
+porcupi install "$PWD/packages/question-tool"
+porcupi list
 ```
 
-The version must be `0.81.1`. The separate `pi-wait-for-user` launcher loads the Question Tool automatically from the precompiled release. Startup identifies the extension as `question-tool.ts`; its model-facing tool name is `question`. The installer does not clone source, require Node/npm/Git, replace an upstream `pi` command, or alter existing Pi settings and sessions. See the repository [installation, verification, rollback, and uninstall guide](../../README.md#fast-install).
-
-The GitHub release also publishes `taylorrowser-pi-question-tool-0.1.5.tgz` as an independently checksummed package artifact. Hosts that already run the exact compatible patch can unpack it and use Pi's normal local-package workflow:
-
-```bash
-mkdir pi-question-tool-0.1.5
-tar -xzf taylorrowser-pi-question-tool-0.1.5.tgz -C pi-question-tool-0.1.5
-pi install "$(pwd)/pi-question-tool-0.1.5/package"
-```
+These arguments are forwarded unchanged to Pi. The package is independently selected: PorcuPi does not bundle it, infer it from Patch selection, or treat it as a privileged dependency. Startup identifies the extension as `question-tool.ts`; its model-facing tool name is `question`.
 
 Unpatched Pi lacks protocol v1; the extension detects that absence and does not register `question`.
-
-For development against a prepared repository workspace, load the source directly without changing settings:
-
-```bash
-.work/pi-v0.81.1/packages/coding-agent/dist/cli.js \
-  -e "$(pwd)/packages/question-tool"
-```
 
 ## Interaction behavior
 
@@ -115,11 +100,10 @@ Opening, reload, resume selection, and tree navigation reconstruct but do not ad
 
 ## Development
 
-After preparing, installing, and building the pinned downstream workspace:
+From the repository root, run the dependency-free contract and lifecycle subset with:
 
-```bash
-npm run typecheck:question-tool
-npm run test:question-tool
+```sh
+npm test
 ```
 
-The Question Tool suite covers contracts, outcome races, in-form editing behavior, process teardown/reopen, Response, Interruption, Cancellation, package discovery, packing, and the active Pi `conformance` command.
+The complete Question Tool suite additionally covers outcome races, in-form editing, process teardown/reopen, Response, Interruption, Cancellation, package discovery, packing, and active Pi conformance. That complete package behavior runs against the composed source through PorcuPi's public-process real-source gate rather than through lifecycle/build machinery in this repository.

@@ -1,42 +1,9 @@
-# Active downstream patches
+# Active Patch source
 
-This directory is the complete ordered delta from the Pi release pinned in
-`upstream/pi.lock.json`. Patch files use zero-padded names and are applied in
-lexicographic order, for example `0001-deferred-entry.patch`. The active release
-manifest pins every filename and SHA-256. Changing an unpublished candidate
-patch requires a refreshed manifest digest and release-candidate report;
-changing a publicly tagged or published patch requires a new release ID.
+This directory contains the 20 declarative Git Patches maintained by `pi-wait-for-user`. The files remain in their established zero-padded lexical order and are compatible with exact Pi Base `v0.81.1` at commit `20be4b18d4c57487f8993d2762bace129f0cf7c6`.
 
-The active series currently contains the durable deferral, Response-resumption,
-atomic whole-batch, idempotent recovery, unavailable recovery/abandonment,
-ordinary/queued user-input Interruption, branch/compaction preservation,
-non-TUI projection, extension/TUI presentation, extension conformance, the live
-unavailable-resolver fix, the restart-safe reference-presenter fix, explicit
-eager session-header compatibility documentation, the core-owned deferred
-re-entry affordance, the retired NVIDIA, OpenAI, Fireworks, and Vercel AI
-Gateway model-catalog corrections, the supported-platform binary-build
-boundary, and the offline ModelRegistry config-refresh correction for issues
-#13 through #22, #43 through #45, #49, #58, #80, #82, #87, and #91. It adds the
-versioned tool capability, fail-closed downstream session identity, typed
-live-path resolver failures, persisted deferred-batch marker, neutral
-markerless/deferred/partial/continuation AgentSession snapshot, package-owned
-typed Response, Interruption, and Cancellation paths, argument-free
-`resumeDeferred()` and `abandonDeferred()`, exact capability discovery,
-privacy-safe compatibility reasons, complete-batch preflight, markerless
-recovery, malformed-history reporting, source-ordered append-by-append
-advancement, core fallback abandonment, pre-marker queue draining, post-marker
-queue rejection, active-branch lifecycle reconstruction, session-local request
-identity reuse, exact boundary copying, unresolved-owner compaction pinning,
-complete deferred-state events, RPC inspection/advancement/error contracts,
-privacy-safe JSON/print Waiting State output, extension-facing neutral snapshots
-and scheduled lifecycle operations, package-owned deferred presenters, a
-generic interactive deferred inspector, fail-fast capability registration,
-public resolver contract types, a minimal package-owned example with restart
-reconstruction coverage, an ordinary-session header regression fixture,
-core-routed `/deferred` and `/deferred inspect` presentation, privacy-safe
-package summaries, comprehensive Pi-style guidance, and the offline `pi
-conformance` command for Pi v0.81.1.
+The root [`porcupi.json`](../../porcupi.json) supplies only display text and exact Pi Base compatibility. [PorcuPi](https://github.com/taylorrowser/PorcuPi) discovers the regular Patch files in place, binds their exact source commit/path/SHA-256 identities, orders selected Patches by canonical Source Repository and source-relative path, and owns preflight, composition, activation, verification, rollback, leases, cleanup, and uninstall. This repository does not apply, build, publish, activate, or update the series.
 
-The durable Question Tool is intentionally not another Pi patch. It is the
-independently versioned package under [`packages/question-tool`](../../packages/question-tool),
-loaded on top of this complete active series.
+The series adds durable deferral, Response resumption, atomic whole-batch behavior, idempotent recovery, unavailable recovery/abandonment, user-input Interruption, branch/compaction preservation, headless and extension/TUI projections, extension conformance, the core deferred-work re-entry affordance, and the model/build corrections required by the supported Pi Base.
+
+The Question Tool is not a Patch or Patch dependency. It remains the independently versioned ordinary Pi package under [`packages/question-tool`](../../packages/question-tool) and must be installed through Pi's package lifecycle.

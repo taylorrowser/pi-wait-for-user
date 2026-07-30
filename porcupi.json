@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "patches": [
+    {
+      "path": "patches/active/0001-feat-add-durable-single-tool-deferral.patch",
+      "displayName": "Durable single-tool deferral",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0002-feat-respond-and-resume-deferred-tool-call.patch",
+      "displayName": "Respond to and resume deferred tool calls",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0003-feat-hold-and-resume-tool-batches-atomically.patch",
+      "displayName": "Atomic deferred tool batches",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0004-feat-interrupt-waiting-state-with-user-input.patch",
+      "displayName": "Interrupt Waiting State with user input",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0005-feat-recover-deferred-batches-idempotently.patch",
+      "displayName": "Idempotent deferred-batch recovery",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0006-feat-preserve-deferred-lifecycle-through-branches.patch",
+      "displayName": "Preserve deferred lifecycle through branches",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0007-feat-restore-or-abandon-unavailable-deferred-batches.patch",
+      "displayName": "Restore or abandon unavailable deferred batches",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0008-feat-expose-deferred-work-in-headless-modes.patch",
+      "displayName": "Expose deferred work in headless modes",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0009-feat-expose-deferred-work-to-extensions-and-tui.patch",
+      "displayName": "Expose deferred work to extensions and TUI",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0010-feat-add-deferred-extension-conformance.patch",
+      "displayName": "Deferred extension conformance",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0011-fix-fail-closed-on-live-unavailable-resolver.patch",
+      "displayName": "Fail closed on unavailable live resolver",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0012-fix-reconstruct-example-presenter.patch",
+      "displayName": "Reconstruct the example presenter",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0013-doc-eager-downstream-session-header.patch",
+      "displayName": "Document eager downstream session headers",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0014-feat-add-core-deferred-reentry-affordance.patch",
+      "displayName": "Core deferred-work re-entry affordance",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0015-fix-remove-retired-nvidia-model.patch",
+      "displayName": "Remove retired NVIDIA model",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0016-fix-remove-retired-openai-models.patch",
+      "displayName": "Remove retired OpenAI models",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0017-build-only-supported-release-platforms.patch",
+      "displayName": "Build only supported release platforms",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0018-fix-remove-withdrawn-vercel-models.patch",
+      "displayName": "Remove withdrawn Vercel models",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0019-fix-keep-model-config-refresh-offline.patch",
+      "displayName": "Keep model configuration refresh offline",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    },
+    {
+      "path": "patches/active/0020-fix-remove-newly-withdrawn-models.patch",
+      "displayName": "Remove newly withdrawn models",
+      "supportedPiBaseVersions": ["v0.81.1"],
+      "supportedPiBaseCommits": ["20be4b18d4c57487f8993d2762bace129f0cf7c6"]
+    }
+  ]
+}
